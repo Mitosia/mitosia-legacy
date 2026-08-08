@@ -1,3 +1,7 @@
 ignoredBuiltDependencies:
   - sharp
   - unrs-resolver
+
+# Refuse to install package versions published less than 24h ago —
+# the window in which most compromised npm releases are detected and unpublished.
+minimumReleaseAge: 1440
