@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Self-hosted deploys (Dokploy) run the standalone server in Docker
+  output: "standalone",
 };
 
 export default nextConfig;
