@@ -21,5 +21,16 @@ export function proxy(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/sign-in", "/sign-up"],
+  matcher: [
+    "/accept-invitation/:path*",
+    "/brands/:path*",
+    "/campaigns/:path*",
+    "/clients/:path*",
+    "/dashboard/:path*",
+    "/onboarding",
+    "/projects/:path*",
+    "/settings/:path*",
+    "/sign-in",
+    "/sign-up",
+  ],
 };

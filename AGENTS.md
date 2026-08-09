@@ -35,6 +35,14 @@ Read [docs/tech-stack.md](docs/tech-stack.md) (stack decisions and rationale) an
 - Dev server runs on port 3001 (`.claude/launch.json`); `BETTER_AUTH_URL` must match the served origin or logins fail origin checks.
 - `.env` is gitignored; update `.env.example` whenever env vars change.
 
+## Tenancy and RLS (load-bearing security rules)
+
+- Tenant-owned tables (anything with `organization_id`) get `ENABLE` + `FORCE ROW LEVEL SECURITY` and an org-isolation policy **in the same migration that creates them**, and an entry in `tests/rls-isolation.test.ts`.
+- App code touches tenant tables **only** inside `withOrgScope()` (`lib/db/tenant.ts`), with the org id taken from `requireOrg()` — never from user input.
+- The app's `DATABASE_URL` role must **never** be a superuser or table owner: superusers bypass RLS silently, and the Docker image's `POSTGRES_USER` is a superuser. The app connects as `mitosia_app`; `MIGRATE_DATABASE_URL` carries the owner connection used only by drizzle-kit and the container entrypoint.
+- Foreign-key checks do not consult RLS. Before inserting a child row, re-read the parent inside the org scope (see `assertVisible` in `lib/actions/hierarchy.ts`) so a cross-tenant parent id can never be attached.
+- Tests: `TEST_DATABASE_URL` must point at a disposable database (the suite wipes it); run with `pnpm test`.
+
 ## Conventions
 
 - The auth schema is generated: `pnpm db:auth:generate` (Better Auth CLI). Never hand-edit `lib/db/schema/auth.ts`.
