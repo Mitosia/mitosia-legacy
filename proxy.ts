@@ -13,10 +13,10 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/sign-in", request.url));
   }
 
-  if (sessionCookie && AUTH_PAGES.has(pathname)) {
-    return NextResponse.redirect(new URL("/dashboard", request.url));
-  }
-
+  // Deliberately no cookie→dashboard bounce for auth pages: a stale cookie
+  // (present in the browser, no session row behind it) would loop —
+  // /dashboard's server check sends the user to /sign-in, the bounce sends
+  // them back. Signed-in visitors to /sign-in simply see the form.
   return NextResponse.next();
 }
 
