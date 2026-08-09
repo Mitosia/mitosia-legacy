@@ -44,10 +44,14 @@ export function AppSidebar({
 }) {
   return (
     <Sidebar collapsible="icon" {...props}>
-      <SidebarHeader>
+      {/* SidebarHeader and SidebarContent ship with [--radius:var(--radius-xl)],
+          rounding their controls one notch more than the footer. Reset both to
+          the base radius so the whole sidebar — org switcher, nav items, and
+          profile — shares one consistent corner radius. */}
+      <SidebarHeader className="[--radius:0.625rem]">
         <OrgSwitcher />
       </SidebarHeader>
-      <SidebarContent>
+      <SidebarContent className="[--radius:0.625rem]">
         <NavMain items={NAV_ITEMS} />
       </SidebarContent>
       <SidebarFooter>
