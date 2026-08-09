@@ -58,7 +58,11 @@ export function SourceUploader({ projectId }: { projectId: string }) {
         note: "Video or audio, up to 20 GB per file. Uploads can be paused and resumed.",
         proudlyDisplayPoweredByUppy: false,
         target,
-        theme: "auto",
+        // The app themes via a .dark ancestor class, not the OS setting —
+        // Uppy's "auto" would follow the OS and mismatch the page.
+        theme: document.documentElement.classList.contains("dark")
+          ? "dark"
+          : "light",
         width: "100%",
       })
       .use(AwsS3, {

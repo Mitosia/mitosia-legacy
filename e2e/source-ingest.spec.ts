@@ -10,7 +10,9 @@ import { createAccountWithOrg } from "./support/auth";
 // scrubbing. Requires docker compose services (Postgres + MinIO) and a
 // local ffmpeg, same as `pnpm dev`.
 
-const FIXTURE_DIR = join(import.meta.dirname, ".fixtures");
+// Relative to the repo root (playwright runs from it); import.meta/__dirname
+// are both unavailable in Playwright's CommonJS transpilation of specs.
+const FIXTURE_DIR = join(process.cwd(), "e2e", ".fixtures");
 const FIXTURE = join(FIXTURE_DIR, "tiny-source.mp4");
 const FIXTURE_SECONDS = 4;
 
