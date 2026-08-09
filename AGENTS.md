@@ -12,6 +12,13 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 
 Read [docs/tech-stack.md](docs/tech-stack.md) (stack decisions and rationale) and [docs/sprint-plan.md](docs/sprint-plan.md) (build sequence) before architectural work. Record new durable decisions in this file.
 
+## Git workflow
+
+- **Never commit or push directly to `main`.** All work lands through a pull request: branch → commit → push → open PR → CI green → merge. This holds for docs and one-line fixes too.
+- Branch names: `feat/…`, `fix/…`, `chore/…`, `docs/…`.
+- CI (lint, typecheck, build) must pass before merge. Merging to `main` deploys to staging, so a red build is a broken staging environment.
+- `production` is promoted only by fast-forwarding from `main` — never a direct commit, never a PR target for feature work.
+
 ## Environments and deployment
 
 - `main` = staging → auto-deploys to https://staging.mitosia.cloud (Dokploy, Dockerfile build on the VPS).
