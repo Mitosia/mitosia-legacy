@@ -22,7 +22,7 @@ env:
   STORAGE_REGION: auto
   STORAGE_ACCESS_KEY_ID: ci-storage-user
   STORAGE_SECRET_ACCESS_KEY: ci-storage-secret
-  STORAGE_BUCKET: ci
+  STORAGE_BUCKET: ci-media
   STORAGE_FORCE_PATH_STYLE: "true"
 
 jobs:
@@ -121,7 +121,7 @@ jobs:
             sleep 1
           done
           docker run --rm --network host --entrypoint /bin/sh minio/mc -c \
-            "mc alias set ci http://localhost:55490 ci-storage-user ci-storage-secret && mc mb --ignore-existing ci/ci"
+            "mc alias set ci http://localhost:55490 ci-storage-user ci-storage-secret && mc mb --ignore-existing ci/ci-media"
 
       - name: Apply migrations
         run: pnpm db:migrate
