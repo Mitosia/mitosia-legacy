@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Google_Sans, Google_Sans_Code } from "next/font/google";
 import "./globals.css";
 import { DirectionProvider } from "@/components/ui/direction";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
 const googleSans = Google_Sans({
@@ -32,7 +33,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       lang="en"
     >
       <body className="flex min-h-full flex-col">
-        <DirectionProvider>{children}</DirectionProvider>
+        <DirectionProvider>
+          <TooltipProvider>{children}</TooltipProvider>
+        </DirectionProvider>
       </body>
     </html>
   );

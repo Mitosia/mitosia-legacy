@@ -43,6 +43,12 @@ Read [docs/tech-stack.md](docs/tech-stack.md) (stack decisions and rationale) an
 - Foreign-key checks do not consult RLS. Before inserting a child row, re-read the parent inside the org scope (see `assertVisible` in `lib/actions/hierarchy.ts`) so a cross-tenant parent id can never be attached.
 - Tests: `TEST_DATABASE_URL` must point at a disposable database (the suite wipes it); run with `pnpm test`.
 
+## UI (hard rule)
+
+- **Never build UI components from scratch.** Before writing any UI, search the shadcn registry for an official component or block that fits (`pnpm exec shadcn add <name>`; blocks like `sidebar-07`, login/dashboard blocks, etc.) and adapt it. Composing registry primitives into domain components is fine; hand-rolling layout/navigation/form primitives that the registry already provides is not.
+- The only exception is genuinely novel domain UI with no registry equivalent (e.g. the campaign canvas, transcript editor) — and even those must be built out of registry primitives wherever possible. Note the exception in the PR description when it applies.
+- This registry uses the Base UI variant: composition is via the `render` prop, not `asChild`. Icons come from `@hugeicons/core-free-icons` (ESM-only — check names with an ESM import, not `require`).
+
 ## Conventions
 
 - The auth schema is generated: `pnpm db:auth:generate` (Better Auth CLI). Never hand-edit `lib/db/schema/auth.ts`.
