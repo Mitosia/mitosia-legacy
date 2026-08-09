@@ -16,10 +16,12 @@ env:
   BETTER_AUTH_URL: http://localhost:3000
   # Disposable database for the RLS isolation suite (wiped every run).
   TEST_DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+  # Placeholders for the checks job; the e2e job runs a real MinIO on this
+  # endpoint with these exact credentials (MinIO needs a secret ≥8 chars).
   STORAGE_ENDPOINT: http://localhost:55490
   STORAGE_REGION: auto
   STORAGE_ACCESS_KEY_ID: ci
-  STORAGE_SECRET_ACCESS_KEY: ci
+  STORAGE_SECRET_ACCESS_KEY: ci-storage-secret
   STORAGE_BUCKET: ci
   STORAGE_FORCE_PATH_STYLE: "true"
 
@@ -102,6 +104,24 @@ jobs:
 
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps chromium
+
+      # The ingest e2e generates its fixture and runs the real pipeline.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # Service containers cannot set a command, and MinIO's image needs
+      # one — so start it directly on the runner's Docker.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 55490:9000 \
+            -e MINIO_ROOT_USER=ci -e MINIO_ROOT_PASSWORD=ci-storage-secret \
+            minio/minio server /data
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:55490/minio/health/live && break
+            sleep 1
+          done
+          docker run --rm --network host --entrypoint /bin/sh minio/mc -c \
+            "mc alias set ci http://localhost:55490 ci ci-storage-secret && mc mb --ignore-existing ci/ci"
 
       - name: Apply migrations
         run: pnpm db:migrate
