@@ -19,6 +19,11 @@ ENV DATABASE_URL=postgres://build:build@localhost:5432/build \
     BETTER_AUTH_URL=http://localhost:3000 \
     NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
+# Self-contained migration runner for the release phase (see docker-entrypoint.sh).
+# Bundled so the runtime image needs no node_modules of its own.
+RUN pnpm exec esbuild scripts/migrate.ts \
+    --bundle --platform=node --format=cjs --target=node24 \
+    --external:pg-native --outfile=migrate.cjs
 
 FROM node:24-alpine AS runner
 WORKDIR /app
@@ -28,6 +33,9 @@ ENV NODE_ENV=production \
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
 COPY --from=build /app/public ./public
+COPY --from=build /app/migrate.cjs ./migrate.cjs
+COPY --from=build /app/drizzle ./drizzle
+COPY --chmod=755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 USER node
 EXPOSE 3000
-CMD ["node", "server.js"]
+ENTRYPOINT ["docker-entrypoint.sh"]

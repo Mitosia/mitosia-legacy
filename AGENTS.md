@@ -31,6 +31,7 @@ Read [docs/tech-stack.md](docs/tech-stack.md) (stack decisions and rationale) an
 ## Conventions
 
 - The auth schema is generated: `pnpm db:auth:generate` (Better Auth CLI). Never hand-edit `lib/db/schema/auth.ts`.
-- Schema changes ship as migrations: `pnpm db:generate` then `pnpm db:migrate`. No `drizzle-kit push` against shared databases.
+- Schema changes ship as migrations: `pnpm db:generate` to author them, `pnpm db:migrate` to apply locally. No `drizzle-kit push` against shared databases.
+- Deployed environments migrate themselves: `docker-entrypoint.sh` runs the bundled `scripts/migrate.ts` (advisory-locked, idempotent) before starting the server, and a failed migration aborts the container so the deploy fails loudly. Never run migrations during `docker build` — the image must stay environment-agnostic and build-time has no real database.
 - `components/ui/**` is vendored shadcn registry output — lint-exempt (see biome.jsonc), regenerated via the shadcn CLI, not hand-maintained.
 - `proxy.ts` performs optimistic redirects only. Authorization lives in server components and route handlers, never in the proxy.
