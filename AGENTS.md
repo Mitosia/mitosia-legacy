@@ -18,6 +18,7 @@ Read [docs/tech-stack.md](docs/tech-stack.md) (stack decisions and rationale) an
 - `production` = prod → https://app.mitosia.com. Promote by fast-forwarding `production` to `main` — never commit directly to `production`.
 - The `mitosia.com` apex is reserved for the future marketing site; the product lives at `app.mitosia.com`. `mitosia.com` DNS goes behind Cloudflare (CDN/WAF) when prod ships; `mitosia.cloud` stays on plain Hostinger DNS deliberately (simple Let's Encrypt issuance).
 - `mitosia.cloud` is the infra domain: Dokploy panel at dokploy.mitosia.cloud; wildcard `*.mitosia.cloud` already points at the VPS, so new services need zero DNS work.
+- Dokploy layout: one project `mitosia` containing two environments — `staging` (app + its own Postgres service, tracks `main`) and `production` (app only, tracks `production` branch, database on Neon). Services are isolated per environment; never point a staging service at production data.
 - VPS: Hostinger KVM 8 at 72.61.169.154, SSH alias `mitosia-vps` (key auth). ufw allows only 22 (rate-limited), 80, 443. The Dokploy panel's port 3000 must stay unpublished — Docker-published ports bypass ufw, so re-verify after any Dokploy self-update.
 - Secrets are per-environment: separate `BETTER_AUTH_SECRET` and `DATABASE_URL` for dev/staging/prod, injected as runtime env in Dokploy — never baked into the Docker image or committed. Staging DB: Dokploy-provisioned Postgres on the VPS. Production DB: Neon (managed, PITR).
 
