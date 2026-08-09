@@ -1,0 +1,31 @@
+import { expect, type Page } from "@playwright/test";
+
+const ONBOARDING_URL = /\/onboarding/;
+const DASHBOARD_URL = /\/dashboard/;
+
+let accountCounter = 0;
+
+// Each call provisions a brand-new account + organization via the real
+// sign-up → onboarding flow, then lands on /dashboard. Unique emails keep
+// tests isolated and deterministic — no shared state, no sign-in branching.
+export async function createAccountWithOrg(page: Page, label: string) {
+  accountCounter += 1;
+  const unique = `${Date.now()}-${accountCounter}`;
+  const email = `e2e-${label}-${unique}@mitosia.test`;
+  const password = "e2e-smoke-password-1";
+
+  await page.goto("/sign-up");
+  await page.getByLabel("Name").fill(`E2E ${label}`);
+  await page.getByLabel("Email").fill(email);
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Create account" }).click();
+
+  await page.waitForURL(ONBOARDING_URL, { timeout: 15_000 });
+
+  await page.getByLabel("Organization name").fill(`Org ${unique}`);
+  await page.getByRole("button", { name: "Create organization" }).click();
+  await page.waitForURL(DASHBOARD_URL, { timeout: 15_000 });
+
+  await expect(page).toHaveURL(DASHBOARD_URL);
+  return { email, org: `Org ${unique}` };
+}

@@ -58,3 +58,47 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+  e2e:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_USER: ci
+        options: >-
+          --health-cmd "pg_isready -U ci -d ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+      MIGRATE_DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+      BETTER_AUTH_SECRET: ci-only-placeholder-secret-not-used-anywhere
+      # Must match the e2e dev server port or Better Auth rejects auth as cross-origin
+      BETTER_AUTH_URL: http://localhost:3001
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Apply migrations
+        run: pnpm db:migrate
+
+      - name: Run end-to-end tests
+        run: pnpm e2e
