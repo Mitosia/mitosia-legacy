@@ -55,8 +55,10 @@ export function NavUser({ user }: { user: { email: string; name: string } }) {
               />
             }
           >
-            <Avatar className="size-8">
-              <AvatarFallback>{initialsOf(user.name)}</AvatarFallback>
+            <Avatar className="size-8 rounded-lg after:rounded-lg">
+              <AvatarFallback className="rounded-lg">
+                {initialsOf(user.name)}
+              </AvatarFallback>
             </Avatar>
             <div className="grid flex-1 text-left text-sm leading-tight">
               <span className="truncate font-medium">{user.name}</span>
@@ -77,8 +79,10 @@ export function NavUser({ user }: { user: { email: string; name: string } }) {
             <DropdownMenuGroup>
               <DropdownMenuLabel className="p-0 font-normal">
                 <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
-                  <Avatar className="size-8">
-                    <AvatarFallback>{initialsOf(user.name)}</AvatarFallback>
+                  <Avatar className="size-8 rounded-lg after:rounded-lg">
+                    <AvatarFallback className="rounded-lg">
+                      {initialsOf(user.name)}
+                    </AvatarFallback>
                   </Avatar>
                   <div className="grid flex-1 text-left text-sm leading-tight">
                     <span className="truncate font-medium">{user.name}</span>
