@@ -12,6 +12,7 @@ import { useCallback } from "react";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -84,20 +85,22 @@ export function OrgSwitcher() {
             side={isMobile ? "bottom" : "right"}
             sideOffset={4}
           >
-            <DropdownMenuLabel className="text-muted-foreground text-xs">
-              Organizations
-            </DropdownMenuLabel>
-            {(organizations ?? []).map((organization) => (
-              <DropdownMenuItem
-                className="gap-2 p-2"
-                data-org-id={organization.id}
-                key={organization.id}
-                onClick={handleSelect}
-              >
-                {organization.name}
-                {organization.id === activeOrganization?.id ? " ✓" : ""}
-              </DropdownMenuItem>
-            ))}
+            <DropdownMenuGroup>
+              <DropdownMenuLabel className="text-muted-foreground text-xs">
+                Organizations
+              </DropdownMenuLabel>
+              {(organizations ?? []).map((organization) => (
+                <DropdownMenuItem
+                  className="gap-2 p-2"
+                  data-org-id={organization.id}
+                  key={organization.id}
+                  onClick={handleSelect}
+                >
+                  {organization.name}
+                  {organization.id === activeOrganization?.id ? " ✓" : ""}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuGroup>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="gap-2 p-2"

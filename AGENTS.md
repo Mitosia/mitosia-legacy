@@ -46,6 +46,8 @@ Read [docs/tech-stack.md](docs/tech-stack.md) (stack decisions and rationale) an
 ## UI (hard rule)
 
 - **Never build UI components from scratch.** Before writing any UI, search the shadcn registry for an official component or block that fits (`pnpm exec shadcn add <name>`; blocks like `sidebar-07`, login/dashboard blocks, etc.) and adapt it. Composing registry primitives into domain components is fine; hand-rolling layout/navigation/form primitives that the registry already provides is not.
+- **When adapting a registry block, keep its structural wrappers.** Base UI parts are context-coupled: `Menu.GroupLabel`/`DropdownMenuLabel` must stay inside a `Menu.Group`/`DropdownMenuGroup`, etc. Dropping a wrapper compiles fine and then crashes at runtime when the menu opens (e.g. "MenuGroupContext is missing"). This is exactly why the registry-first rule exists.
+- **Interactive UI must be exercised by an e2e test.** Any menu, dialog, popover, or dropdown that can be opened gets a Playwright test in `e2e/` that opens it and asserts no `pageerror`. A visual/manual sweep is not sufficient — Base UI context crashes only fire on interaction. Run with `pnpm e2e` (dev server on 3001; `BETTER_AUTH_URL` must match that origin).
 - The only exception is genuinely novel domain UI with no registry equivalent (e.g. the campaign canvas, transcript editor) — and even those must be built out of registry primitives wherever possible. Note the exception in the PR description when it applies.
 - This registry uses the Base UI variant: composition is via the `render` prop, not `asChild`. Icons come from `@hugeicons/core-free-icons` (ESM-only — check names with an ESM import, not `require`).
 
