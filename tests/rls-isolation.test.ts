@@ -196,7 +196,7 @@ describe("cross-tenant isolation (RLS)", () => {
     );
 
     expect(error).not.toBeNull();
-    const message = `${error?.message} ${error?.cause?.message ?? ""}`;
+    const message = `${error?.message} ${error?.cause?.message}`;
     expect(RLS_VIOLATION.test(message)).toBe(true);
   });
 
