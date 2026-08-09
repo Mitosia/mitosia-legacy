@@ -8,6 +8,20 @@
       "when": 1786187235555,
       "tag": "0000_init-auth",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1786271161544,
+      "tag": "0001_s1-tenancy",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786271162230,
+      "tag": "0002_rls-policies",
+      "breakpoints": true
     }
   ]
 }

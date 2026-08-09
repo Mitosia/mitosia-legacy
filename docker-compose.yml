@@ -16,6 +16,8 @@ services:
       # Postgres 18+ expects a single mount at /var/lib/postgresql
       # (PGDATA moved to a versioned subdirectory)
       - postgres-data:/var/lib/postgresql
+      # Creates the non-superuser app role on first boot (RLS enforcement)
+      - ./docker/dev-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mitosia -d mitosia"]
       interval: 5s

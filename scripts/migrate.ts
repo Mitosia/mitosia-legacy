@@ -11,10 +11,15 @@ import { Pool } from "pg";
 const MIGRATION_LOCK_ID = 727_314_159;
 
 async function main() {
-  const connectionString = process.env.DATABASE_URL;
+  // Prefer the owner connection: the runtime DATABASE_URL role is
+  // deliberately unprivileged (no DDL) so that RLS applies to the app.
+  const connectionString =
+    process.env.MIGRATE_DATABASE_URL ?? process.env.DATABASE_URL;
 
   if (!connectionString) {
-    throw new Error("DATABASE_URL is required to run migrations");
+    throw new Error(
+      "MIGRATE_DATABASE_URL or DATABASE_URL is required to run migrations"
+    );
   }
 
   const pool = new Pool({ connectionString });
