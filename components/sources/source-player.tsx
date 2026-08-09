@@ -51,6 +51,16 @@ export function SourcePlayer({
 
     if (Hls.isSupported()) {
       const hls = new Hls();
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) {
+          // Surfaced in the console (and collected by e2e) — playback
+          // failures must be diagnosable from logs alone.
+          console.error(
+            `[hls] fatal ${data.type}: ${data.details}`,
+            data.response?.code ?? ""
+          );
+        }
+      });
       hls.loadSource(hlsUrl);
       hls.attachMedia(video);
       return () => hls.destroy();

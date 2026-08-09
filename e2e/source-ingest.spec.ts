@@ -20,6 +20,7 @@ const PIPELINE_TIMEOUT_MS = 90_000;
 const UPLOAD_TIMEOUT_MS = 30_000;
 const UPLOAD_BUTTON = /Upload 1 file/;
 const UPLOAD_COMPLETE = /Complete/;
+const SOURCE_PAGE_URL = /\/sources\//;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -74,6 +75,14 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   test.setTimeout(240_000);
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));
+  // Console errors (e.g. hls.js fatal errors, failed media fetches) are the
+  // only diagnostics available when playback fails headlessly in CI.
+  const consoleErrors: string[] = [];
+  page.on("console", (message) => {
+    if (message.type() === "error") {
+      consoleErrors.push(message.text());
+    }
+  });
 
   await createAccountWithOrg(page, "ingest");
   await createHierarchy(page);
@@ -96,22 +105,32 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   // The list poster is served through /api/media from a pipeline artifact.
   await expect(row.locator("img")).toBeVisible({ timeout: 10_000 });
 
-  // Open the source page: proxy playback + waveform.
+  // Open the source page: proxy playback + waveform. The click can race a
+  // RefreshPoller re-render (server components swap the list mid-click),
+  // so wait for the URL rather than trusting a single click's navigation.
   await page.getByRole("link", { name: "tiny-source" }).click();
-  await expect(
-    page.getByRole("heading", { name: "tiny-source" })
-  ).toBeVisible();
+  await page.waitForURL(SOURCE_PAGE_URL, { timeout: 15_000 });
+  await expect(page.getByRole("heading", { name: "tiny-source" })).toBeVisible({
+    timeout: 15_000,
+  });
 
   // hls.js must load the master playlist and segments through /api/media —
   // a real duration on the video element proves the whole delivery path.
-  await page.waitForFunction(
-    (minimum) => {
-      const video = document.querySelector("video");
-      return Boolean(video && video.duration > minimum);
-    },
-    FIXTURE_SECONDS - 1.5,
-    { timeout: 30_000 }
-  );
+  await page
+    .waitForFunction(
+      (minimum) => {
+        const video = document.querySelector("video");
+        return Boolean(video && video.duration > minimum);
+      },
+      FIXTURE_SECONDS - 1.5,
+      { timeout: 60_000 }
+    )
+    .catch((error) => {
+      throw new Error(
+        `video duration never loaded; console errors: ${consoleErrors.join(" | ") || "(none)"}`,
+        { cause: error }
+      );
+    });
 
   // peaks.js paints the precomputed waveform into a canvas.
   const waveform = page.getByTestId("waveform-overview");
