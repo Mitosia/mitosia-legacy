@@ -2,7 +2,7 @@ import { APIError } from "better-auth";
 import { headers } from "next/headers";
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import {
   Card,
   CardContent,
@@ -57,9 +57,12 @@ export default async function AcceptInvitationPage(
             Make sure you are signed in with the same email address the
             invitation was sent to.
           </p>
-          <Button render={<Link href="/dashboard" />} variant="outline">
+          <Link
+            className={buttonVariants({ variant: "outline" })}
+            href="/dashboard"
+          >
             Back to dashboard
-          </Button>
+          </Link>
         </CardContent>
       </Card>
     </div>

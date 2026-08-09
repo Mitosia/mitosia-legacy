@@ -101,6 +101,7 @@ export function OrgSwitcher() {
             <DropdownMenuSeparator />
             <DropdownMenuItem
               className="gap-2 p-2"
+              nativeButton={false}
               render={<Link href="/onboarding" />}
             >
               <HugeiconsIcon icon={PlusSignIcon} strokeWidth={2} />
