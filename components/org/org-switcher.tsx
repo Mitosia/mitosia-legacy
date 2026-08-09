@@ -16,6 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
+  DropdownMenuShortcut,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
@@ -29,6 +30,9 @@ import {
   useActiveOrganization,
   useListOrganizations,
 } from "@/lib/auth-client";
+
+// ⌘1..⌘9 shortcuts are shown only for the first nine organizations.
+const MAX_SHORTCUTS = 9;
 
 export function OrgSwitcher() {
   const { isMobile } = useSidebar();
@@ -67,21 +71,23 @@ export function OrgSwitcher() {
                 strokeWidth={2}
               />
             </div>
-            <div className="grid flex-1 text-left text-sm leading-tight">
+            <div className="grid flex-1 text-start text-sm leading-tight">
               <span className="truncate font-medium">
                 {activeOrganization?.name ?? "Select organization"}
               </span>
-              <span className="truncate text-xs">Organization</span>
+              <span className="truncate text-muted-foreground text-xs">
+                Organization
+              </span>
             </div>
             <HugeiconsIcon
-              className="ml-auto"
+              className="ms-auto"
               icon={UnfoldMoreIcon}
               strokeWidth={2}
             />
           </DropdownMenuTrigger>
           <DropdownMenuContent
             align="start"
-            className="w-(--anchor-width) min-w-56 rounded-lg"
+            className="w-(--anchor-width) min-w-60"
             side={isMobile ? "bottom" : "right"}
             sideOffset={4}
           >
@@ -89,27 +95,46 @@ export function OrgSwitcher() {
               <DropdownMenuLabel className="text-muted-foreground text-xs">
                 Organizations
               </DropdownMenuLabel>
-              {(organizations ?? []).map((organization) => (
+              {(organizations ?? []).map((organization, index) => (
                 <DropdownMenuItem
                   className="gap-2 p-2"
                   data-org-id={organization.id}
                   key={organization.id}
                   onClick={handleSelect}
                 >
-                  {organization.name}
-                  {organization.id === activeOrganization?.id ? " ✓" : ""}
+                  <div className="flex size-6 items-center justify-center rounded-md border">
+                    <HugeiconsIcon
+                      className="size-3.5 shrink-0"
+                      icon={Building01Icon}
+                      strokeWidth={2}
+                    />
+                  </div>
+                  <span className="truncate">{organization.name}</span>
+                  {index < MAX_SHORTCUTS ? (
+                    <DropdownMenuShortcut>⌘{index + 1}</DropdownMenuShortcut>
+                  ) : null}
                 </DropdownMenuItem>
               ))}
             </DropdownMenuGroup>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              className="gap-2 p-2"
-              nativeButton={false}
-              render={<Link href="/onboarding" />}
-            >
-              <HugeiconsIcon icon={PlusSignIcon} strokeWidth={2} />
-              New organization
-            </DropdownMenuItem>
+            <DropdownMenuGroup>
+              <DropdownMenuItem
+                className="gap-2 p-2"
+                nativeButton={false}
+                render={<Link href="/onboarding" />}
+              >
+                <div className="flex size-6 items-center justify-center rounded-md border bg-transparent">
+                  <HugeiconsIcon
+                    className="size-4"
+                    icon={PlusSignIcon}
+                    strokeWidth={2}
+                  />
+                </div>
+                <div className="font-medium text-muted-foreground">
+                  New organization
+                </div>
+              </DropdownMenuItem>
+            </DropdownMenuGroup>
           </DropdownMenuContent>
         </DropdownMenu>
       </SidebarMenuItem>
