@@ -32,8 +32,17 @@ Read [docs/tech-stack.md](docs/tech-stack.md) (stack decisions and rationale) an
 ## Local development
 
 - Dev Postgres: `docker compose up -d`, host port **55433**. Do not "simplify" this to 5432/5433: 5432 is a native Homebrew Postgres, and the IPv4 side of 5433 belongs to a Podman VM hosting Postgres for **kaera** (a separate project — never stop or modify the Podman machine).
+- Dev object storage: MinIO from the same compose file — S3 API on **55490**, console on **55491**, bucket `mitosia-media` auto-created. Deployed environments use Cloudflare R2 through the identical S3 adapter (`lib/storage`); only `STORAGE_*` env changes. R2 buckets need a CORS rule exposing `ETag` or browser multipart uploads cannot complete.
 - Dev server runs on port 3001 (`.claude/launch.json`); `BETTER_AUTH_URL` must match the served origin or logins fail origin checks.
 - `.env` is gitignored; update `.env.example` whenever env vars change.
+- The ingest pipeline shells out to **ffmpeg/ffprobe** — required on dev machines (`brew install ffmpeg`) and installed in the Docker image. The e2e suite needs docker compose services up plus ffmpeg.
+
+## Media pipeline (S2 decisions)
+
+- Storage keys: `org/{orgId}/client/{clientId}/source/{sourceId}/…` — the `org/` prefix is the authorization boundary. Media reaches the browser only through `/api/media/[...path]`, an authenticated same-origin streaming proxy that rejects keys outside the caller's active org. No public/presigned URLs in the client; the R2+CDN signed-URL path arrives with client delivery (S18).
+- Ingest runs through one seam: `enqueueIngest()` (lib/ingest.ts). With `TRIGGER_SECRET_KEY` set it triggers the durable Trigger.dev task (`trigger/ingest-source.ts`); without it the pipeline runs in-process after the response (dev fallback — dies with the server, documented, not for real workloads). Pipeline steps and their ffmpeg invocations live in `lib/media/`; the claim step makes re-enqueues and retries idempotent.
+- Usage ledger (`usage_ledger`) is append-only **by policy shape**: it has only SELECT and INSERT RLS policies, so UPDATE/DELETE are database-denied even in-org. Writers must be idempotent via `correlation_id` (unique); corrections are compensating entries. Anything metered writes to the ledger in the sprint it ships — never retrofitted.
+- ffmpeg 8 quirks encoded in `lib/media/`: mjpeg outputs need `format=yuvj420p` (limited-range YUV is rejected), and `fps=1/N` needs `:round=up` or sources shorter than N seconds emit zero thumbnails. Don't "clean up" those filter args.
 
 ## Tenancy and RLS (load-bearing security rules)
 

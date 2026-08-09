@@ -1,7 +1,13 @@
-import { eq } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
+import { RefreshPoller } from "@/components/sources/refresh-poller";
+import {
+  SourceList,
+  type SourceListItem,
+} from "@/components/sources/source-list";
+import { SourceUploader } from "@/components/sources/source-uploader";
 import {
   Card,
   CardContent,
@@ -9,7 +15,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { campaign, project } from "@/lib/db/schema";
+import { campaign, project, source, sourceArtifact } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { requireOrg } from "@/lib/org";
 
@@ -38,12 +44,64 @@ export default async function ProjectDetailPage(
       .where(eq(project.id, parsedId.data))
       .limit(1);
 
-    return projectRow ?? null;
+    if (!projectRow) {
+      return null;
+    }
+
+    const sourceRows = await tx
+      .select({
+        durationSeconds: source.durationSeconds,
+        id: source.id,
+        ingestError: source.ingestError,
+        ingestStep: source.ingestStep,
+        sizeBytes: source.sizeBytes,
+        status: source.status,
+        title: source.title,
+      })
+      .from(source)
+      .where(eq(source.projectId, projectRow.id))
+      .orderBy(desc(source.createdAt));
+
+    const posterRows =
+      sourceRows.length > 0
+        ? await tx
+            .select({
+              sourceId: sourceArtifact.sourceId,
+              storageKey: sourceArtifact.storageKey,
+            })
+            .from(sourceArtifact)
+            .where(
+              and(
+                eq(sourceArtifact.kind, "poster"),
+                inArray(
+                  sourceArtifact.sourceId,
+                  sourceRows.map((row) => row.id)
+                )
+              )
+            )
+        : [];
+    const posterBySource = new Map(
+      posterRows.map((row) => [row.sourceId, row.storageKey])
+    );
+
+    const sources: SourceListItem[] = sourceRows.map((row) => ({
+      ...row,
+      posterKey: posterBySource.get(row.id) ?? null,
+    }));
+
+    return { ...projectRow, sources };
   });
 
   if (!data) {
     notFound();
   }
+
+  const hasActiveSources = data.sources.some(
+    (item) =>
+      item.status === "uploading" ||
+      item.status === "uploaded" ||
+      item.status === "processing"
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -61,16 +119,26 @@ export default async function ProjectDetailPage(
       </div>
       <Card>
         <CardHeader>
-          <CardTitle>Production container</CardTitle>
+          <CardTitle>Upload sources</CardTitle>
           <CardDescription>
-            Sources, transcripts, and moments land here in Sprint S2.
+            Long-form recordings upload straight to storage with pause and
+            resume, then run through the ingest pipeline automatically.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <p className="text-muted-foreground text-sm">
-            This project is ready to receive source material once ingestion
-            ships.
-          </p>
+          <SourceUploader projectId={data.id} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Sources</CardTitle>
+          <CardDescription>
+            Everything ingested into this project, newest first.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <RefreshPoller active={hasActiveSources} />
+          <SourceList items={data.sources} />
         </CardContent>
       </Card>
     </div>

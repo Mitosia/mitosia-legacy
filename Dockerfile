@@ -17,6 +17,10 @@ COPY . .
 ENV DATABASE_URL=postgres://build:build@localhost:5432/build \
     BETTER_AUTH_SECRET=build-placeholder-secret-32-chars-min \
     BETTER_AUTH_URL=http://localhost:3000 \
+    STORAGE_ENDPOINT=http://localhost:9000 \
+    STORAGE_ACCESS_KEY_ID=build \
+    STORAGE_SECRET_ACCESS_KEY=build \
+    STORAGE_BUCKET=build \
     NEXT_TELEMETRY_DISABLED=1
 RUN pnpm build
 # Self-contained migration runner for the release phase (see docker-entrypoint.sh).
@@ -26,6 +30,10 @@ RUN pnpm exec esbuild scripts/migrate.ts \
     --external:pg-native --outfile=migrate.cjs
 
 FROM node:24-alpine AS runner
+# The ingest pipeline shells out to ffmpeg/ffprobe. Needed even with
+# Trigger.dev configured: the in-process fallback runner must work on
+# staging until the Trigger project is provisioned.
+RUN apk add --no-cache ffmpeg
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=3000 \

@@ -49,3 +49,7 @@ next-env.d.ts
 /playwright-report/
 /blob-report/
 /.playwright/
+/e2e/.fixtures/
+
+# trigger.dev CLI state
+/.trigger/
