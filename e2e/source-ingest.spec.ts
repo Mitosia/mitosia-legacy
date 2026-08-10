@@ -19,6 +19,7 @@ const FIXTURE_SECONDS = 4;
 const PIPELINE_TIMEOUT_MS = 90_000;
 const UPLOAD_TIMEOUT_MS = 30_000;
 const UPLOAD_BUTTON = /Upload 1 file/;
+const SETTINGS_BUTTON = /settings/i;
 const UPLOAD_COMPLETE = /Complete/;
 const SOURCE_PAGE_URL = /\/sources\//;
 
@@ -159,6 +160,13 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
     undefined,
     { timeout: 10_000 }
   );
+
+  // The Video.js skin's settings menu is openable interactive UI, so it
+  // gets exercised here (project rule: every menu opens under e2e). Hover
+  // first — the control bar auto-hides without pointer activity.
+  await page.locator("video").hover();
+  await page.getByRole("button", { name: SETTINGS_BUTTON }).click();
+  await expect(page.getByRole("menu")).toBeVisible({ timeout: 5000 });
 
   expect(errors, errors.join("\n")).toEqual([]);
 });
