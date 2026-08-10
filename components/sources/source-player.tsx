@@ -5,7 +5,11 @@ import "./source-player.css";
 import { createPlayer } from "@videojs/react";
 import { HlsJsVideo } from "@videojs/react/media/hlsjs-video";
 import { VideoSkin, videoFeatures } from "@videojs/react/video";
-import type { PeaksInstance } from "peaks.js";
+import type {
+  EventEmitterForPlayerEvents,
+  PeaksInstance,
+  PlayerAdapter,
+} from "peaks.js";
 import type { CSSProperties } from "react";
 import { useEffect, useRef, useState } from "react";
 
@@ -14,20 +18,36 @@ import { useEffect, useRef, useState } from "react";
 // decode). Everything loads through /api/media, so auth is enforced per
 // request.
 //
-// Two ordering rules keep this component alive — both were learned the
-// hard way, change them only with the e2e green:
+// Three rules keep this component alive — all learned the hard way,
+// change them only with the e2e green:
 //
 // 1. The player mounts CLIENT-ONLY (placeholder during SSR/hydration).
 //    peaks.js touches `window` at module scope, so it is imported
 //    dynamically and must never evaluate on the server; the Video.js media
 //    element is a custom-element host, which we keep out of hydration's way
 //    the same way media-chrome was.
-// 2. peaks.js initializes BEFORE the hls.js engine attaches. Its init calls
-//    mediaElement.load() when readyState is HAVE_NOTHING — inert while the
-//    video has no source, but fatal after an MSE attach, because
-//    MediaSource object URLs are single-use: a second load() re-requests a
-//    revoked blob URL and kills playback (net::ERR_FILE_NOT_FOUND). The
-//    engine is gated by keeping HlsJsVideo's `src` empty until peaks is up.
+// 2. peaks.js talks to the media element ONLY through the passive adapter
+//    below — never its default MediaElementPlayer. The Video.js engine
+//    attaches MediaSource at MOUNT (a blob src appears before any src
+//    prop), and dev StrictMode double-mounts it: attach → revoke → media
+//    error → reattach. MediaElementPlayer.init inspects the element mid-
+//    churn — a sourced element triggers mediaElement.load() (re-requests
+//    a revoked, single-use blob URL: net::ERR_FILE_NOT_FOUND) and a
+//    transiently errored one rejects init with MediaError, hiding the
+//    waveform. No src-gating can fix that — the attach precedes any src —
+//    so the adapter simply never loads, never inspects source state, and
+//    only forwards events; ordering between peaks and the engine stops
+//    mattering, and the engine may start loading immediately.
+// 3. playedWaveformColor is applied on durationchange, never at
+//    Peaks.init. peaks.js splits the waveform into played/unplayed
+//    shapes and captures player.getDuration() ONCE when the split is
+//    created; duration is still NaN while metadata is loading, which
+//    froze the unplayed range at 0→NaN — the strip rendered fully blank
+//    on load and nothing right of the playhead could ever paint, in dev
+//    and production builds alike (peaks.js 4.0.0 has no durationchange
+//    handling). Splitting only once the duration is real keeps every
+//    region drawable, and the pre-split single shape paints the full
+//    strip immediately.
 
 // Neutral in light mode, visible in dark; the waveform's played region
 // uses the product accent family. The player chrome itself stays white
@@ -72,6 +92,59 @@ interface WaveformSetup {
   video: HTMLVideoElement;
 }
 
+// Ordering rule 2: a passive stand-in for peaks' MediaElementPlayer.
+// Forwards the DOM events peaks needs and proxies transport queries, but
+// never calls load() and never inspects source state, so the Video.js
+// engine's MSE attach/detach churn cannot fail peaks' init. 'player.error'
+// is deliberately not forwarded: transient engine churn raises media
+// errors that mean nothing to peaks (nothing subscribes), and real
+// failures are logged by the component's own error listener.
+function createPassiveAdapter(video: HTMLVideoElement): PlayerAdapter {
+  let removeListeners: (() => void) | undefined;
+  return {
+    destroy: () => {
+      removeListeners?.();
+      removeListeners = undefined;
+    },
+    getCurrentTime: () => video.currentTime,
+    getDuration: () => video.duration,
+    init: (eventEmitter: EventEmitterForPlayerEvents) => {
+      const forwarded: [string, () => void][] = [
+        [
+          "timeupdate",
+          () => eventEmitter.emit("player.timeupdate", video.currentTime),
+        ],
+        [
+          "playing",
+          () => eventEmitter.emit("player.playing", video.currentTime),
+        ],
+        ["pause", () => eventEmitter.emit("player.pause", video.currentTime)],
+        ["ended", () => eventEmitter.emit("player.ended")],
+        ["seeked", () => eventEmitter.emit("player.seeked", video.currentTime)],
+        ["canplay", () => eventEmitter.emit("player.canplay")],
+      ];
+      for (const [type, listener] of forwarded) {
+        video.addEventListener(type, listener);
+      }
+      removeListeners = () => {
+        for (const [type, listener] of forwarded) {
+          video.removeEventListener(type, listener);
+        }
+      };
+      return Promise.resolve();
+    },
+    isPlaying: () => !video.paused,
+    isSeeking: () => video.seeking,
+    pause: () => {
+      video.pause();
+    },
+    play: () => video.play(),
+    seek: (time: number) => {
+      video.currentTime = time;
+    },
+  };
+}
+
 // Peaks.init throws if the overview container has no layout yet, which
 // happens when the route hydrates in a hidden or zero-sized context
 // (background tab, prerender, hidden preview pane) — and a failed init used
@@ -94,8 +167,9 @@ function waitForLayout(
   });
 }
 
-// Stage 1 of the player effect: peaks.js registers its listeners against
-// the still source-less video (see ordering rule 2 above).
+// Binds peaks.js to the media element through the passive adapter (rule
+// 2). Resolves once Peaks.init's callback has fired (or setup threw), so
+// callers can sequence follow-up work after init settles.
 async function initWaveform(setup: WaveformSetup): Promise<void> {
   try {
     const { default: Peaks } = await import("peaks.js");
@@ -106,36 +180,38 @@ async function initWaveform(setup: WaveformSetup): Promise<void> {
     if (setup.isCancelled()) {
       return;
     }
-    Peaks.init(
-      {
-        dataUri: { json: setup.peaksUrl },
-        keyboard: false,
-        mediaElement: setup.video,
-        overview: {
-          container: setup.container,
-          highlightColor: "transparent",
-          playedWaveformColor: PLAYED_COLOR,
-          playheadColor: PLAYHEAD_COLOR,
-          showAxisLabels: false,
-          waveformColor: WAVEFORM_COLOR,
+    await new Promise<void>((resolve) => {
+      Peaks.init(
+        {
+          dataUri: { json: setup.peaksUrl },
+          keyboard: false,
+          overview: {
+            container: setup.container,
+            highlightColor: "transparent",
+            playheadColor: PLAYHEAD_COLOR,
+            showAxisLabels: false,
+            waveformColor: WAVEFORM_COLOR,
+          },
+          player: createPassiveAdapter(setup.video),
         },
-      },
-      (error, peaks) => {
-        if (setup.isCancelled()) {
-          peaks?.destroy();
-          return;
+        (error, peaks) => {
+          try {
+            if (setup.isCancelled()) {
+              peaks?.destroy();
+            } else if (error) {
+              // Surface the reason — a silently hidden waveform is
+              // undebuggable.
+              console.error("[waveform] init failed:", error);
+              setup.onError();
+            } else if (peaks) {
+              setup.onReady(peaks);
+            }
+          } finally {
+            resolve();
+          }
         }
-        if (error) {
-          // Surface the reason — a silently hidden waveform is undebuggable.
-          console.error("[waveform] init failed:", error);
-          setup.onError();
-          return;
-        }
-        if (peaks) {
-          setup.onReady(peaks);
-        }
-      }
-    );
+      );
+    });
   } catch (error) {
     console.error("[waveform] init threw:", error);
     setup.onError();
@@ -151,9 +227,6 @@ export function SourcePlayer({
   const overviewRef = useRef<HTMLDivElement | null>(null);
   const [waveformError, setWaveformError] = useState(false);
   const [mounted, setMounted] = useState(false);
-  // Empty until peaks is bound — the hls.js engine only attaches once this
-  // becomes the real URL (ordering rule 2).
-  const [mediaSrc, setMediaSrc] = useState("");
 
   useEffect(() => {
     setMounted(true);
@@ -168,6 +241,7 @@ export function SourcePlayer({
 
     let cancelled = false;
     let peaksInstance: PeaksInstance | undefined;
+    let removePlayedColorListener: (() => void) | undefined;
 
     const logMediaError = () => {
       // Playback failures must be diagnosable from logs alone (the e2e
@@ -179,31 +253,40 @@ export function SourcePlayer({
     };
     video.addEventListener("error", logMediaError);
 
-    (async () => {
-      if (peaksUrl && container) {
-        await initWaveform({
-          container,
-          isCancelled: () => cancelled,
-          onError: () => setWaveformError(true),
-          onReady: (peaks) => {
-            peaksInstance = peaks;
-          },
-          peaksUrl,
-          video,
-        });
-      }
-
-      if (cancelled) {
-        return;
-      }
-
-      // Stage 2: attach playback — the engine loads once src is non-empty.
-      setMediaSrc(hlsUrl);
-    })();
+    if (peaksUrl && container) {
+      initWaveform({
+        container,
+        isCancelled: () => cancelled,
+        onError: () => setWaveformError(true),
+        onReady: (peaks) => {
+          peaksInstance = peaks;
+          // Ordering rule 3: create the played/unplayed split only
+          // once the media duration is real. Not `once: true` — the
+          // guard must survive a durationchange that reports a
+          // non-finite duration.
+          const applyPlayedColor = () => {
+            if (cancelled || !Number.isFinite(video.duration)) {
+              return;
+            }
+            video.removeEventListener("durationchange", applyPlayedColor);
+            peaks.views
+              .getView("overview")
+              ?.setPlayedWaveformColor(PLAYED_COLOR);
+          };
+          video.addEventListener("durationchange", applyPlayedColor);
+          removePlayedColorListener = () =>
+            video.removeEventListener("durationchange", applyPlayedColor);
+          applyPlayedColor();
+        },
+        peaksUrl,
+        video,
+      });
+    }
 
     return () => {
       cancelled = true;
       video.removeEventListener("error", logMediaError);
+      removePlayedColorListener?.();
       peaksInstance?.destroy();
     };
   }, [hlsUrl, peaksUrl, mounted]);
@@ -244,7 +327,7 @@ export function SourcePlayer({
             crossOrigin="use-credentials"
             preload="metadata"
             ref={videoRef}
-            src={mediaSrc}
+            src={hlsUrl}
             streamType="on-demand"
           />
         </VideoSkin>
