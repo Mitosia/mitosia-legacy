@@ -121,8 +121,8 @@ export default async function ProjectDetailPage(
         <CardHeader>
           <CardTitle>Upload sources</CardTitle>
           <CardDescription>
-            Long-form recordings upload straight to storage with pause and
-            resume, then run through the ingest pipeline automatically.
+            Long-form recordings upload with pause and resume, then are prepared
+            for playback automatically.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -133,7 +133,7 @@ export default async function ProjectDetailPage(
         <CardHeader>
           <CardTitle>Sources</CardTitle>
           <CardDescription>
-            Everything ingested into this project, newest first.
+            All recordings in this project, newest first.
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -76,15 +76,27 @@ function PipelineStateCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{failed ? "Ingest failed" : "Preparing proxy"}</CardTitle>
+        <CardTitle>
+          {failed
+            ? "Couldn't prepare this recording"
+            : "Preparing your recording"}
+        </CardTitle>
         <CardDescription>
           {failed
-            ? (ingestError ?? "The pipeline hit an unexpected error.")
-            : "The proxy, thumbnails, and waveform are being generated. This page updates automatically."}
+            ? "Something went wrong while processing it. You can retry, or upload the file again."
+            : "It will be ready to play and edit shortly. This page updates automatically."}
         </CardDescription>
       </CardHeader>
       {failed ? (
-        <CardContent>
+        <CardContent className="space-y-2">
+          {ingestError ? (
+            <p
+              className="break-words text-muted-foreground text-xs"
+              data-testid="ingest-error"
+            >
+              {ingestError}
+            </p>
+          ) : null}
           <RetryIngestButton sourceId={sourceId} />
         </CardContent>
       ) : null}

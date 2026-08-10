@@ -39,7 +39,7 @@ export function SourceList({ items }: { items: SourceListItem[] }) {
   if (items.length === 0) {
     return (
       <p className="rounded-md border border-dashed p-6 text-center text-muted-foreground text-sm">
-        No sources yet. Upload a recording above to start the pipeline.
+        No recordings yet. Upload one above to get started.
       </p>
     );
   }

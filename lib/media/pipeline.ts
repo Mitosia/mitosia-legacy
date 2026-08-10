@@ -19,6 +19,7 @@ import {
   planHlsLadder,
   renderMasterPlaylist,
 } from "./hls";
+import { sanitizeIngestError } from "./ingest-error";
 import { generatePeaks } from "./peaks";
 import { probeSource, type SourceProbe } from "./probe";
 import { generatePoster, generateThumbnailStrip } from "./thumbs";
@@ -412,7 +413,10 @@ async function recordFailure(
     tx
       .update(source)
       .set({
-        ingestError: message.slice(0, INGEST_ERROR_MAX_CHARS),
+        ingestError: sanitizeIngestError(message).slice(
+          0,
+          INGEST_ERROR_MAX_CHARS
+        ),
         status: "failed",
       })
       .where(eq(source.id, payload.sourceId))
