@@ -3,7 +3,16 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { auditLog, brand, campaign, client, project } from "../lib/db/schema";
+import {
+  auditLog,
+  brand,
+  campaign,
+  client,
+  project,
+  source,
+  sourceArtifact,
+  usageLedger,
+} from "../lib/db/schema";
 
 // Cross-tenant isolation suite — the S1 exit criterion.
 //
@@ -40,7 +49,9 @@ interface SeededIds {
   brandId: string;
   campaignId: string;
   clientId: string;
+  ledgerId: string;
   projectId: string;
+  sourceId: string;
 }
 
 const seeded = new Map<string, SeededIds>();
@@ -98,6 +109,39 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
         organizationId,
       })
       .returning({ id: auditLog.id });
+    const [sourceRow] = await tx
+      .insert(source)
+      .values({
+        mimeType: "video/mp4",
+        organizationId,
+        originalFilename: "seed.mp4",
+        // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+        projectId: projectRow!.id,
+        status: "uploaded",
+        storageKey: `org/${organizationId}/source/seed/original/seed.mp4`,
+        title: `${organizationId} source`,
+      })
+      .returning({ id: source.id });
+    await tx.insert(sourceArtifact).values({
+      kind: "hls_master",
+      mimeType: "application/vnd.apple.mpegurl",
+      organizationId,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      sourceId: sourceRow!.id,
+      storageKey: `org/${organizationId}/source/seed/hls/master.m3u8`,
+    });
+    const [ledgerRow] = await tx
+      .insert(usageLedger)
+      .values({
+        correlationId: `seed:${organizationId}`,
+        entryType: "storage_bytes",
+        organizationId,
+        quantity: 1024,
+        // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+        sourceId: sourceRow!.id,
+        unit: "bytes",
+      })
+      .returning({ id: usageLedger.id });
 
     return {
       // biome-ignore lint/style/noNonNullAssertion: seeded rows always return
@@ -109,7 +153,11 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
       // biome-ignore lint/style/noNonNullAssertion: seeded rows always return
       clientId: clientRow!.id,
       // biome-ignore lint/style/noNonNullAssertion: seeded rows always return
+      ledgerId: ledgerRow!.id,
+      // biome-ignore lint/style/noNonNullAssertion: seeded rows always return
       projectId: projectRow!.id,
+      // biome-ignore lint/style/noNonNullAssertion: seeded rows always return
+      sourceId: sourceRow!.id,
     };
   });
 }
@@ -120,6 +168,9 @@ const TENANT_TABLES = [
   { label: "campaign", table: campaign },
   { label: "project", table: project },
   { label: "audit_log", table: auditLog },
+  { label: "source", table: source },
+  { label: "source_artifact", table: sourceArtifact },
+  { label: "usage_ledger", table: usageLedger },
 ] as const;
 
 beforeAll(async () => {
@@ -221,6 +272,33 @@ describe("cross-tenant isolation (RLS)", () => {
         .delete(project)
         .where(sql`${project.id} = ${targetId}`)
         .returning({ id: project.id })
+    );
+    expect(deleted).toHaveLength(0);
+  });
+
+  // The ledger has only SELECT and INSERT policies — RLS default-denies
+  // UPDATE and DELETE, so history is immutable even inside the owning org.
+  it("usage_ledger: updates are denied even within the same org", async () => {
+    // biome-ignore lint/style/noNonNullAssertion: seeded in beforeAll
+    const ownId = seeded.get(ORG_A)!.ledgerId;
+    const updated = await scoped(ORG_A, (tx) =>
+      tx
+        .update(usageLedger)
+        .set({ quantity: 0 })
+        .where(sql`${usageLedger.id} = ${ownId}`)
+        .returning({ id: usageLedger.id })
+    );
+    expect(updated).toHaveLength(0);
+  });
+
+  it("usage_ledger: deletes are denied even within the same org", async () => {
+    // biome-ignore lint/style/noNonNullAssertion: seeded in beforeAll
+    const ownId = seeded.get(ORG_A)!.ledgerId;
+    const deleted = await scoped(ORG_A, (tx) =>
+      tx
+        .delete(usageLedger)
+        .where(sql`${usageLedger.id} = ${ownId}`)
+        .returning({ id: usageLedger.id })
     );
     expect(deleted).toHaveLength(0);
   });
