@@ -83,6 +83,11 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
       consoleErrors.push(message.text());
     }
   });
+  page.on("requestfailed", (request) => {
+    consoleErrors.push(
+      `requestfailed: ${request.url()} (${request.failure()?.errorText})`
+    );
+  });
 
   await createAccountWithOrg(page, "ingest");
   await createHierarchy(page);
@@ -131,6 +136,12 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
         { cause: error }
       );
     });
+
+  // A FULL document load of the source page must succeed too — client-side
+  // navigation skips SSR, which once hid a peaks.js `window` reference
+  // that 500'd every hard refresh of this route.
+  const documentResponse = await page.goto(page.url());
+  expect(documentResponse?.status()).toBe(200);
 
   // peaks.js paints the precomputed waveform into a canvas.
   const waveform = page.getByTestId("waveform-overview");
