@@ -29,9 +29,6 @@ export async function POST(request: Request) {
     return ctx.error;
   }
   const { organizationId, userId } = ctx;
-  // TEMPORARY diagnostics (PR #16): CI mints storage keys under a previous
-  // test user's org — log what this request's session resolved.
-  console.error("[uploads] create", { organizationId, userId });
 
   const parsed = createUploadSchema.safeParse(await request.json());
   if (!parsed.success) {
