@@ -148,6 +148,15 @@ jobs:
       - name: Run end-to-end tests
         run: pnpm e2e
 
+      # Production parity: `next dev` cannot surface hydration mismatches or
+      # standalone-output problems, and a mismatch shipped behind exactly
+      # that gap (PR #19). Reuses this job's database, MinIO and migrations.
+      - name: Build standalone server
+        run: pnpm build
+
+      - name: Run production-build end-to-end tests
+        run: pnpm e2e:prod
+
       # Traces (recorded on first retry) are the only way to debug a
       # headless-only playback failure.
       - name: Upload Playwright traces
