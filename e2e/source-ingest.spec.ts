@@ -163,6 +163,41 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
     timeout: 15_000,
   });
 
+  // The strip must hold PIXELS before any interaction — canvas visibility
+  // alone let a fully transparent waveform ship: peaks.js froze the
+  // played/unplayed split with the init-time duration (NaN before hls
+  // metadata), so nothing could ever paint, in dev and prod builds alike.
+  // The waveform layer is the first canvas peaks adds to the stage.
+  await page
+    .waitForFunction(
+      () => {
+        const canvas = document.querySelector(
+          '[data-testid="waveform-overview"] canvas'
+        ) as HTMLCanvasElement | null;
+        if (!canvas || canvas.width === 0) {
+          return false;
+        }
+        const pixels = canvas
+          .getContext("2d")
+          ?.getImageData(0, 0, canvas.width, canvas.height).data;
+        if (!pixels) {
+          return false;
+        }
+        let nonblank = 0;
+        for (let i = 3; i < pixels.length; i += 41) {
+          if (pixels[i] > 0) {
+            nonblank += 1;
+          }
+        }
+        return nonblank > 50;
+      },
+      undefined,
+      { timeout: 15_000 }
+    )
+    .catch(() => {
+      throw new Error("waveform overview never painted any pixels");
+    });
+
   // Waveform scrubbing: clicking the overview seeks the media element.
   await waveform.click({ position: { x: 200, y: 40 } });
   await page.waitForFunction(
@@ -173,6 +208,36 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
     undefined,
     { timeout: 10_000 }
   );
+
+  // After the seek, both halves of the played/unplayed split render:
+  // played (indigo #6366f1) behind the playhead, unplayed (slate #94a3b8)
+  // ahead of it. If the split captured a bogus duration, one half vanishes.
+  const split = await page.evaluate(() => {
+    const canvas = document.querySelector(
+      '[data-testid="waveform-overview"] canvas'
+    ) as HTMLCanvasElement;
+    const pixels = canvas
+      .getContext("2d")
+      ?.getImageData(0, 0, canvas.width, canvas.height).data;
+    const count = { indigo: 0, slate: 0 };
+    if (!pixels) {
+      return count;
+    }
+    for (let i = 3; i < pixels.length; i += 4) {
+      if (pixels[i] < 200) {
+        continue;
+      }
+      const [r, , b] = [pixels[i - 3], pixels[i - 2], pixels[i - 1]];
+      if (b > 200 && r < 130) {
+        count.indigo += 1;
+      } else if (r > 130 && r < 170 && b < 200) {
+        count.slate += 1;
+      }
+    }
+    return count;
+  });
+  expect(split.indigo, "played region should render").toBeGreaterThan(0);
+  expect(split.slate, "unplayed region should render").toBeGreaterThan(0);
 
   // The Video.js skin's settings menu is openable interactive UI, so it
   // gets exercised here (project rule: every menu opens under e2e). Hover
