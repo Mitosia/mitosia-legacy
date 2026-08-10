@@ -28,11 +28,13 @@ import { useEffect, useRef, useState } from "react";
 //    revoked blob URL and kills playback (net::ERR_FILE_NOT_FOUND). The
 //    engine is gated by keeping HlsJsVideo's `src` empty until peaks is up.
 
-// Neutral in light mode, visible in dark; the played region uses the
-// product accent family. The same accent themes the Video.js skin.
+// Neutral in light mode, visible in dark; the waveform's played region
+// uses the product accent family. The player chrome itself stays white
+// (Rajesh, 2026-08-10) — the accent lives in the waveform only.
 const WAVEFORM_COLOR = "#94a3b8";
 const PLAYED_COLOR = "#6366f1";
 const PLAYHEAD_COLOR = "#6366f1";
+const CONTROLS_COLOR = "#ffffff";
 
 // hls.js assumes 500 kbps until measured, which would pin startup to the
 // lowest rung. A review tool must start at review quality: this estimate
@@ -48,7 +50,9 @@ const HLS_CONFIG = {
   hlsJs: { abrEwmaDefaultEstimate: STARTUP_BANDWIDTH_ESTIMATE },
 };
 
-const SKIN_STYLE = { "--media-color-primary": PLAYED_COLOR } as CSSProperties;
+const SKIN_STYLE = {
+  "--media-color-primary": CONTROLS_COLOR,
+} as CSSProperties;
 
 const Player = createPlayer({ features: videoFeatures });
 
