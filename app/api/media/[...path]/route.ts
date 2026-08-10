@@ -27,6 +27,13 @@ export async function GET(
   const key = path.join("/");
 
   if (!key.startsWith(orgPrefix(authCtx.organizationId))) {
+    // TEMPORARY diagnostics (PR #16): a CI-only failure resolves a different
+    // active org for media GETs than the page render moments earlier.
+    console.error("[media-proxy] org mismatch", {
+      keyOrg: key.split("/")[1],
+      sessionOrg: authCtx.organizationId,
+      userId: authCtx.userId,
+    });
     return Response.json({ error: "Forbidden" }, { status: 403 });
   }
 
