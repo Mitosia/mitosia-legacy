@@ -312,9 +312,10 @@ async function runAudioStep(
 
 async function runWaveformStep(
   audioPath: string,
-  keyPrefix: string
+  keyPrefix: string,
+  mediaDurationSeconds: number
 ): Promise<{ artifacts: ArtifactUpload[]; bytes: number }> {
-  const peaks = await generatePeaks(audioPath);
+  const peaks = await generatePeaks(audioPath, mediaDurationSeconds);
   const key = `${keyPrefix}waveform/peaks.json`;
   const body = JSON.stringify(peaks);
   await putJson(key, peaks);
@@ -465,7 +466,11 @@ export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
       artifactBytes += audio.bytes;
 
       await setIngestStep(payload, "waveform");
-      const waveform = await runWaveformStep(audio.audioPath, keyPrefix);
+      const waveform = await runWaveformStep(
+        audio.audioPath,
+        keyPrefix,
+        probe.durationSeconds
+      );
       artifacts.push(...waveform.artifacts);
       artifactBytes += waveform.bytes;
     }

@@ -61,11 +61,37 @@ interface WaveformSetup {
   video: HTMLVideoElement;
 }
 
+// Peaks.init throws if the overview container has no layout yet, which
+// happens when the route hydrates in a hidden or zero-sized context
+// (background tab, prerender, hidden preview pane) — and a failed init used
+// to hide the waveform for good. Wait until the container actually has a
+// width; on hidden tabs rAF is throttled or paused, so this simply resumes
+// when the page becomes visible. Only cancellation ends the wait early.
+function waitForLayout(
+  container: HTMLElement,
+  isCancelled: () => boolean
+): Promise<void> {
+  return new Promise((resolve) => {
+    const check = () => {
+      if (isCancelled() || container.clientWidth > 0) {
+        resolve();
+        return;
+      }
+      requestAnimationFrame(check);
+    };
+    check();
+  });
+}
+
 // Stage 1 of the player effect: peaks.js registers its listeners against
 // the still source-less video (see ordering rule 2 above).
 async function initWaveform(setup: WaveformSetup): Promise<void> {
   try {
     const { default: Peaks } = await import("peaks.js");
+    if (setup.isCancelled()) {
+      return;
+    }
+    await waitForLayout(setup.container, setup.isCancelled);
     if (setup.isCancelled()) {
       return;
     }
@@ -89,6 +115,8 @@ async function initWaveform(setup: WaveformSetup): Promise<void> {
           return;
         }
         if (error) {
+          // Surface the reason — a silently hidden waveform is undebuggable.
+          console.error("[waveform] init failed:", error);
           setup.onError();
           return;
         }
@@ -97,7 +125,8 @@ async function initWaveform(setup: WaveformSetup): Promise<void> {
         }
       }
     );
-  } catch {
+  } catch (error) {
+    console.error("[waveform] init threw:", error);
     setup.onError();
   }
 }
