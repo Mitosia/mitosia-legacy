@@ -48,9 +48,10 @@ Add the prod origin to the prod bucket's policy when it ships.
 
 ### Housekeeping rule
 
-Bucket → Settings → **Object lifecycle rules** → add a rule to **abort
-incomplete multipart uploads after 7 days**. Abandoned browser uploads
-otherwise accumulate invisible storage forever.
+Bucket → Settings → **Object Lifecycle Rules**: R2 ships a "Default
+Multipart Abort Rule" (abort incomplete uploads after 7 days, no prefix)
+on new buckets — verify it is **Enabled** rather than creating one.
+Abandoned browser uploads otherwise accumulate invisible storage forever.
 
 ### Wire into Dokploy (staging app service → Environment)
 
