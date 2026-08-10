@@ -76,11 +76,13 @@ function PipelineStateCard({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{failed ? "Ingest failed" : "Preparing proxy"}</CardTitle>
+        <CardTitle>
+          {failed ? "Ingest failed" : "Preparing your recording"}
+        </CardTitle>
         <CardDescription>
           {failed
             ? (ingestError ?? "The pipeline hit an unexpected error.")
-            : "The proxy, thumbnails, and waveform are being generated. This page updates automatically."}
+            : "It will be ready to play and edit shortly. This page updates automatically."}
         </CardDescription>
       </CardHeader>
       {failed ? (
