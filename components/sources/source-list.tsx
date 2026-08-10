@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import type { IngestStep, SourceStatus } from "@/lib/db/schema";
 import { formatBytes, formatDuration } from "@/lib/format";
+import { ingestStepLabel } from "@/lib/ingest-labels";
 import { RetryIngestButton } from "./retry-ingest-button";
 
 export interface SourceListItem {
@@ -15,15 +16,6 @@ export interface SourceListItem {
   title: string;
 }
 
-const STEP_LABELS: Record<IngestStep, string> = {
-  audio: "Extracting audio",
-  finalize: "Finalizing",
-  hls: "Creating proxy",
-  probe: "Validating",
-  thumbnails: "Generating thumbnails",
-  waveform: "Computing waveform",
-};
-
 function statusBadge(item: SourceListItem) {
   switch (item.status) {
     case "uploading":
@@ -32,9 +24,7 @@ function statusBadge(item: SourceListItem) {
       return <Badge variant="secondary">Queued</Badge>;
     case "processing":
       return (
-        <Badge variant="secondary">
-          {item.ingestStep ? STEP_LABELS[item.ingestStep] : "Processing"}…
-        </Badge>
+        <Badge variant="secondary">{ingestStepLabel(item.ingestStep)}…</Badge>
       );
     case "ready":
       return <Badge>Ready</Badge>;
