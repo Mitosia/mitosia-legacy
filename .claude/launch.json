@@ -12,7 +12,7 @@
       "runtimeExecutable": "sh",
       "runtimeArgs": [
         "-c",
-        "set -a; . ./.env; set +a; rm -rf .next/standalone/.next/static .next/standalone/public; cp -R .next/static .next/standalone/.next/static; cp -R public .next/standalone/public; cd .next/standalone && PORT=3001 exec node server.js"
+        "set -a; . ./.env; set +a; PORT=3001 exec node scripts/serve-standalone.mjs"
       ],
       "port": 3001
     }
