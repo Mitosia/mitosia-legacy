@@ -1,6 +1,7 @@
 "use client";
 
 import "@videojs/react/video/skin.css";
+import "./source-player.css";
 import { createPlayer } from "@videojs/react";
 import { HlsJsVideo } from "@videojs/react/media/hlsjs-video";
 import { VideoSkin, videoFeatures } from "@videojs/react/video";
@@ -231,7 +232,7 @@ export function SourcePlayer({
   }
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="source-player flex flex-col gap-3">
       <Player.Provider>
         <VideoSkin
           className="aspect-video w-full overflow-hidden rounded-md"
