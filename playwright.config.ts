@@ -5,7 +5,9 @@ import { defineConfig, devices } from "@playwright/test";
 // MenuGroupContext-class crash this suite guards against is a real React
 // runtime error that surfaces identically in dev and prod, so dev is a
 // faithful and far simpler target than the standalone production server.
-const PORT = 3001;
+// E2E_PORT overrides the port for runs alongside another checkout's server
+// on 3001 (parallel worktree sessions) — set BETTER_AUTH_URL to match.
+const PORT = Number(process.env.E2E_PORT ?? 3001);
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({

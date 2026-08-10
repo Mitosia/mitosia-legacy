@@ -1,0 +1,19 @@
+/* Player-scoped overrides for the packaged Video.js skin. */
+
+/* The player store samples currentTime only on `timeupdate` (no rAF
+   loop), so the seekbar fill and thumb step forward at event cadence —
+   visibly jumpy during playback. A linear transition spanning roughly one
+   cadence interval makes the advance read as continuous. Scoped to the
+   time slider (the only slider with a buffer layer) and suspended while
+   scrubbing so drags stay 1:1 with the pointer. */
+.source-player
+  .media-slider:has(.media-slider__buffer):not([data-dragging])
+  .media-slider__fill {
+  transition: width 500ms linear;
+}
+
+.source-player
+  .media-slider:has(.media-slider__buffer):not([data-dragging])
+  .media-slider__thumb {
+  transition: left 500ms linear;
+}
