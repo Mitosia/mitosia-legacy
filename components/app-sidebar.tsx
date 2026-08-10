@@ -37,9 +37,11 @@ const NAV_ITEMS = [
 ];
 
 export function AppSidebar({
+  activeOrgName,
   user,
   ...props
 }: React.ComponentProps<typeof Sidebar> & {
+  activeOrgName: string | null;
   user: { email: string; name: string };
 }) {
   return (
@@ -49,7 +51,7 @@ export function AppSidebar({
           the base radius so the whole sidebar — org switcher, nav items, and
           profile — shares one consistent corner radius. */}
       <SidebarHeader className="[--radius:0.625rem]">
-        <OrgSwitcher />
+        <OrgSwitcher activeOrgName={activeOrgName} />
       </SidebarHeader>
       <SidebarContent className="[--radius:0.625rem]">
         <NavMain items={NAV_ITEMS} />

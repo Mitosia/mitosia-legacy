@@ -25,20 +25,24 @@ import {
   SidebarMenuItem,
   useSidebar,
 } from "@/components/ui/sidebar";
-import {
-  authClient,
-  useActiveOrganization,
-  useListOrganizations,
-} from "@/lib/auth-client";
+import { authClient, useListOrganizations } from "@/lib/auth-client";
 
 // ⌘1..⌘9 shortcuts are shown only for the first nine organizations.
 const MAX_SHORTCUTS = 9;
 
-export function OrgSwitcher() {
+// activeOrgName comes from the server layout, NOT from the client-side
+// useActiveOrganization store: SSR'd text derived from an async client store
+// hydrates against whatever the store holds at that instant, which is an
+// intermittent React #418 in prod. The server prop is stable through
+// hydration, and org switches propagate through router.refresh().
+export function OrgSwitcher({
+  activeOrgName,
+}: {
+  activeOrgName: string | null;
+}) {
   const { isMobile } = useSidebar();
   const router = useRouter();
   const { data: organizations } = useListOrganizations();
-  const { data: activeOrganization } = useActiveOrganization();
 
   const handleSelect = useCallback(
     async (event: React.MouseEvent<HTMLElement>) => {
@@ -73,7 +77,7 @@ export function OrgSwitcher() {
             </div>
             <div className="grid flex-1 text-start text-sm leading-tight">
               <span className="truncate font-medium">
-                {activeOrganization?.name ?? "Select organization"}
+                {activeOrgName ?? "Select organization"}
               </span>
               <span className="truncate text-muted-foreground text-xs">
                 Organization
