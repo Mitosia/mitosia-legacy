@@ -1,50 +1,56 @@
 "use client";
 
-import Hls from "hls.js";
-import {
-  MediaControlBar,
-  MediaController,
-  MediaFullscreenButton,
-  MediaMuteButton,
-  MediaPlayButton,
-  MediaPlaybackRateButton,
-  MediaSeekBackwardButton,
-  MediaSeekForwardButton,
-  MediaTimeDisplay,
-  MediaTimeRange,
-  MediaVolumeRange,
-} from "media-chrome/react";
+import "@videojs/react/video/skin.css";
+import { createPlayer } from "@videojs/react";
+import { HlsJsVideo } from "@videojs/react/media/hlsjs-video";
+import { VideoSkin, videoFeatures } from "@videojs/react/video";
 import type { PeaksInstance } from "peaks.js";
+import type { CSSProperties } from "react";
 import { useEffect, useRef, useState } from "react";
 
-// Proxy playback (media-chrome over hls.js) with waveform scrubbing
-// (peaks.js on the precomputed peaks JSON — no client-side audio decode).
-// Everything loads through /api/media, so auth is enforced per request.
+// Proxy playback (Video.js v10 React over its hls.js engine) with waveform
+// scrubbing (peaks.js on the precomputed peaks JSON — no client-side audio
+// decode). Everything loads through /api/media, so auth is enforced per
+// request.
 //
 // Two ordering rules keep this component alive — both were learned the
 // hard way, change them only with the e2e green:
 //
 // 1. The player mounts CLIENT-ONLY (placeholder during SSR/hydration).
-//    media-chrome's custom elements rewrite their own DOM on upgrade,
-//    which React hydration flags as a mismatch; and peaks.js touches
-//    `window` at module scope, so it is imported dynamically and must
-//    never evaluate on the server.
-// 2. peaks.js initializes BEFORE hls attaches. Its init calls
-//    mediaElement.load() when readyState is HAVE_NOTHING — inert while
-//    the video has no source, but fatal after hls attaches, because
-//    MediaSource object URLs are single-use: a second load() re-requests
-//    a revoked blob URL and kills playback (net::ERR_FILE_NOT_FOUND).
+//    peaks.js touches `window` at module scope, so it is imported
+//    dynamically and must never evaluate on the server; the Video.js media
+//    element is a custom-element host, which we keep out of hydration's way
+//    the same way media-chrome was.
+// 2. peaks.js initializes BEFORE the hls.js engine attaches. Its init calls
+//    mediaElement.load() when readyState is HAVE_NOTHING — inert while the
+//    video has no source, but fatal after an MSE attach, because
+//    MediaSource object URLs are single-use: a second load() re-requests a
+//    revoked blob URL and kills playback (net::ERR_FILE_NOT_FOUND). The
+//    engine is gated by keeping HlsJsVideo's `src` empty until peaks is up.
 
 // Neutral in light mode, visible in dark; the played region uses the
-// product accent family.
+// product accent family. The same accent themes the Video.js skin.
 const WAVEFORM_COLOR = "#94a3b8";
 const PLAYED_COLOR = "#6366f1";
 const PLAYHEAD_COLOR = "#6366f1";
 
 // hls.js assumes 500 kbps until measured, which would pin startup to the
-// lowest rung. A review tool must start at review quality; ABR still
-// steps down if the connection genuinely can't keep up.
+// lowest rung. A review tool must start at review quality: this estimate
+// exceeds every ladder top rung, so the auto start level picks the top
+// rendition; ABR still steps down if the connection genuinely can't keep
+// up. (The previous player also forced startLevel to the top at manifest
+// parse — with this estimate the auto pick lands on the same rung.)
 const STARTUP_BANDWIDTH_ESTIMATE = 10_000_000;
+
+// Module-level so the identity is stable: reassigning `config` reloads the
+// hls.js engine.
+const HLS_CONFIG = {
+  hlsJs: { abrEwmaDefaultEstimate: STARTUP_BANDWIDTH_ESTIMATE },
+};
+
+const SKIN_STYLE = { "--media-color-primary": PLAYED_COLOR } as CSSProperties;
+
+const Player = createPlayer({ features: videoFeatures });
 
 interface SourcePlayerProps {
   hlsUrl: string;
@@ -140,6 +146,9 @@ export function SourcePlayer({
   const overviewRef = useRef<HTMLDivElement | null>(null);
   const [waveformError, setWaveformError] = useState(false);
   const [mounted, setMounted] = useState(false);
+  // Empty until peaks is bound — the hls.js engine only attaches once this
+  // becomes the real URL (ordering rule 2).
+  const [mediaSrc, setMediaSrc] = useState("");
 
   useEffect(() => {
     setMounted(true);
@@ -153,8 +162,17 @@ export function SourcePlayer({
     }
 
     let cancelled = false;
-    let hls: Hls | undefined;
     let peaksInstance: PeaksInstance | undefined;
+
+    const logMediaError = () => {
+      // Playback failures must be diagnosable from logs alone (the e2e
+      // collects console errors on failure).
+      console.error(
+        `[player] media error ${video.error?.code ?? "?"}:`,
+        video.error?.message ?? "(no message)"
+      );
+    };
+    video.addEventListener("error", logMediaError);
 
     (async () => {
       if (peaksUrl && container) {
@@ -174,42 +192,14 @@ export function SourcePlayer({
         return;
       }
 
-      // Stage 2: attach playback.
-      if (Hls.isSupported()) {
-        hls = new Hls({ abrEwmaDefaultEstimate: STARTUP_BANDWIDTH_ESTIMATE });
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          if (hls) {
-            // Start at the top rendition (levels are sorted by bitrate);
-            // ABR takes over from the second fragment onward.
-            hls.startLevel = hls.levels.length - 1;
-          }
-        });
-        hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (data.fatal) {
-            // Surfaced in the console (and collected by e2e) — playback
-            // failures must be diagnosable from logs alone.
-            console.error(
-              `[hls] fatal ${data.type}: ${data.details}`,
-              data.response?.code ?? ""
-            );
-          }
-        });
-        hls.loadSource(hlsUrl);
-        hls.attachMedia(video);
-        return;
-      }
-
-      // Safari plays HLS natively.
-      if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        video.src = hlsUrl;
-      }
+      // Stage 2: attach playback — the engine loads once src is non-empty.
+      setMediaSrc(hlsUrl);
     })();
 
     return () => {
       cancelled = true;
+      video.removeEventListener("error", logMediaError);
       peaksInstance?.destroy();
-      hls?.destroy();
-      video.removeAttribute("src");
     };
   }, [hlsUrl, peaksUrl, mounted]);
 
@@ -238,26 +228,22 @@ export function SourcePlayer({
 
   return (
     <div className="flex flex-col gap-3">
-      <MediaController className="aspect-video w-full overflow-hidden rounded-md">
-        {/* biome-ignore lint/a11y/useMediaCaption: caption tracks arrive with transcription (S3) */}
-        <video
-          crossOrigin="use-credentials"
+      <Player.Provider>
+        <VideoSkin
+          className="aspect-video w-full overflow-hidden rounded-md"
           poster={posterUrl ?? undefined}
-          ref={videoRef}
-          slot="media"
-        />
-        <MediaControlBar>
-          <MediaPlayButton />
-          <MediaSeekBackwardButton seekOffset={10} />
-          <MediaSeekForwardButton seekOffset={10} />
-          <MediaTimeRange />
-          <MediaTimeDisplay showDuration />
-          <MediaMuteButton />
-          <MediaVolumeRange />
-          <MediaPlaybackRateButton />
-          <MediaFullscreenButton />
-        </MediaControlBar>
-      </MediaController>
+          style={SKIN_STYLE}
+        >
+          <HlsJsVideo
+            config={HLS_CONFIG}
+            crossOrigin="use-credentials"
+            preload="metadata"
+            ref={videoRef}
+            src={mediaSrc}
+            streamType="on-demand"
+          />
+        </VideoSkin>
+      </Player.Provider>
       {peaksUrl && !waveformError ? (
         <div
           aria-label="Audio waveform — click to seek"

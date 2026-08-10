@@ -51,7 +51,7 @@ This document maps every product layer to a concrete technology choice. Format p
 | Command palette | **cmdk** | Universal command experience (§4.3) |
 | Toasts/drawers | **Sonner + Vaul** | AceBuilder-proven; prefer contextual inline feedback where the action lives |
 | Charts | **Recharts** (dashboards) → **ECharts** for heavy analytics (retention curves, large time series) | Recharts for speed now; ECharts when analytics surfaces mature |
-| Media playback | **media-chrome + hls.js** | Custom-styled player over HLS proxies |
+| Media playback | **Video.js v10 React (`@videojs/react`)** | Packaged skin + hls.js engine over HLS proxies; v8 is legacy |
 | Waveforms | **peaks.js** (precomputed peaks server-side) | Transcript/timeline editors need instant waveform paint on long sources |
 | i18n | **next-intl** | Product localization + RTL already scaffolded |
 | Dates/timezones | **date-fns + @internationalized/date** | Timezone-correct scheduling is a hard requirement (§26) |
