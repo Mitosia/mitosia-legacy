@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { PeaksAccumulator } from "../lib/media/peaks";
+import {
+  computeSamplesPerPixel,
+  PEAKS_SAMPLE_RATE,
+  PEAKS_TARGET_WIDTH_PX,
+  PeaksAccumulator,
+  padPeaksToDuration,
+} from "../lib/media/peaks";
 
 function pcmBuffer(samples: number[]): Buffer {
   const buffer = Buffer.alloc(samples.length * 2);
@@ -64,5 +70,46 @@ describe("PeaksAccumulator", () => {
     expect(result.samples_per_pixel).toBe(400);
     expect(result.length).toBe(Math.ceil(1000 / 400));
     expect(result.data).toHaveLength(result.length * 2);
+  });
+});
+
+describe("computeSamplesPerPixel", () => {
+  it("targets a constant native pixel width across durations", () => {
+    for (const seconds of [30, 104, 3600, 7200]) {
+      const spp = computeSamplesPerPixel(seconds);
+      const nativePx = (seconds * PEAKS_SAMPLE_RATE) / spp;
+      expect(nativePx).toBeLessThanOrEqual(PEAKS_TARGET_WIDTH_PX);
+      // Never degenerate: stays within ~2% of the target for real sources.
+      expect(nativePx).toBeGreaterThan(PEAKS_TARGET_WIDTH_PX * 0.98);
+    }
+  });
+
+  it("floors the bucket size for very short clips", () => {
+    expect(computeSamplesPerPixel(0.5)).toBe(4);
+  });
+});
+
+describe("padPeaksToDuration", () => {
+  const base = {
+    bits: 8 as const,
+    channels: 1 as const,
+    data: [-10, 12, -8, 9],
+    length: 2,
+    sample_rate: 8000,
+    samples_per_pixel: 400,
+  };
+
+  it("pads shorter audio with silent buckets to the media duration", () => {
+    // 2 buckets = 0.1s of audio inside a 0.3s media file.
+    const padded = padPeaksToDuration(base, 0.3);
+    expect(padded.length).toBe(6);
+    expect(padded.data).toHaveLength(12);
+    expect(padded.data.slice(0, 4)).toEqual(base.data);
+    expect(padded.data.slice(4)).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+  });
+
+  it("keeps audio that already covers the media duration", () => {
+    const untouched = padPeaksToDuration(base, 0.05);
+    expect(untouched).toEqual(base);
   });
 });

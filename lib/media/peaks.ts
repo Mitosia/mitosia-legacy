@@ -6,8 +6,26 @@ import { runMediaCommand } from "./ffmpeg";
 // never holds more than one chunk of samples in memory.
 
 export const PEAKS_SAMPLE_RATE = 8000;
-// 8000 / 400 = 20 waveform pixels per second of audio.
+// Legacy fixed bucket size (20 waveform pixels per second of audio); still
+// the default for PeaksAccumulator, but generatePeaks now scales buckets to
+// the source duration — see computeSamplesPerPixel.
 export const PEAKS_SAMPLES_PER_PIXEL = 400;
+
+// The overview waveform is only correct when peaks.js can downsample the
+// data to the container (its resample() cannot upsample: shorter data falls
+// back to a fixed px-per-second layout whose x-axis disagrees with the
+// video timeline). Target a native width comfortably above any real
+// container so every render takes the downsample path, and keep the JSON
+// payload duration-independent (~2 × 4096 values).
+export const PEAKS_TARGET_WIDTH_PX = 4096;
+const MIN_SAMPLES_PER_PIXEL = 4;
+
+export function computeSamplesPerPixel(durationSeconds: number): number {
+  return Math.max(
+    MIN_SAMPLES_PER_PIXEL,
+    Math.ceil((durationSeconds * PEAKS_SAMPLE_RATE) / PEAKS_TARGET_WIDTH_PX)
+  );
+}
 
 const INT16_BYTES = 2;
 // Scale s16 samples down to the 8-bit range peaks.js renders.
@@ -81,10 +99,36 @@ export class PeaksAccumulator {
   }
 }
 
+// The waveform's x-axis must span the whole media timeline, not just the
+// audio stream: sources whose audio ends before the video otherwise render
+// an overview whose time axis disagrees with the player (peaks.js maps
+// pixels to time through the data's implied duration). Pad the tail with
+// silent buckets up to the media duration; audio running longer than the
+// container duration is kept as-is.
+export function padPeaksToDuration(
+  peaks: WaveformJson,
+  durationSeconds: number
+): WaveformJson {
+  const targetLength = Math.ceil(
+    (durationSeconds * peaks.sample_rate) / peaks.samples_per_pixel
+  );
+  if (peaks.length >= targetLength) {
+    return peaks;
+  }
+  const data = [...peaks.data];
+  for (let i = peaks.length; i < targetLength; i += 1) {
+    data.push(0, 0);
+  }
+  return { ...peaks, data, length: targetLength };
+}
+
 export async function generatePeaks(
-  inputPath: string
+  inputPath: string,
+  mediaDurationSeconds: number
 ): Promise<WaveformJson & { version: 2 }> {
-  const accumulator = new PeaksAccumulator();
+  const accumulator = new PeaksAccumulator(
+    computeSamplesPerPixel(mediaDurationSeconds)
+  );
 
   await runMediaCommand(
     "ffmpeg",
@@ -106,5 +150,8 @@ export async function generatePeaks(
     { onStdout: (chunk) => accumulator.push(chunk) }
   );
 
-  return { version: 2, ...accumulator.finish() };
+  return {
+    version: 2,
+    ...padPeaksToDuration(accumulator.finish(), mediaDurationSeconds),
+  };
 }
