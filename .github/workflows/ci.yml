@@ -84,7 +84,11 @@ jobs:
         ports:
           - 5432:5432
     env:
-      DATABASE_URL: postgres://ci:ci@localhost:5432/ci
+      # The app must NOT connect as the ci superuser: superusers silently
+      # bypass RLS, which is the org filter in every tenant query — with it
+      # off, e2e retries can see and attach to a previous attempt's data
+      # (PR #16). ci_app mirrors the mitosia_app/production shape.
+      DATABASE_URL: postgres://ci_app:ci_app@localhost:5432/ci
       MIGRATE_DATABASE_URL: postgres://ci:ci@localhost:5432/ci
       BETTER_AUTH_SECRET: ci-only-placeholder-secret-not-used-anywhere
       # Must match the e2e dev server port or Better Auth rejects auth as cross-origin
@@ -125,6 +129,21 @@ jobs:
 
       - name: Apply migrations
         run: pnpm db:migrate
+
+      # Non-superuser app role, mirroring docker/dev-init/01-app-role.sql:
+      # the app's connection must be subject to RLS or the e2e suite runs
+      # against a tenancy model that doesn't exist in production.
+      - name: Create app role
+        run: |
+          psql "$MIGRATE_DATABASE_URL" <<'SQL'
+          CREATE ROLE ci_app LOGIN PASSWORD 'ci_app';
+          GRANT CONNECT ON DATABASE ci TO ci_app;
+          GRANT USAGE ON SCHEMA public TO ci_app;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ci_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ci_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE ci IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ci_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE ci IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ci_app;
+          SQL
 
       - name: Run end-to-end tests
         run: pnpm e2e

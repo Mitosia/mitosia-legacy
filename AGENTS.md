@@ -51,7 +51,7 @@ Read [docs/tech-stack.md](docs/tech-stack.md) (stack decisions and rationale) an
 
 - Tenant-owned tables (anything with `organization_id`) get `ENABLE` + `FORCE ROW LEVEL SECURITY` and an org-isolation policy **in the same migration that creates them**, and an entry in `tests/rls-isolation.test.ts`.
 - App code touches tenant tables **only** inside `withOrgScope()` (`lib/db/tenant.ts`), with the org id taken from `requireOrg()` — never from user input.
-- The app's `DATABASE_URL` role must **never** be a superuser or table owner: superusers bypass RLS silently, and the Docker image's `POSTGRES_USER` is a superuser. The app connects as `mitosia_app`; `MIGRATE_DATABASE_URL` carries the owner connection used only by drizzle-kit and the container entrypoint.
+- The app's `DATABASE_URL` role must **never** be a superuser or table owner: superusers bypass RLS silently, and the Docker image's `POSTGRES_USER` is a superuser. The app connects as `mitosia_app`; `MIGRATE_DATABASE_URL` carries the owner connection used only by drizzle-kit and the container entrypoint. This applies to **CI too**: the e2e job creates `ci_app` (see ci.yml) — running the e2e app as the `ci` superuser silently disabled RLS and let a Playwright retry walk into a previous attempt's tenant (PR #16).
 - Foreign-key checks do not consult RLS. Before inserting a child row, re-read the parent inside the org scope (see `assertVisible` in `lib/actions/hierarchy.ts`) so a cross-tenant parent id can never be attached.
 - Tests: `TEST_DATABASE_URL` must point at a disposable database (the suite wipes it); run with `pnpm test`.
 

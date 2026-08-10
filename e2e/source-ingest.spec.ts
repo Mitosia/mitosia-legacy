@@ -51,23 +51,34 @@ test.beforeAll(() => {
   ]);
 });
 
-async function createHierarchy(page: import("@playwright/test").Page) {
+// Names carry a per-attempt suffix: a retry that reuses fixed names can
+// otherwise click into the previous attempt's identically-named hierarchy
+// (and with RLS accidentally disabled, even cross-tenant — see PR #16).
+async function createHierarchy(
+  page: import("@playwright/test").Page,
+  run: string
+) {
+  const client = `E2E Media Client ${run}`;
+  const brand = `E2E Brand ${run}`;
+  const campaign = `E2E Campaign ${run}`;
+  const project = `E2E Project ${run}`;
+
   await page.goto("/clients");
-  await page.getByLabel("New client").fill("E2E Media Client");
+  await page.getByLabel("New client").fill(client);
   await page.getByRole("button", { name: "Add client" }).click();
-  await page.getByRole("link", { name: "E2E Media Client" }).click();
+  await page.getByRole("link", { name: client }).click();
 
-  await page.getByLabel("New brand").fill("E2E Brand");
+  await page.getByLabel("New brand").fill(brand);
   await page.getByRole("button", { name: "Add brand" }).click();
-  await page.getByRole("link", { name: "E2E Brand" }).click();
+  await page.getByRole("link", { name: brand }).click();
 
-  await page.getByLabel("New campaign").fill("E2E Campaign");
+  await page.getByLabel("New campaign").fill(campaign);
   await page.getByRole("button", { name: "Add campaign" }).click();
-  await page.getByRole("link", { name: "E2E Campaign" }).click();
+  await page.getByRole("link", { name: campaign }).click();
 
-  await page.getByLabel("New project").fill("E2E Project");
+  await page.getByLabel("New project").fill(project);
   await page.getByRole("button", { name: "Add project" }).click();
-  await page.getByRole("link", { name: "E2E Project" }).click();
+  await page.getByRole("link", { name: project }).click();
 }
 
 test("a recording uploads, ingests, and plays as proxy with waveform scrubbing", async ({
@@ -91,7 +102,7 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   });
 
   await createAccountWithOrg(page, "ingest");
-  await createHierarchy(page);
+  await createHierarchy(page, Date.now().toString(36));
 
   // Upload through the Uppy dashboard (multipart to storage, not the app).
   await page.locator(".uppy-Dashboard-input").first().setInputFiles(FIXTURE);
@@ -114,8 +125,10 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   // Open the source page: proxy playback + waveform. The click can race a
   // RefreshPoller re-render (server components swap the list mid-click),
   // so wait for the URL rather than trusting a single click's navigation.
+  // Generous budget: on cold CI runners the source route compiles on first
+  // hit, and the click can already race a RefreshPoller re-render.
   await page.getByRole("link", { name: "tiny-source" }).click();
-  await page.waitForURL(SOURCE_PAGE_URL, { timeout: 15_000 });
+  await page.waitForURL(SOURCE_PAGE_URL, { timeout: 30_000 });
   await expect(page.getByRole("heading", { name: "tiny-source" })).toBeVisible({
     timeout: 15_000,
   });
