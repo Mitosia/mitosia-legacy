@@ -16,6 +16,7 @@ import {
 import { project, source, sourceArtifact } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { formatBytes, formatDuration } from "@/lib/format";
+import { ingestStepLabel, SOURCE_STATUS_LABELS } from "@/lib/ingest-labels";
 import { requireOrg } from "@/lib/org";
 
 interface ProbeMetadata {
@@ -174,9 +175,9 @@ export default async function SourceDetailPage(
           <Badge
             variant={data.status === "failed" ? "destructive" : "secondary"}
           >
-            {data.status === "processing" && data.ingestStep
-              ? `Processing: ${data.ingestStep}`
-              : data.status}
+            {data.status === "processing"
+              ? `${ingestStepLabel(data.ingestStep)}…`
+              : SOURCE_STATUS_LABELS[data.status]}
           </Badge>
         )}
       </div>

@@ -139,6 +139,10 @@ export default async function ProjectDetailPage(
         <CardContent>
           <RefreshPoller active={hasActiveSources} />
           <SourceList items={data.sources} />
+          <p className="mt-3 text-muted-foreground text-xs">
+            Recordings are prepared for fast playback and editing — usually a
+            few minutes.
+          </p>
         </CardContent>
       </Card>
     </div>
