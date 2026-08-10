@@ -37,6 +37,12 @@ async function setDefaultActiveOrganization<
     .orderBy(asc(schema.member.createdAt))
     .limit(1);
 
+  // TEMPORARY diagnostics (PR #16): CI-only org confusion across e2e users.
+  console.error("[auth] session.create", {
+    resolvedOrg: firstMembership?.organizationId ?? null,
+    userId: session.userId,
+  });
+
   return {
     data: {
       ...session,
