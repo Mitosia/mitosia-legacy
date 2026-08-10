@@ -15,6 +15,21 @@ export function thumbnailIntervalSeconds(durationSeconds: number): number {
   );
 }
 
+// Filter strings are exported and unit-tested because both pinned args fix
+// observed ffmpeg 8 failures (see tests/thumbnail-filters.test.ts):
+// - format=yuvj420p — the mjpeg encoder refuses limited-range YUV (hard
+//   error: "Non full-range YUV is non-standard")
+// - fps=1/N:round=up — without it, sources shorter than N seconds emit
+//   ZERO thumbnails with exit code 0 (silent failure)
+
+export function posterFilter(): string {
+  return `scale=${POSTER_WIDTH}:-2,format=yuvj420p`;
+}
+
+export function thumbnailStripFilter(intervalSeconds: number): string {
+  return `fps=1/${intervalSeconds}:round=up,scale=${THUMB_WIDTH}:-2,format=yuvj420p`;
+}
+
 export async function generatePoster(
   inputUrl: string,
   durationSeconds: number,
@@ -32,9 +47,8 @@ export async function generatePoster(
     inputUrl,
     "-frames:v",
     "1",
-    // format=yuvj420p: ffmpeg 8's mjpeg encoder refuses limited-range YUV
     "-vf",
-    `scale=${POSTER_WIDTH}:-2,format=yuvj420p`,
+    posterFilter(),
     outPath,
   ]);
 }
@@ -51,10 +65,8 @@ export async function generateThumbnailStrip(
     "-y",
     "-i",
     inputUrl,
-    // round=up: without it ffmpeg 8 emits zero frames when the source is
-    // shorter than the sampling interval
     "-vf",
-    `fps=1/${intervalSeconds}:round=up,scale=${THUMB_WIDTH}:-2,format=yuvj420p`,
+    thumbnailStripFilter(intervalSeconds),
     `${outDir}/thumb%05d.jpg`,
   ]);
   return { intervalSeconds };
