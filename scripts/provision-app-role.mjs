@@ -53,9 +53,7 @@ try {
   if (existing.length === 0) {
     // LOGIN only: no CREATEDB, no CREATEROLE, and emphatically no SUPERUSER
     // or BYPASSRLS.
-    await client.query(
-      `CREATE ROLE ${role} LOGIN PASSWORD ${quotedPassword}`
-    );
+    await client.query(`CREATE ROLE ${role} LOGIN PASSWORD ${quotedPassword}`);
     process.stdout.write(`created role ${role}\n`);
   } else {
     await client.query(
@@ -64,7 +62,9 @@ try {
     process.stdout.write(`role ${role} already existed — password reset\n`);
   }
 
-  const { rows: dbRows } = await client.query("SELECT current_database() AS db");
+  const { rows: dbRows } = await client.query(
+    "SELECT current_database() AS db"
+  );
   const database = dbRows[0].db;
 
   await client.query(`GRANT CONNECT ON DATABASE "${database}" TO ${role}`);
@@ -111,9 +111,11 @@ try {
 
   if (problems.length > 0) {
     process.stderr.write(
-      [`${role} is not safe to use as DATABASE_URL:`, ...problems.map((p) => `  - ${p}`), ""].join(
-        "\n"
-      )
+      [
+        `${role} is not safe to use as DATABASE_URL:`,
+        ...problems.map((p) => `  - ${p}`),
+        "",
+      ].join("\n")
     );
     process.exit(1);
   }
