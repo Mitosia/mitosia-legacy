@@ -1,4 +1,12 @@
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { eq, sql } from "drizzle-orm";
@@ -12,7 +20,7 @@ import { withOrgScope } from "@/lib/db/tenant";
 import { recordUsage } from "@/lib/ledger";
 import { presignGetUrl, putFile, putJson } from "@/lib/storage";
 import { sourcePrefixFromOriginalKey } from "@/lib/storage/keys";
-import { runMediaCommand } from "./ffmpeg";
+import { inputArgs, runMediaCommand } from "./ffmpeg";
 import {
   buildHlsArgs,
   type MasterPlaylistEntry,
@@ -23,6 +31,11 @@ import { sanitizeIngestError } from "./ingest-error";
 import { generatePeaks } from "./peaks";
 import { probeSource, type SourceProbe } from "./probe";
 import { generatePoster, generateThumbnailStrip } from "./thumbs";
+import {
+  assertCoversDuration,
+  probeDurationSeconds,
+  sumPlaylistSeconds,
+} from "./verify";
 
 // The S2 ingest workflow: probe/validate → HLS proxy ladder → thumbnails →
 // audio extract → waveform peaks → finalize (+ metering). Runs the same
@@ -216,6 +229,15 @@ async function runHlsStep(
       // biome-ignore lint/performance/noAwaitInLoops: few files, trivial cost
       variantBytes += (await stat(join(variantDir, file))).size;
     }
+
+    // Verified before upload so a short ladder never reaches storage.
+    const playlist = await readFile(join(variantDir, "index.m3u8"), "utf8");
+    assertCoversDuration(
+      `HLS variant ${variant.dirName}`,
+      sumPlaylistSeconds(playlist),
+      probe.durationSeconds
+    );
+
     entries.push({
       bandwidth: (variantBytes * 8) / probe.durationSeconds,
       height: variant.height,
@@ -296,15 +318,15 @@ async function runThumbnailStep(
 async function runAudioStep(
   inputUrl: string,
   workDir: string,
-  keyPrefix: string
+  keyPrefix: string,
+  durationSeconds: number
 ): Promise<{ artifacts: ArtifactUpload[]; audioPath: string }> {
   const audioPath = join(workDir, "audio.m4a");
   await runMediaCommand("ffmpeg", [
     "-v",
     "error",
     "-y",
-    "-i",
-    inputUrl,
+    ...inputArgs(inputUrl),
     "-vn",
     "-map",
     "0:a:0",
@@ -316,6 +338,15 @@ async function runAudioStep(
     "+faststart",
     audioPath,
   ]);
+
+  // The audio extract feeds the waveform, and peaks.ts pads a short stream
+  // with silence by design — so truncation here degrades into a plausible
+  // looking waveform rather than an error. Check it explicitly.
+  assertCoversDuration(
+    "Audio extract",
+    await probeDurationSeconds(audioPath),
+    durationSeconds
+  );
 
   const sizeBytes = (await stat(audioPath)).size;
   await putFile(`${keyPrefix}audio/audio.m4a`, audioPath, "audio/mp4");
@@ -481,7 +512,12 @@ export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
 
     if (probe.audio) {
       await setIngestStep(payload, "audio");
-      const audio = await runAudioStep(inputUrl, workDir, keyPrefix);
+      const audio = await runAudioStep(
+        inputUrl,
+        workDir,
+        keyPrefix,
+        probe.durationSeconds
+      );
       artifacts.push(...audio.artifacts);
 
       await setIngestStep(payload, "waveform");

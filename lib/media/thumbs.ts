@@ -1,4 +1,4 @@
-import { runMediaCommand } from "./ffmpeg";
+import { inputArgs, runMediaCommand } from "./ffmpeg";
 
 // Poster frame + a sparse thumbnail strip for scrubbing and list cards.
 
@@ -43,8 +43,7 @@ export async function generatePoster(
     "-y",
     "-ss",
     seekTo.toFixed(2),
-    "-i",
-    inputUrl,
+    ...inputArgs(inputUrl),
     "-frames:v",
     "1",
     "-vf",
@@ -63,8 +62,7 @@ export async function generateThumbnailStrip(
     "-v",
     "error",
     "-y",
-    "-i",
-    inputUrl,
+    ...inputArgs(inputUrl),
     "-vf",
     thumbnailStripFilter(intervalSeconds),
     `${outDir}/thumb%05d.jpg`,
