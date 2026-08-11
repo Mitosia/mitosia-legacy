@@ -6,6 +6,48 @@ import { spawn } from "node:child_process";
 
 const STDERR_TAIL_BYTES = 4096;
 
+// Reconnect settings for remote inputs. ffmpeg's HTTP reader treats a
+// mid-transfer disconnect as end-of-file: it finalizes a VALID but truncated
+// output and exits 0, so with `-v error` nothing anywhere looks wrong.
+//
+// The exposure is how LONG a read stays open, not how big it is. The HLS
+// ladder is CPU-bound and holds one connection for the whole transcode — a
+// 2h source at 0.26x realtime drains 2.1GB over ~28 minutes at ~1.2MB/s —
+// and the S2 exit test came back with 58.2% of its video (4189s of 7200s)
+// across all three rungs. The audio step read the same object end to end in
+// ~2 minutes and was complete, which is what pinned the cause. Sub-5-minute
+// files finish the read in seconds, which is why this hid through S2.
+//
+// `-reconnect` is precisely "auto reconnect after disconnect before EOF":
+// ffmpeg knows Content-Length, notices the short read, and resumes with a
+// ranged request. The retry caps bound a genuinely dead origin so a broken
+// source fails instead of hanging forever.
+const HTTP_RECONNECT_ARGS = [
+  "-reconnect",
+  "1",
+  "-reconnect_streamed",
+  "1",
+  "-reconnect_on_network_error",
+  "1",
+  "-reconnect_delay_max",
+  "30",
+  "-reconnect_max_retries",
+  "10",
+];
+
+const HTTP_URL = /^https?:\/\//i;
+
+// Input args for a source that may be a presigned URL or a local path.
+// Always use this instead of a bare ["-i", url] — reconnect flags are input
+// options and must precede -i. Local paths must not carry them: ffmpeg
+// rejects http options on the file protocol ("Option reconnect not found").
+export function inputArgs(input: string): string[] {
+  if (!HTTP_URL.test(input)) {
+    return ["-i", input];
+  }
+  return [...HTTP_RECONNECT_ARGS, "-i", input];
+}
+
 export class MediaCommandError extends Error {
   readonly exitCode: number | null;
   readonly stderrTail: string;

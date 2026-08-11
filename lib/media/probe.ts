@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { runMediaCommand } from "./ffmpeg";
+import { inputArgs, runMediaCommand } from "./ffmpeg";
 
 // Probe + validation gate: nothing enters the pipeline that ffprobe cannot
 // fully describe. The parsed result is stored on the source row as metadata
@@ -137,7 +137,7 @@ export async function probeSource(inputUrl: string): Promise<SourceProbe> {
     "json",
     "-show_format",
     "-show_streams",
-    inputUrl,
+    ...inputArgs(inputUrl),
   ]);
   return parseFfprobeJson(stdout);
 }

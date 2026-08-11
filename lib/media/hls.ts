@@ -1,3 +1,4 @@
+import { inputArgs } from "./ffmpeg";
 import type { SourceProbe } from "./probe";
 
 // Rendition ladder built on what the major platforms converged on:
@@ -122,7 +123,7 @@ export function buildHlsArgs(
   hasAudio: boolean,
   outDir: string
 ): string[] {
-  const args = ["-v", "error", "-y", "-i", inputUrl];
+  const args = ["-v", "error", "-y", ...inputArgs(inputUrl)];
 
   for (const variant of plan) {
     if (variant.kind === "video") {
