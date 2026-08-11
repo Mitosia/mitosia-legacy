@@ -72,6 +72,28 @@ interface RunOptions {
   onStdout?: (chunk: Buffer) => void;
 }
 
+// `-progress pipe:1` emits key=value lines every second or so, ending each
+// block with `progress=continue` (or `end`). `out_time_us` is the position
+// reached in the OUTPUT timeline, which for a straight transcode is how far
+// through the source it has got.
+export const PROGRESS_ARGS = ["-progress", "pipe:1", "-nostats"];
+
+const OUT_TIME_US = /^out_time_us=(\d+)$/m;
+
+// Reads the most recent position out of a chunk of that stream. Chunks can
+// carry several blocks or half a line; only whole `out_time_us=` lines are
+// matched, and the newest one in the chunk wins.
+export function parseProgressSeconds(chunk: string): number | null {
+  let seconds: number | null = null;
+  for (const line of chunk.split("\n")) {
+    const match = OUT_TIME_US.exec(line);
+    if (match?.[1]) {
+      seconds = Number(match[1]) / 1_000_000;
+    }
+  }
+  return seconds;
+}
+
 export function runMediaCommand(
   command: string,
   args: string[],

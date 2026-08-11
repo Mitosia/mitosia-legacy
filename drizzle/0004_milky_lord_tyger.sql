@@ -1,0 +1,1 @@
+ALTER TABLE "source" ADD COLUMN "ingest_progress" double precision;

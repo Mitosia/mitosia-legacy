@@ -2,13 +2,14 @@ import Link from "next/link";
 import { Badge } from "@/components/ui/badge";
 import type { IngestStep, SourceStatus } from "@/lib/db/schema";
 import { formatBytes, formatDuration } from "@/lib/format";
-import { ingestStepLabel } from "@/lib/ingest-labels";
+import { ingestStepProgressLabel } from "@/lib/ingest-labels";
 import { RetryIngestButton } from "./retry-ingest-button";
 
 export interface SourceListItem {
   durationSeconds: number | null;
   id: string;
   ingestError: string | null;
+  ingestProgress: number | null;
   ingestStep: IngestStep | null;
   posterKey: string | null;
   sizeBytes: number | null;
@@ -24,7 +25,9 @@ function statusBadge(item: SourceListItem) {
       return <Badge variant="secondary">Queued</Badge>;
     case "processing":
       return (
-        <Badge variant="secondary">{ingestStepLabel(item.ingestStep)}…</Badge>
+        <Badge variant="secondary">
+          {ingestStepProgressLabel(item.ingestStep, item.ingestProgress)}…
+        </Badge>
       );
     case "ready":
       return <Badge>Ready</Badge>;

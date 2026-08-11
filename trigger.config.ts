@@ -1,5 +1,45 @@
-import { ffmpeg } from "@trigger.dev/build/extensions/core";
+import type { BuildExtension } from "@trigger.dev/build";
 import { defineConfig } from "@trigger.dev/sdk";
+import { ffmpegInstallCommand } from "./scripts/ffmpeg-pin.mjs";
+
+// NOT the bundled `ffmpeg()` extension. It installs Debian's apt ffmpeg
+// (5.1.x), and its only alternative is a *floating* git build — neither is
+// the 8.1.x minor `lib/media/` is written against and every other
+// environment pins. That gap is not cosmetic: `-reconnect_on_network_error`
+// (lib/media/ffmpeg.ts, the fix for silently truncated transcodes) landed in
+// ffmpeg 6.1, and an unknown option makes ffmpeg refuse to start — so the
+// first thing setting TRIGGER_SECRET_KEY would have done is break every
+// ingest, on the runtime meant to make ingest more reliable.
+//
+// Installs the same checksummed asset CI does, then runs the shared version
+// check so a drifted pin fails the deploy instead of the first upload.
+function pinnedFfmpeg(): BuildExtension {
+  return {
+    name: "pinned-ffmpeg",
+    onBuildComplete(context) {
+      if (context.target === "dev") {
+        return;
+      }
+      context.addLayer({
+        deploy: {
+          env: {
+            FFMPEG_PATH: "/usr/bin/ffmpeg",
+            FFPROBE_PATH: "/usr/bin/ffprobe",
+          },
+          override: true,
+        },
+        id: "ffmpeg",
+        image: {
+          instructions: [
+            `RUN ${ffmpegInstallCommand()}`,
+            "COPY scripts/check-ffmpeg-version.mjs /tmp/check-ffmpeg-version.mjs",
+            "RUN node /tmp/check-ffmpeg-version.mjs && rm /tmp/check-ffmpeg-version.mjs",
+          ],
+        },
+      });
+    },
+  };
+}
 
 // Trigger.dev is the durable outer spine for ingest/render/publish jobs
 // (tech-stack §8). Deploying needs TRIGGER_PROJECT_REF + TRIGGER_SECRET_KEY
@@ -8,7 +48,7 @@ import { defineConfig } from "@trigger.dev/sdk";
 // runner in lib/ingest.ts.
 export default defineConfig({
   build: {
-    extensions: [ffmpeg()],
+    extensions: [pinnedFfmpeg()],
   },
   dirs: ["./trigger"],
   // A two-hour source transcodes for a while even at veryfast; give the
