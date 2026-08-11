@@ -11,6 +11,7 @@
     "db:auth:generate": "pnpm dlx @better-auth/cli@latest generate --config lib/auth.ts --output lib/db/schema/auth.ts --yes",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
+    "db:provision-app-role": "node --env-file-if-exists=.env scripts/provision-app-role.mjs",
     "db:studio": "drizzle-kit studio",
     "dev": "next dev",
     "e2e": "playwright test",
