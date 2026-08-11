@@ -41,6 +41,9 @@ importers:
       '@uppy/dashboard':
         specifier: ^5.1.1
         version: 5.1.1(@uppy/core@5.2.0)
+      '@uppy/golden-retriever':
+        specifier: ^5.2.1
+        version: 5.2.1(@uppy/core@5.2.0)
       '@uppy/react':
         specifier: ^5.2.0
         version: 5.2.0(@uppy/core@5.2.0)(@uppy/dashboard@5.1.1(@uppy/core@5.2.0))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -1678,6 +1681,11 @@ packages:
 
   '@uppy/dashboard@5.1.1':
     resolution: {integrity: sha512-6H/xVvhhdfwp1+FRMp2C+tudyaedqD5+LMDB8Iw20k9+QCL1eGzOh4wXm6MCqJtNfQ1tLaprGMG1jlo7yS/uyw==}
+    peerDependencies:
+      '@uppy/core': ^5.2.0
+
+  '@uppy/golden-retriever@5.2.1':
+    resolution: {integrity: sha512-R+Lzesfmgu35ViSOxqYxwOVo4ylkIS9xP2ClnhD8k2VTbqdc6RRimaPRqxxI3Vf42qWiRBm4WaG3uHls+wOCqQ==}
     peerDependencies:
       '@uppy/core': ^5.2.0
 
@@ -5483,6 +5491,14 @@ snapshots:
       nanoid: 5.1.16
       preact: 10.29.8
       shallow-equal: 3.1.0
+    transitivePeerDependencies:
+      - preact-render-to-string
+
+  '@uppy/golden-retriever@5.2.1(@uppy/core@5.2.0)':
+    dependencies:
+      '@uppy/core': 5.2.0
+      '@uppy/utils': 7.2.0
+      lodash: 4.18.1
     transitivePeerDependencies:
       - preact-render-to-string
 
