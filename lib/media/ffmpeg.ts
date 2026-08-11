@@ -22,6 +22,14 @@ const STDERR_TAIL_BYTES = 4096;
 // ffmpeg knows Content-Length, notices the short read, and resumes with a
 // ranged request. The retry caps bound a genuinely dead origin so a broken
 // source fails instead of hanging forever.
+//
+// Keep this list to options that have been in ffmpeg for years. CI installs
+// Ubuntu's apt ffmpeg while the Docker image installs Alpine's (8.1.2 on
+// staging), so a flag that exists in one can be absent in the other — and an
+// unknown option is a HARD failure that breaks every ingest, not a warning.
+// `-reconnect_max_retries` was here initially and CI's ffprobe rejected it
+// with "Option not found". `-reconnect_delay_max` already bounds giving up
+// (the backoff doubles past 30s after ~6 attempts), so it added nothing.
 const HTTP_RECONNECT_ARGS = [
   "-reconnect",
   "1",
@@ -31,8 +39,6 @@ const HTTP_RECONNECT_ARGS = [
   "1",
   "-reconnect_delay_max",
   "30",
-  "-reconnect_max_retries",
-  "10",
 ];
 
 const HTTP_URL = /^https?:\/\//i;
