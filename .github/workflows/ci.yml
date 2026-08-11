@@ -116,14 +116,19 @@ jobs:
       # every ingest breaks — PR #23), and the ffmpeg 8 behaviour lib/media/
       # is written around cannot be exercised at all. Pinned to an immutable
       # BtbN release asset; bump alongside the Dockerfile's Alpine pin.
+      #
+      # The asset coordinates live in scripts/ffmpeg-pin.mjs, not here: the
+      # Trigger.dev deploy image installs the same build (Debian's apt ffmpeg
+      # is 5.1.x), and a checksum copied into two files is a checksum that
+      # eventually disagrees with itself.
       - name: Install ffmpeg
-        env:
-          FFMPEG_RELEASE: autobuild-2026-08-10-13-17
-          FFMPEG_BUILD: ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-gpl-8.1
-          FFMPEG_SHA256: 7b0c2ad593860d8bb157e346777ac7d741b5bf25b456382051138aaa8256f92d
         run: |
-          curl -fsSL -o /tmp/ffmpeg.tar.xz \
-            "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_RELEASE}/${FFMPEG_BUILD}.tar.xz"
+          eval "$(node -e 'import("./scripts/ffmpeg-pin.mjs").then((pin) => {
+            process.stdout.write(
+              `FFMPEG_URL=${pin.FFMPEG_URL}\nFFMPEG_BUILD=${pin.FFMPEG_BUILD}\nFFMPEG_SHA256=${pin.FFMPEG_SHA256}\n`
+            );
+          })')"
+          curl -fsSL -o /tmp/ffmpeg.tar.xz "${FFMPEG_URL}"
           echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           sudo tar -xJf /tmp/ffmpeg.tar.xz -C /usr/local/bin --strip-components=2 \
             "${FFMPEG_BUILD}/bin/ffmpeg" "${FFMPEG_BUILD}/bin/ffprobe"

@@ -54,6 +54,7 @@ export default async function ProjectDetailPage(
         durationSeconds: source.durationSeconds,
         id: source.id,
         ingestError: source.ingestError,
+        ingestProgress: source.ingestProgress,
         ingestStep: source.ingestStep,
         sizeBytes: source.sizeBytes,
         // Computed in the database (time-zone-safe) rather than compared

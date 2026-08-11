@@ -67,6 +67,10 @@ export const source = pgTable(
     id: uuid("id").primaryKey().default(sql`uuidv7()`),
     ingestAttempts: integer("ingest_attempts").default(0).notNull(),
     ingestError: text("ingest_error"),
+    // 0–1 through the current step, and only the steps long enough to need
+    // it write here (the ladder). Null means "no finer detail than the step
+    // name" — a step that takes seconds should not claim a percentage.
+    ingestProgress: doublePrecision("ingest_progress"),
     ingestStep: text("ingest_step", { enum: INGEST_STEPS }),
     // ffprobe result: container, video/audio codecs, dimensions, fps, bitrate
     metadata: jsonb("metadata"),

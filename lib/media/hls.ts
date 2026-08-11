@@ -1,4 +1,4 @@
-import { inputArgs } from "./ffmpeg";
+import { inputArgs, PROGRESS_ARGS } from "./ffmpeg";
 import type { SourceProbe } from "./probe";
 
 // Rendition ladder built on what the major platforms converged on:
@@ -123,7 +123,11 @@ export function buildHlsArgs(
   hasAudio: boolean,
   outDir: string
 ): string[] {
-  const args = ["-v", "error", "-y", ...inputArgs(inputUrl)];
+  // Progress on stdout: the ladder is the one step long enough that silence
+  // reads as a hang. A 2h source spends ~30 minutes here, and with nothing
+  // reported the UI sat on "Preparing playback" and the row's updated_at
+  // never moved — a healthy ingest was indistinguishable from a dead one.
+  const args = ["-v", "error", ...PROGRESS_ARGS, "-y", ...inputArgs(inputUrl)];
 
   for (const variant of plan) {
     if (variant.kind === "video") {

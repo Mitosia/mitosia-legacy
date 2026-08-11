@@ -20,7 +20,7 @@ import { withOrgScope } from "@/lib/db/tenant";
 import { recordUsage } from "@/lib/ledger";
 import { presignGetUrl, putFile, putJson } from "@/lib/storage";
 import { sourcePrefixFromOriginalKey } from "@/lib/storage/keys";
-import { inputArgs, runMediaCommand } from "./ffmpeg";
+import { inputArgs, parseProgressSeconds, runMediaCommand } from "./ffmpeg";
 import {
   buildHlsArgs,
   type MasterPlaylistEntry,
@@ -148,9 +148,56 @@ async function setIngestStep(
   await withOrgScope(payload.organizationId, (tx) =>
     tx
       .update(source)
-      .set({ ingestStep: step })
+      .set({ ingestProgress: null, ingestStep: step })
       .where(eq(source.id, payload.sourceId))
   );
+}
+
+// How often progress reaches the database. ffmpeg reports about once a
+// second; a 30-minute step does not need 1800 writes to look alive, and the
+// project list only re-renders every few seconds anyway.
+const PROGRESS_WRITE_INTERVAL_MS = 10_000;
+
+// Throttled progress writer for a long step. Returns a function to hand to
+// runMediaCommand, plus the flush the step awaits at the end so a write
+// started mid-run cannot outlive it.
+function progressReporter(payload: IngestPayload, totalSeconds: number) {
+  let lastWrite = 0;
+  let pending: Promise<void> = Promise.resolve();
+
+  return {
+    flush: () => pending,
+    onStdout: (chunk: Buffer) => {
+      const seconds = parseProgressSeconds(chunk.toString());
+      if (seconds === null || totalSeconds <= 0) {
+        return;
+      }
+      const now = performance.now();
+      if (now - lastWrite < PROGRESS_WRITE_INTERVAL_MS) {
+        return;
+      }
+      lastWrite = now;
+
+      // Clamped: ffmpeg can report a position slightly past the duration on
+      // the final flush, and a badge reading 103% is worse than one at 100.
+      const fraction = Math.min(1, Math.max(0, seconds / totalSeconds));
+      pending = pending
+        .then(() =>
+          withOrgScope(payload.organizationId, (tx) =>
+            tx
+              .update(source)
+              .set({ ingestProgress: fraction })
+              .where(eq(source.id, payload.sourceId))
+          )
+        )
+        // A dropped progress write must never fail the ingest: it is a
+        // cosmetic signal, and the transcode behind it is still fine.
+        .then(
+          () => undefined,
+          () => undefined
+        );
+    },
+  };
 }
 
 interface StartedIngest {
@@ -203,7 +250,8 @@ async function runHlsStep(
   inputUrl: string,
   probe: SourceProbe,
   workDir: string,
-  keyPrefix: string
+  keyPrefix: string,
+  payload: IngestPayload
 ): Promise<ArtifactUpload[]> {
   const plan = planHlsLadder(probe);
   const hlsDir = join(workDir, "hls");
@@ -213,10 +261,13 @@ async function runHlsStep(
     )
   );
 
+  const progress = progressReporter(payload, probe.durationSeconds);
   await runMediaCommand(
     "ffmpeg",
-    buildHlsArgs(inputUrl, plan, Boolean(probe.audio), hlsDir)
+    buildHlsArgs(inputUrl, plan, Boolean(probe.audio), hlsDir),
+    { onStdout: progress.onStdout }
   );
+  await progress.flush();
 
   // Master playlist bandwidths come from measured variant sizes.
   const entries: MasterPlaylistEntry[] = [];
@@ -405,6 +456,7 @@ async function finalizeIngest(
       .update(source)
       .set({
         durationSeconds: probe.durationSeconds,
+        ingestProgress: null,
         ingestStep: null,
         metadata: probe as unknown as Record<string, unknown>,
         status: "ready",
@@ -501,7 +553,9 @@ export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
     const artifacts: ArtifactUpload[] = [];
 
     await setIngestStep(payload, "hls");
-    artifacts.push(...(await runHlsStep(inputUrl, probe, workDir, keyPrefix)));
+    artifacts.push(
+      ...(await runHlsStep(inputUrl, probe, workDir, keyPrefix, payload))
+    );
 
     if (probe.video) {
       await setIngestStep(payload, "thumbnails");
