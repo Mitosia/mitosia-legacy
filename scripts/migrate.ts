@@ -1,6 +1,9 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
+// Relative, not the `@/` alias: this file is bundled standalone by esbuild
+// in the Dockerfile, so it must not depend on tsconfig path resolution.
+import { tuneOutboundConnections } from "../lib/net-tuning";
 
 // Release-phase migration runner: bundled by the Dockerfile and executed by
 // docker-entrypoint.sh before the server starts. Never run at build time —
@@ -11,6 +14,10 @@ import { Pool } from "pg";
 const MIGRATION_LOCK_ID = 727_314_159;
 
 async function main() {
+  // Before the first connection: a cross-region database is unreachable on
+  // Node's defaults, and this is the process that finds out first.
+  tuneOutboundConnections();
+
   // Prefer the owner connection: the runtime DATABASE_URL role is
   // deliberately unprivileged (no DDL) so that RLS applies to the app.
   const connectionString =
