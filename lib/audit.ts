@@ -3,7 +3,9 @@ import type { OrgTransaction } from "./db/tenant";
 
 interface AuditEntry {
   action: string;
-  actorUserId: string;
+  // null for system-initiated changes (e.g. the stale-upload sweep), which
+  // still belong in the log but have no acting user.
+  actorUserId: string | null;
   entityId?: string;
   entityType: string;
   metadata?: Record<string, unknown>;

@@ -1,9 +1,9 @@
 import { Client } from "pg";
 
-// Read-only verification queries against the database the app under test
-// writes to. Some pipeline output has no user-visible surface — artifact
-// size_bytes was NULL on every row ever written and nothing looked wrong —
-// so for those the database is the only place a regression can be caught.
+// Verification queries against the database the app under test writes to.
+// Some pipeline output has no user-visible surface — artifact size_bytes
+// was NULL on every row ever written and nothing looked wrong — so for
+// those the database is the only place a regression can be caught.
 //
 // Connects with the owner/migration URL, a superuser in dev and CI, so RLS
 // does not hide rows: this asserts what the pipeline persisted and is not a
@@ -27,5 +27,25 @@ export async function queryRows<T extends Record<string, unknown>>(
     return result.rows as T[];
   } finally {
     await client.end();
+  }
+}
+
+// The one write, and only because a test cannot otherwise make time pass:
+// the stale-upload reaper acts on a full idle window. `updated_at` is
+// exactly what an abandoned upload stops moving, so back-dating it is a
+// faithful simulation rather than a shortcut around the logic under test.
+export async function ageUpload(
+  sourceId: string,
+  hours: number
+): Promise<void> {
+  const rows = await queryRows(
+    `UPDATE source SET updated_at = now() - make_interval(hours => $2)
+     WHERE id = $1 AND status = 'uploading' RETURNING id`,
+    [sourceId, hours]
+  );
+  if (rows.length !== 1) {
+    throw new Error(
+      `expected one uploading source ${sourceId}, updated ${rows.length}`
+    );
   }
 }
