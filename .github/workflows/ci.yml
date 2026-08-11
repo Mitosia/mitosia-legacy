@@ -109,9 +109,29 @@ jobs:
       - name: Install Playwright browser
         run: pnpm exec playwright install --with-deps chromium
 
-      # The ingest e2e generates its fixture and runs the real pipeline.
+      # The ingest e2e generates its fixture and runs the real pipeline, so
+      # CI's ffmpeg has to be the one the image ships (Alpine 3.24 → 8.1.x).
+      # Ubuntu's apt ffmpeg is 6.1.1, two majors behind: ffmpeg-8-only
+      # options are a HARD failure there (an unknown option aborts ffmpeg, so
+      # every ingest breaks — PR #23), and the ffmpeg 8 behaviour lib/media/
+      # is written around cannot be exercised at all. Pinned to an immutable
+      # BtbN release asset; bump alongside the Dockerfile's Alpine pin.
       - name: Install ffmpeg
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+        env:
+          FFMPEG_RELEASE: autobuild-2026-08-10-13-17
+          FFMPEG_BUILD: ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-gpl-8.1
+          FFMPEG_SHA256: 7b0c2ad593860d8bb157e346777ac7d741b5bf25b456382051138aaa8256f92d
+        run: |
+          curl -fsSL -o /tmp/ffmpeg.tar.xz \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_RELEASE}/${FFMPEG_BUILD}.tar.xz"
+          echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c -
+          sudo tar -xJf /tmp/ffmpeg.tar.xz -C /usr/local/bin --strip-components=2 \
+            "${FFMPEG_BUILD}/bin/ffmpeg" "${FFMPEG_BUILD}/bin/ffprobe"
+
+      # Guards the pin above against the deployed image's ffmpeg: same script
+      # runs in the Dockerfile, so whichever side drifts fails.
+      - name: Verify ffmpeg matches the deployed image
+        run: pnpm check:ffmpeg
 
       # Service containers cannot set a command, and MinIO's image needs
       # one — so start it directly on the runner's Docker.

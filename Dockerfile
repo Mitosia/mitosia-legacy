@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM node:24-alpine AS base
+FROM node:24-alpine3.24 AS base
 RUN npm install -g pnpm@10.34.5
 
 FROM base AS deps
@@ -29,12 +29,23 @@ RUN pnpm exec esbuild scripts/migrate.ts \
     --bundle --platform=node --format=cjs --target=node24 \
     --external:pg-native --outfile=migrate.cjs
 
-FROM node:24-alpine AS runner
+FROM node:24-alpine3.24 AS runner
 # The ingest pipeline shells out to ffmpeg/ffprobe. Needed even with
 # Trigger.dev configured: the in-process fallback runner must work on
 # staging until the Trigger project is provisioned.
+#
+# The Alpine release is pinned (not the floating `node:24-alpine`) because
+# that is what pins ffmpeg: Alpine carries exactly one ffmpeg minor per
+# release for its whole life, so 3.24 means 8.1.x and a rebuild cannot
+# quietly move production onto a different one. CI installs the same minor;
+# scripts/check-ffmpeg-version.mjs is the contract between them.
 RUN apk add --no-cache ffmpeg
 WORKDIR /app
+# Fails the image build — and therefore the deploy — if Alpine ever ships an
+# ffmpeg the pipeline was not written against. Loud here beats a broken
+# ingest discovered by a user.
+COPY scripts/check-ffmpeg-version.mjs ./scripts/check-ffmpeg-version.mjs
+RUN node scripts/check-ffmpeg-version.mjs
 ENV NODE_ENV=production \
     PORT=3000 \
     HOSTNAME=0.0.0.0
