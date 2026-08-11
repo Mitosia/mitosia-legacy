@@ -134,22 +134,27 @@ test("an upload is adopted when the browser kept no resume state", async ({
 
   // Everything the browser was holding, gone — the state Golden Retriever
   // would have restored from no longer exists.
-  await page.evaluate(async () => {
+  //
+  // localStorage is the whole restore path: Golden Retriever keeps the file
+  // list, our source id and @uppy/aws-s3's multipart state there, and only
+  // the file *blobs* in IndexedDB. With no metadata there is nothing to
+  // restore, so the blobs are ignored and later swept as orphans.
+  //
+  // Deliberately not deleting the IndexedDB database: the previous page's
+  // connection is still closing, so `deleteDatabase` fires `onblocked` and
+  // deletes nothing. An earlier version treated that as success, which made
+  // this test pass or fail purely on timing.
+  //
+  // Cleared from a page that does not mount the uploader, so Uppy cannot
+  // write its state back out from under us.
+  const projectUrl = page.url();
+  await page.goto("/dashboard");
+  await page.evaluate(() => {
     localStorage.clear();
-    await Promise.all(
-      (await indexedDB.databases()).map(
-        (db) =>
-          new Promise((resolve) => {
-            const request = indexedDB.deleteDatabase(db.name ?? "");
-            request.onsuccess = resolve;
-            request.onerror = resolve;
-            request.onblocked = resolve;
-          })
-      )
-    );
+    sessionStorage.clear();
   });
   await quietUpload(sourceId, QUIET_SECONDS);
-  await page.reload();
+  await page.goto(projectUrl);
 
   const rows = page.locator("[data-source-status]");
   await expect(rows).toHaveAttribute("data-source-status", "uploading", {
