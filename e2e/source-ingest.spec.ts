@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { createAccountWithOrg } from "./support/auth";
+import { queryRows } from "./support/db";
 
 // S2 exit-test guard, scaled down for CI-speed: a real media file goes
 // through the real flow — Uppy multipart upload to MinIO, the ingest
@@ -132,6 +133,41 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   await expect(page.getByRole("heading", { name: "tiny-source" })).toBeVisible({
     timeout: 15_000,
   });
+
+  // Every artifact must carry its size. This has no UI surface: size_bytes
+  // was NULL on every artifact row the pipeline ever wrote and nothing
+  // broke — it only cost per-artifact attribution, which billing needs.
+  const sourceId = new URL(page.url()).pathname.split("/").pop() ?? "";
+  const artifacts = await queryRows<{
+    kind: string;
+    size_bytes: string | null;
+  }>("SELECT kind, size_bytes FROM source_artifact WHERE source_id = $1", [
+    sourceId,
+  ]);
+  expect(artifacts.length).toBeGreaterThan(0);
+  expect(
+    artifacts.filter((artifact) => Number(artifact.size_bytes ?? 0) <= 0),
+    "every artifact row needs a positive size_bytes"
+  ).toEqual([]);
+  // The fixture has both video and audio, so the pipeline emits all five.
+  expect(
+    [...new Set(artifacts.map((artifact) => artifact.kind))].sort()
+  ).toEqual(["audio", "hls_master", "poster", "thumbnail", "waveform"]);
+
+  // …and the metered storage figure is those same bytes. The ledger entry
+  // is derived from these rows, so any divergence means the derivation
+  // grew a second source of truth again.
+  const [totals] = await queryRows<{ artifacts: string; ledger: string }>(
+    `SELECT
+       (SELECT COALESCE(SUM(size_bytes), 0) FROM source_artifact
+          WHERE source_id = $1) AS artifacts,
+       (SELECT COALESCE(SUM(quantity), 0) FROM usage_ledger
+          WHERE source_id = $1
+            AND entry_type = 'storage_bytes'
+            AND metadata->>'category' = 'artifacts') AS ledger`,
+    [sourceId]
+  );
+  expect(Number(totals.ledger)).toBe(Number(totals.artifacts));
 
   // hls.js must load the master playlist and segments through /api/media —
   // a real duration on the video element proves the whole delivery path.

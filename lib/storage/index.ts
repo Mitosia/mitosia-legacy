@@ -5,6 +5,7 @@ import {
   CreateMultipartUploadCommand,
   GetObjectCommand,
   HeadObjectCommand,
+  ListObjectsV2Command,
   ListPartsCommand,
   S3Client,
   UploadPartCommand,
@@ -141,6 +142,38 @@ export async function headObject(
     new HeadObjectCommand({ Bucket: BUCKET, Key: key })
   );
   return { contentType: result.ContentType, size: result.ContentLength ?? 0 };
+}
+
+export interface StoredObject {
+  key: string;
+  size: number;
+}
+
+// Every object under a prefix, paginated. Used to size multi-file
+// artifacts (an HLS ladder is one artifact row over many objects) when
+// reconciling stored bytes against the database.
+export async function listObjects(prefix: string): Promise<StoredObject[]> {
+  const objects: StoredObject[] = [];
+  let token: string | undefined;
+
+  do {
+    // biome-ignore lint/performance/noAwaitInLoops: pages are sequential by token
+    const page = await storageClient.send(
+      new ListObjectsV2Command({
+        Bucket: BUCKET,
+        ContinuationToken: token,
+        Prefix: prefix,
+      })
+    );
+    for (const item of page.Contents ?? []) {
+      if (item.Key) {
+        objects.push({ key: item.Key, size: item.Size ?? 0 });
+      }
+    }
+    token = page.IsTruncated ? page.NextContinuationToken : undefined;
+  } while (token);
+
+  return objects;
 }
 
 // Short-lived read URL — used as direct ffmpeg/ffprobe input so the

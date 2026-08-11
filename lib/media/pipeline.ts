@@ -49,6 +49,10 @@ export interface IngestPayload {
 interface ArtifactUpload {
   kind: "hls_master" | "poster" | "thumbnail" | "audio" | "waveform";
   metadata?: Record<string, unknown>;
+  // Required, not optional: an artifact row without a size is invisible to
+  // per-artifact cost attribution, and the storage ledger entry is summed
+  // from these — a missing one would silently under-meter the org.
+  sizeBytes: number;
   storageKey: string;
 }
 
@@ -94,25 +98,34 @@ async function walkFiles(dir: string, prefix = ""): Promise<string[]> {
   return files;
 }
 
-// Uploads every file under localDir to storage under keyPrefix.
-// Returns total bytes uploaded.
+// Uploads every file under localDir to storage under keyPrefix. Returns
+// each uploaded file's size keyed by its path relative to localDir, so
+// callers can attribute bytes to the artifact rows they create.
 async function uploadDirectory(
   localDir: string,
   keyPrefix: string
-): Promise<number> {
+): Promise<Map<string, number>> {
   const files = await walkFiles(localDir);
-  let totalBytes = 0;
+  const sizes = new Map<string, number>();
   await mapWithConcurrency(files, UPLOAD_CONCURRENCY, async (relative) => {
     const filePath = join(localDir, relative);
     const { size } = await stat(filePath);
-    totalBytes += size;
     await putFile(
       `${keyPrefix}${relative}`,
       filePath,
       contentTypeFor(relative)
     );
+    sizes.set(relative, size);
   });
-  return totalBytes;
+  return sizes;
+}
+
+function sumSizes(sizes: Map<string, number>): number {
+  let total = 0;
+  for (const size of sizes.values()) {
+    total += size;
+  }
+  return total;
 }
 
 async function setIngestStep(
@@ -178,7 +191,7 @@ async function runHlsStep(
   probe: SourceProbe,
   workDir: string,
   keyPrefix: string
-): Promise<{ artifacts: ArtifactUpload[]; bytes: number }> {
+): Promise<ArtifactUpload[]> {
   const plan = planHlsLadder(probe);
   const hlsDir = join(workDir, "hls");
   await Promise.all(
@@ -212,23 +225,24 @@ async function runHlsStep(
   }
   await writeFile(join(hlsDir, "master.m3u8"), renderMasterPlaylist(entries));
 
-  const bytes = await uploadDirectory(hlsDir, `${keyPrefix}hls/`);
-  return {
-    artifacts: [
-      {
-        kind: "hls_master",
-        metadata: {
-          variants: entries.map((entry) => ({
-            bandwidth: Math.round(entry.bandwidth),
-            height: entry.height,
-            width: entry.width,
-          })),
-        },
-        storageKey: `${keyPrefix}hls/master.m3u8`,
+  const sizes = await uploadDirectory(hlsDir, `${keyPrefix}hls/`);
+  return [
+    {
+      kind: "hls_master",
+      metadata: {
+        variants: entries.map((entry) => ({
+          bandwidth: Math.round(entry.bandwidth),
+          height: entry.height,
+          width: entry.width,
+        })),
       },
-    ],
-    bytes,
-  };
+      // The single hls_master row stands for the whole ladder: its size is
+      // every playlist and segment under hls/, not just master.m3u8. That
+      // is what keeps SUM(size_bytes) equal to the real stored footprint.
+      sizeBytes: sumSizes(sizes),
+      storageKey: `${keyPrefix}hls/master.m3u8`,
+    },
+  ];
 }
 
 async function runThumbnailStep(
@@ -236,7 +250,7 @@ async function runThumbnailStep(
   probe: SourceProbe,
   workDir: string,
   keyPrefix: string
-): Promise<{ artifacts: ArtifactUpload[]; bytes: number }> {
+): Promise<ArtifactUpload[]> {
   const thumbsDir = join(workDir, "thumbs");
   await mkdir(thumbsDir, { recursive: true });
 
@@ -257,30 +271,33 @@ async function runThumbnailStep(
     join(workDir, "poster.jpg"),
     "image/jpeg"
   );
-  const stripBytes = await uploadDirectory(thumbsDir, `${keyPrefix}thumbs/`);
+  const stripSizes = await uploadDirectory(thumbsDir, `${keyPrefix}thumbs/`);
 
   const artifacts: ArtifactUpload[] = [
-    { kind: "poster", storageKey: `${keyPrefix}poster.jpg` },
+    {
+      kind: "poster",
+      sizeBytes: posterBytes,
+      storageKey: `${keyPrefix}poster.jpg`,
+    },
   ];
-  const thumbFiles = (await walkFiles(thumbsDir)).sort((a, b) =>
-    a.localeCompare(b)
-  );
+  const thumbFiles = [...stripSizes.keys()].sort((a, b) => a.localeCompare(b));
   artifacts.push(
     ...thumbFiles.map((file, index) => ({
       kind: "thumbnail" as const,
       metadata: { timeOffsetSeconds: index * intervalSeconds },
+      sizeBytes: stripSizes.get(file) ?? 0,
       storageKey: `${keyPrefix}thumbs/${file}`,
     }))
   );
 
-  return { artifacts, bytes: posterBytes + stripBytes };
+  return artifacts;
 }
 
 async function runAudioStep(
   inputUrl: string,
   workDir: string,
   keyPrefix: string
-): Promise<{ artifacts: ArtifactUpload[]; audioPath: string; bytes: number }> {
+): Promise<{ artifacts: ArtifactUpload[]; audioPath: string }> {
   const audioPath = join(workDir, "audio.m4a");
   await runMediaCommand("ffmpeg", [
     "-v",
@@ -300,13 +317,14 @@ async function runAudioStep(
     audioPath,
   ]);
 
-  const bytes = (await stat(audioPath)).size;
+  const sizeBytes = (await stat(audioPath)).size;
   await putFile(`${keyPrefix}audio/audio.m4a`, audioPath, "audio/mp4");
 
   return {
-    artifacts: [{ kind: "audio", storageKey: `${keyPrefix}audio/audio.m4a` }],
+    artifacts: [
+      { kind: "audio", sizeBytes, storageKey: `${keyPrefix}audio/audio.m4a` },
+    ],
     audioPath,
-    bytes,
   };
 }
 
@@ -314,24 +332,22 @@ async function runWaveformStep(
   audioPath: string,
   keyPrefix: string,
   mediaDurationSeconds: number
-): Promise<{ artifacts: ArtifactUpload[]; bytes: number }> {
+): Promise<ArtifactUpload[]> {
   const peaks = await generatePeaks(audioPath, mediaDurationSeconds);
   const key = `${keyPrefix}waveform/peaks.json`;
   const body = JSON.stringify(peaks);
   await putJson(key, peaks);
-  return {
-    artifacts: [
-      {
-        kind: "waveform",
-        metadata: {
-          length: peaks.length,
-          samplesPerPixel: peaks.samples_per_pixel,
-        },
-        storageKey: key,
+  return [
+    {
+      kind: "waveform",
+      metadata: {
+        length: peaks.length,
+        samplesPerPixel: peaks.samples_per_pixel,
       },
-    ],
-    bytes: Buffer.byteLength(body),
-  };
+      sizeBytes: Buffer.byteLength(body),
+      storageKey: key,
+    },
+  ];
 }
 
 async function finalizeIngest(
@@ -339,7 +355,6 @@ async function finalizeIngest(
   started: StartedIngest,
   probe: SourceProbe,
   artifacts: ArtifactUpload[],
-  artifactBytes: number,
   wallSeconds: number
 ): Promise<void> {
   await withOrgScope(payload.organizationId, async (tx) => {
@@ -349,6 +364,7 @@ async function finalizeIngest(
         metadata: artifact.metadata,
         mimeType: contentTypeFor(artifact.storageKey),
         organizationId: payload.organizationId,
+        sizeBytes: artifact.sizeBytes,
         sourceId: payload.sourceId,
         storageKey: artifact.storageKey,
       }))
@@ -376,6 +392,18 @@ async function finalizeIngest(
       unit: "minutes",
     });
 
+    // The metered quantity is read back from the artifact rows just
+    // written, not tallied alongside them: per-artifact attribution and
+    // the ledger are then the same number by construction, and cannot
+    // drift. claimSource() clears prior rows, so this is the current
+    // footprint of the whole source.
+    const [current] = await tx
+      .select({
+        total: sql<number>`COALESCE(SUM(${sourceArtifact.sizeBytes}), 0)::double precision`,
+      })
+      .from(sourceArtifact)
+      .where(eq(sourceArtifact.sourceId, payload.sourceId));
+
     // Artifact storage is metered as a delta against what previous runs
     // already recorded — re-ingest overwrites objects in place, so only
     // net-new bytes hit the ledger.
@@ -389,7 +417,7 @@ async function finalizeIngest(
           AND ${usageLedger.entryType} = 'storage_bytes'
           AND ${usageLedger.metadata}->>'category' = 'artifacts'`
       );
-    const delta = artifactBytes - (previous?.total ?? 0);
+    const delta = (current?.total ?? 0) - (previous?.total ?? 0);
     if (delta !== 0) {
       await recordUsage(tx, {
         correlationId: `storage:artifacts:${payload.sourceId}:${started.attempt}`,
@@ -440,39 +468,30 @@ export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
     const probe = await probeSource(inputUrl);
 
     const artifacts: ArtifactUpload[] = [];
-    let artifactBytes = 0;
 
     await setIngestStep(payload, "hls");
-    const hls = await runHlsStep(inputUrl, probe, workDir, keyPrefix);
-    artifacts.push(...hls.artifacts);
-    artifactBytes += hls.bytes;
+    artifacts.push(...(await runHlsStep(inputUrl, probe, workDir, keyPrefix)));
 
     if (probe.video) {
       await setIngestStep(payload, "thumbnails");
-      const thumbs = await runThumbnailStep(
-        inputUrl,
-        probe,
-        workDir,
-        keyPrefix
+      artifacts.push(
+        ...(await runThumbnailStep(inputUrl, probe, workDir, keyPrefix))
       );
-      artifacts.push(...thumbs.artifacts);
-      artifactBytes += thumbs.bytes;
     }
 
     if (probe.audio) {
       await setIngestStep(payload, "audio");
       const audio = await runAudioStep(inputUrl, workDir, keyPrefix);
       artifacts.push(...audio.artifacts);
-      artifactBytes += audio.bytes;
 
       await setIngestStep(payload, "waveform");
-      const waveform = await runWaveformStep(
-        audio.audioPath,
-        keyPrefix,
-        probe.durationSeconds
+      artifacts.push(
+        ...(await runWaveformStep(
+          audio.audioPath,
+          keyPrefix,
+          probe.durationSeconds
+        ))
       );
-      artifacts.push(...waveform.artifacts);
-      artifactBytes += waveform.bytes;
     }
 
     await setIngestStep(payload, "finalize");
@@ -481,7 +500,6 @@ export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
       started,
       probe,
       artifacts,
-      artifactBytes,
       (Date.now() - startedAt) / 1000
     );
   } catch (error) {

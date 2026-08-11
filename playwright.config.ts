@@ -1,3 +1,7 @@
+// Specs that assert on database state need the connection strings in their
+// own process; only the dev server would otherwise get them. Existing
+// environment variables win, so CI's job env is unaffected.
+import "dotenv/config";
 import { defineConfig, devices } from "@playwright/test";
 
 // E2E runs against the dev server on 3001 — the origin BETTER_AUTH_URL is
