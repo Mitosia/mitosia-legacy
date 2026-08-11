@@ -136,6 +136,14 @@ cloud image has ffmpeg/ffprobe. Later, add a deploy step to the GitHub
 Actions workflow (needs a `TRIGGER_ACCESS_TOKEN` personal access token as a
 repo secret) so tasks deploy on merge alongside the app.
 
+> **Pin its ffmpeg before you enable this.** `ffmpeg()` with no options
+> installs Debian's apt build (5.1.x) — three minors behind the 8.1.x that
+> the app image, CI and dev machines are pinned to (see AGENTS.md). The
+> extension can't be pointed at 8.x through its options, so it needs a
+> replacement build layer that downloads the same pinned static build CI
+> uses. Until then, ingest on Trigger.dev runs on an ffmpeg nothing has
+> tested, and an option it lacks fails the task outright.
+
 ### Environment variables in the Trigger dashboard
 
 The task imports `lib/env.ts`, which validates on import — the Trigger
