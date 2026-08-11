@@ -53,6 +53,20 @@ Multipart Abort Rule" (abort incomplete uploads after 7 days, no prefix)
 on new buckets — verify it is **Enabled** rather than creating one.
 Abandoned browser uploads otherwise accumulate invisible storage forever.
 
+Verify it from the repo instead of by eye — point `STORAGE_*` at the
+bucket and run:
+
+```bash
+pnpm check:abort-rule
+```
+
+It exits non-zero when no enabled rule aborts incomplete multipart
+uploads. This is the *backstop*, not the primary cleanup: the app sweeps
+its own abandoned uploads after 24 idle hours (`reapStaleUploads` in
+`lib/uploads.ts`, triggered by the project page), which both releases the
+parts and stops the source row rendering as a permanently-uploading ghost.
+The bucket rule catches what the sweep never sees.
+
 ### Wire into Dokploy (staging app service → Environment)
 
 ```

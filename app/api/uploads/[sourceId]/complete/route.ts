@@ -38,7 +38,9 @@ export async function POST(
   }
   const { organizationId, userId } = authCtx;
 
-  const parsed = completeSchema.safeParse(await request.json());
+  const parsed = completeSchema.safeParse(
+    await request.json().catch(() => null)
+  );
   if (!parsed.success) {
     return Response.json({ error: "Invalid parts payload" }, { status: 400 });
   }

@@ -2,7 +2,7 @@ import { z } from "zod";
 import { requireOrgApi } from "@/lib/api-auth";
 import { withOrgScope } from "@/lib/db/tenant";
 import { listUploadedParts, presignUploadPart } from "@/lib/storage";
-import { loadUploadingSource } from "@/lib/uploads";
+import { loadUploadingSource, touchUpload } from "@/lib/uploads";
 
 const signPartSchema = z.object({
   // S3 multipart hard limit
@@ -11,7 +11,16 @@ const signPartSchema = z.object({
 
 const sourceIdSchema = z.uuid();
 
-async function resolveSource(sourceIdParam: string) {
+// `touch` refreshes the reaper's liveness stamp, and only signing a part
+// earns it: parts go straight to storage, so this is the sole trace an
+// upload that is actually moving leaves on the app server. Listing parts
+// must NOT count — a restored page asks that question about uploads it may
+// well abandon again, and an abandoned upload that answers "still alive"
+// every time someone opens the page is never reaped.
+async function resolveSource(
+  sourceIdParam: string,
+  { touch }: { touch: boolean }
+) {
   const parsedId = sourceIdSchema.safeParse(sourceIdParam);
   if (!parsedId.success) {
     return { error: Response.json({ error: "Not found" }, { status: 404 }) };
@@ -22,9 +31,13 @@ async function resolveSource(sourceIdParam: string) {
     return { error: ctx.error };
   }
 
-  const upload = await withOrgScope(ctx.organizationId, (tx) =>
-    loadUploadingSource(tx, parsedId.data)
-  );
+  const upload = await withOrgScope(ctx.organizationId, async (tx) => {
+    const row = await loadUploadingSource(tx, parsedId.data);
+    if (row && touch) {
+      await touchUpload(tx, row.id);
+    }
+    return row;
+  });
   if (!upload) {
     return { error: Response.json({ error: "Not found" }, { status: 404 }) };
   }
@@ -38,12 +51,14 @@ export async function POST(
   ctx: RouteContext<"/api/uploads/[sourceId]/parts">
 ) {
   const { sourceId } = await ctx.params;
-  const resolved = await resolveSource(sourceId);
+  const resolved = await resolveSource(sourceId, { touch: true });
   if (resolved.error) {
     return resolved.error;
   }
 
-  const parsed = signPartSchema.safeParse(await request.json());
+  const parsed = signPartSchema.safeParse(
+    await request.json().catch(() => null)
+  );
   if (!parsed.success) {
     return Response.json({ error: "Invalid part number" }, { status: 400 });
   }
@@ -64,7 +79,7 @@ export async function GET(
   ctx: RouteContext<"/api/uploads/[sourceId]/parts">
 ) {
   const { sourceId } = await ctx.params;
-  const resolved = await resolveSource(sourceId);
+  const resolved = await resolveSource(sourceId, { touch: false });
   if (resolved.error) {
     return resolved.error;
   }

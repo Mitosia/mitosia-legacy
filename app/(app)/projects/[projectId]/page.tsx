@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
@@ -18,6 +18,7 @@ import {
 import { campaign, project, source, sourceArtifact } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { requireOrg } from "@/lib/org";
+import { isStaleUpload, scheduleUploadReap } from "@/lib/uploads";
 
 export default async function ProjectDetailPage(
   props: PageProps<"/projects/[projectId]">
@@ -55,6 +56,9 @@ export default async function ProjectDetailPage(
         ingestError: source.ingestError,
         ingestStep: source.ingestStep,
         sizeBytes: source.sizeBytes,
+        // Computed in the database (time-zone-safe) rather than compared
+        // against a JS clock here: whether this row is an abandoned upload.
+        stale: sql<boolean>`(${isStaleUpload})`,
         status: source.status,
         title: source.title,
       })
@@ -84,16 +88,31 @@ export default async function ProjectDetailPage(
       posterRows.map((row) => [row.sourceId, row.storageKey])
     );
 
-    const sources: SourceListItem[] = sourceRows.map((row) => ({
-      ...row,
-      posterKey: posterBySource.get(row.id) ?? null,
-    }));
+    const sources: SourceListItem[] = sourceRows.map(
+      ({ stale: _stale, ...row }) => ({
+        ...row,
+        posterKey: posterBySource.get(row.id) ?? null,
+      })
+    );
 
-    return { ...projectRow, sources };
+    return {
+      ...projectRow,
+      hasStaleUpload: sourceRows.some((row) => row.stale),
+      sources,
+    };
   });
 
   if (!data) {
     notFound();
+  }
+
+  // This list is where abandoned uploads show up as permanently-uploading
+  // ghosts, so it is what pays for the sweep — scheduled after the response
+  // flushes, and only when one is actually on the page. The RefreshPoller
+  // is already running (the row still reads "uploading"), so the transition
+  // to failed lands on its next tick.
+  if (data.hasStaleUpload) {
+    scheduleUploadReap(organizationId);
   }
 
   const hasActiveSources = data.sources.some(
@@ -122,7 +141,8 @@ export default async function ProjectDetailPage(
           <CardTitle>Upload sources</CardTitle>
           <CardDescription>
             Long-form recordings upload with pause and resume, then are prepared
-            for playback automatically.
+            for playback automatically. An upload interrupted by a closed tab
+            keeps its place for a day — re-select the same file to continue it.
           </CardDescription>
         </CardHeader>
         <CardContent>
