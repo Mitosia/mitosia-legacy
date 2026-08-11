@@ -9,6 +9,7 @@ import { source } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { enqueueIngest } from "@/lib/ingest";
 import { requireOrg } from "@/lib/org";
+import { headObject } from "@/lib/storage";
 
 // Failures surface with retry (S2 exit criterion): a failed source can be
 // re-run end to end. claimSource() in the pipeline flips it back to
@@ -30,6 +31,7 @@ export async function retryIngestAction(
         id: source.id,
         projectId: source.projectId,
         status: source.status,
+        storageKey: source.storageKey,
       })
       .from(source)
       .where(eq(source.id, parsedId.data))
@@ -38,20 +40,35 @@ export async function retryIngestAction(
     if (row?.status !== "failed") {
       return null;
     }
-
-    await recordAudit(tx, {
-      action: "source.ingest_retried",
-      actorUserId: userId,
-      entityId: row.id,
-      entityType: "source",
-      organizationId,
-    });
     return row;
   });
 
   if (!sourceRow) {
     return { error: "Only failed sources can be retried." };
   }
+
+  // A source can also reach "failed" without ever having an original —
+  // that is what the stale-upload sweep does to an abandoned upload. The
+  // pipeline would run and fail again on the missing object, so say what
+  // actually has to happen instead.
+  const hasOriginal = await headObject(sourceRow.storageKey)
+    .then(() => true)
+    .catch(() => false);
+  if (!hasOriginal) {
+    return {
+      error: "This upload never finished. Upload the file again to replace it.",
+    };
+  }
+
+  await withOrgScope(organizationId, (tx) =>
+    recordAudit(tx, {
+      action: "source.ingest_retried",
+      actorUserId: userId,
+      entityId: sourceRow.id,
+      entityType: "source",
+      organizationId,
+    })
+  );
 
   await enqueueIngest({ organizationId, sourceId: sourceRow.id });
 

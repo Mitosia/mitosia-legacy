@@ -30,7 +30,11 @@ export async function POST(request: Request) {
   }
   const { organizationId, userId } = ctx;
 
-  const parsed = createUploadSchema.safeParse(await request.json());
+  // A client that goes away mid-request leaves a truncated body, and an
+  // uncaught JSON parse error is a 500 for what is really a bad request.
+  const parsed = createUploadSchema.safeParse(
+    await request.json().catch(() => null)
+  );
   if (!parsed.success) {
     return Response.json(
       { error: parsed.error.issues[0]?.message },
