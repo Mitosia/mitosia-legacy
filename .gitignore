@@ -53,3 +53,6 @@ next-env.d.ts
 
 # trigger.dev CLI state
 /.trigger/
+
+# esbuild output for one-shot scripts (see package.json)
+/scripts/*.cjs
