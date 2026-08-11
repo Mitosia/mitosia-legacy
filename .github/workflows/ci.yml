@@ -151,8 +151,13 @@ jobs:
       # Production parity: `next dev` cannot surface hydration mismatches or
       # standalone-output problems, and a mismatch shipped behind exactly
       # that gap (PR #19). Reuses this job's database, MinIO and migrations.
+      # tsconfig.json includes .next/dev/types/**, so `next build` type-checks
+      # whatever the dev server last wrote there — and the e2e run above ends
+      # by killing that server, which can leave validator.ts half-written and
+      # fail this build with syntax errors in generated code. A deploy builds
+      # from a clean tree; so does this.
       - name: Build standalone server
-        run: pnpm build
+        run: rm -rf .next/dev && pnpm build
 
       - name: Run production-build end-to-end tests
         run: pnpm e2e:prod
