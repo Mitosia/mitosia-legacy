@@ -11,3 +11,11 @@
 // trips it and an abandoned one always does.
 export const UPLOAD_IDLE_TTL_HOURS = 24;
 export const UPLOAD_IDLE_TTL_MS = UPLOAD_IDLE_TTL_HOURS * 60 * 60 * 1000;
+
+// How long an upload must have been quiet before another browser session is
+// allowed to adopt it. `touchUpload` stamps updated_at on every signed part,
+// so anything genuinely in flight is seconds old at most; this is the line
+// between "abandoned, take it over" and "another tab is uploading this right
+// now, leave it alone". Adopting a live upload would interleave two writers
+// over the same part numbers.
+export const UPLOAD_ADOPT_GRACE_SECONDS = 60;

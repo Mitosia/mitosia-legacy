@@ -1,11 +1,14 @@
-import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, lt, sql } from "drizzle-orm";
 import { after } from "next/server";
 import { recordAudit } from "./audit";
 import { source } from "./db/schema";
 import type { OrgTransaction } from "./db/tenant";
 import { withOrgScope } from "./db/tenant";
 import { abortMultipartUpload } from "./storage";
-import { UPLOAD_IDLE_TTL_HOURS } from "./upload-window";
+import {
+  UPLOAD_ADOPT_GRACE_SECONDS,
+  UPLOAD_IDLE_TTL_HOURS,
+} from "./upload-window";
 
 // Shared by the per-source upload routes: the row must be visible inside
 // the caller's org scope (RLS) and still mid-upload. Returns null for
@@ -23,6 +26,52 @@ export async function loadUploadingSource(tx: OrgTransaction, id: string) {
     .limit(1);
 
   if (row?.status !== "uploading" || !row.uploadId) {
+    return null;
+  }
+  return { id: row.id, storageKey: row.storageKey, uploadId: row.uploadId };
+}
+
+// The other half of resumability, and the one that does not depend on the
+// browser keeping anything. Golden Retriever's restore is the fast path: it
+// hands the file back with its source id and multipart state intact. But
+// that state is destructible — dismissing the recovery card, clearing site
+// data, a different browser — and once it is gone the same file re-selected
+// into the same project used to start a SECOND multipart upload, stranding
+// the first one's parts and leaving a duplicate row stuck at "uploading".
+//
+// So the server matches on what it can see for itself: same project, same
+// filename, same byte size, still mid-upload, and quiet long enough that no
+// other tab is plausibly writing to it.
+export async function findAdoptableUpload(
+  tx: OrgTransaction,
+  match: { filename: string; projectId: string; sizeBytes: number }
+) {
+  const [row] = await tx
+    .select({
+      id: source.id,
+      storageKey: source.storageKey,
+      uploadId: source.uploadId,
+    })
+    .from(source)
+    .where(
+      and(
+        eq(source.status, "uploading"),
+        eq(source.projectId, match.projectId),
+        eq(source.originalFilename, match.filename),
+        eq(source.sizeBytes, match.sizeBytes),
+        // Quiet enough to be abandoned rather than in flight…
+        lt(
+          source.updatedAt,
+          sql`now() - make_interval(secs => ${UPLOAD_ADOPT_GRACE_SECONDS})`
+        ),
+        // …but not so old the reaper is about to abort it underneath us.
+        sql`${source.updatedAt} > now() - make_interval(hours => ${UPLOAD_IDLE_TTL_HOURS})`
+      )
+    )
+    .orderBy(desc(source.createdAt))
+    .limit(1);
+
+  if (!row?.uploadId) {
     return null;
   }
   return { id: row.id, storageKey: row.storageKey, uploadId: row.uploadId };

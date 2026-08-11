@@ -17,7 +17,7 @@ import { UPLOAD_IDLE_TTL_MS } from "@/lib/upload-window";
 // registry-first doesn't apply to the upload widget itself, and pause/
 // resume/retry states are exactly what it exists for.
 //
-// Resumption across browser sessions rests on three things, all of them
+// Resumption across browser sessions rests on four things, all of them
 // load-bearing:
 //
 //  1. The source id lives in Uppy's file meta, not in a closure. Golden
@@ -42,6 +42,18 @@ import { UPLOAD_IDLE_TTL_MS } from "@/lib/upload-window";
 // everything storage already holds. Navigating away inside the app still
 // cancels and aborts an in-flight upload, as before; the resume window is
 // for the tab closing, not for leaving the page.
+//
+//  4. None of the above survives the browser state being destroyed, and it
+//     is one click away: dismissing the recovery card drops the ghost, and
+//     with it the source id and multipart state. Re-adding the same file
+//     then started a SECOND multipart upload — observed on staging with a
+//     2 GB source, which stranded 115 MB of parts and left a duplicate row
+//     stuck at "uploading". So the server matches independently, on what it
+//     can see for itself (same project, filename and byte size, still
+//     uploading, quiet for longer than `UPLOAD_ADOPT_GRACE_SECONDS`), and
+//     `adoptExistingUpload` seeds the state Uppy needs to resume. The same
+//     check runs inside POST /api/uploads, so losing the race to a fast
+//     click costs re-sent parts, never a stranded upload.
 
 const MAX_UPLOAD_BYTES = 20 * 1024 * 1024 * 1024;
 const MAX_CONCURRENT_FILES = 10;
@@ -116,6 +128,40 @@ async function discardUnresumableUploads(uppy: SourceUppy): Promise<void> {
       };
       uppy.setFileState(file.id, patch);
     })
+  );
+}
+
+// Attaches a freshly added file to an unfinished upload of the same file in
+// the same project, when the server has one. Seeding `s3Multipart` is what
+// puts @uppy/aws-s3 on its restoring branch: it calls listParts and skips
+// every part storage already holds, instead of createMultipartUpload and a
+// second upload from byte 0.
+async function adoptExistingUpload(
+  uppy: SourceUppy,
+  file: SourceFile,
+  projectId: string
+): Promise<void> {
+  const query = new URLSearchParams({
+    filename: file.name ?? "upload",
+    projectId,
+    size: String(file.size ?? 0),
+  });
+  const { upload } = await api<{
+    upload: { key: string; sourceId: string; uploadId: string } | null;
+  }>(`/api/uploads?${query}`);
+
+  // The file may have been removed or started uploading while we asked.
+  if (!(upload && uppy.getFile(file.id)) || file.progress.uploadStarted) {
+    return;
+  }
+
+  uppy.setFileMeta(file.id, { sourceId: upload.sourceId });
+  const patch: FileStatePatch = {
+    s3Multipart: { key: upload.key, uploadId: upload.uploadId },
+  };
+  uppy.setFileState(file.id, patch);
+  uppy.log(
+    `[uploads] attached ${file.name} to unfinished upload ${upload.sourceId}`
   );
 }
 
@@ -216,6 +262,39 @@ export function SourceUploader({ projectId }: { projectId: string }) {
       discardUnresumableUploads(uppy).catch((error: Error) => {
         uppy.log(error, "warning");
       });
+    });
+
+    // Golden Retriever's restore is the fast path, but it is destructible:
+    // dismiss the recovery card, clear site data, or open the project in a
+    // different browser and the file arrives with no resume state at all.
+    // The server can still recognise it, so ask — and seed the state Uppy
+    // needs to take its restoring branch (`s3Multipart` present) rather
+    // than starting a second multipart upload.
+    //
+    // A pre-processor and not a `file-added` handler: Uppy awaits every
+    // pre-processor before any uploader runs, so the answer is always in
+    // place before the first part goes out. Answering on `file-added` was
+    // a race a fast click could win, and losing it meant re-sending parts
+    // storage already held.
+    uppy.addPreProcessor(async (fileIds: string[]) => {
+      await Promise.all(
+        fileIds.map(async (fileId) => {
+          const file = uppy.getFile(fileId);
+          if (!file || file.meta.sourceId) {
+            return;
+          }
+          if ((file as FileStatePatch).s3Multipart) {
+            return;
+          }
+          try {
+            await adoptExistingUpload(uppy, file, projectId);
+          } catch (error) {
+            // Non-fatal: the upload just starts fresh, and the same check
+            // inside POST /api/uploads still rules out a duplicate row.
+            uppy.log(error as Error, "warning");
+          }
+        })
+      );
     });
 
     // Each finished file becomes a "queued for processing" row immediately.

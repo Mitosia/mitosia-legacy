@@ -34,6 +34,26 @@ export async function queryRows<T extends Record<string, unknown>>(
 // the stale-upload reaper acts on a full idle window. `updated_at` is
 // exactly what an abandoned upload stops moving, so back-dating it is a
 // faithful simulation rather than a shortcut around the logic under test.
+// Same trick at a finer grain. Server-side adoption only takes over an
+// upload that has been quiet longer than UPLOAD_ADOPT_GRACE_SECONDS, so a
+// test that just interrupted one has to let it fall past that line without
+// waiting out the real window.
+export async function quietUpload(
+  sourceId: string,
+  seconds: number
+): Promise<void> {
+  const rows = await queryRows(
+    `UPDATE source SET updated_at = now() - make_interval(secs => $2)
+     WHERE id = $1 AND status = 'uploading' RETURNING id`,
+    [sourceId, seconds]
+  );
+  if (rows.length !== 1) {
+    throw new Error(
+      `expected one uploading source ${sourceId}, updated ${rows.length}`
+    );
+  }
+}
+
 export async function ageUpload(
   sourceId: string,
   hours: number
