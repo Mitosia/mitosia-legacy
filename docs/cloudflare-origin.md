@@ -20,6 +20,40 @@ Side benefits: TLS terminates at the edge (a saved round trip on every new
 connection, which matters more than it sounds at Indian mobile latencies),
 plus WAF and DDoS protection the origin does not have today.
 
+## Pre-flight: what a nameserver move would break
+
+Moving a zone to Cloudflare replaces its nameservers, so **every record that
+is not replicated stops existing**. Cloudflare's import scan catches most of
+them; the ones it misses are the ones on arbitrary names, and mail is where
+that hurts. Inventory taken 2026-08-11:
+
+**`mitosia.cloud`** — nameservers at Hostinger (`*.dns-parking.com`). Only A
+records: a wildcard `*` and the hosts under it, all pointing at the VPS. No
+mail, no TXT. **Nothing to lose; safe to move.**
+
+**`mitosia.com`** — registered at **Spaceship** (`*.spaceship.net`), no A
+record yet, and it carries **live email**. These three must exist in
+Cloudflare before the nameservers change, or mail breaks:
+
+| Type | Name | Value |
+|---|---|---|
+| MX | `@` | `mx1.spacemail.com` (0), `mx2.spacemail.com` (0) |
+| TXT | `@` | `v=spf1 include:spf.spacemail.com ~all` |
+| TXT | `spacemail._domainkey` | `v=DKIM1;k=rsa;p=…` (copy the full value from Spaceship) |
+
+No DMARC record exists, and there are no `mail`/`webmail`/`autodiscover`
+hosts. Re-run the inventory before moving, in case that has changed:
+
+```bash
+dig +short NS mitosia.com; dig +short MX mitosia.com
+dig +short TXT mitosia.com; dig +short TXT spacemail._domainkey.mitosia.com
+```
+
+Because `mitosia.com` has no A record yet, there is nothing to proxy on it
+until production ships — so move `mitosia.cloud` first and treat `mitosia.com`
+as a deliberate, separate step with the mail records checked afterwards by
+sending a real message in and out.
+
 ## The order matters
 
 Applying the origin lock before DNS is proxied makes the site unreachable.
