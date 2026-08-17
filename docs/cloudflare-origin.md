@@ -1,130 +1,151 @@
-# Putting Cloudflare in front of the origin
+# Cloudflare in front of the origin
 
-## Why
+Complete record of why Mitosia sits behind Cloudflare, how it was built, how to
+tell it is healthy, and what to do when it is not.
 
-On 2026-08-11 Reliance Jio could not reach the VPS at all — every port timed
-out, traceroute died at `136.232.253.36` *inside Jio's own network*, while the
-same address answered normally over Airtel and from other networks. The server
-was healthy throughout (4 days uptime, load 0.01).
+Built and verified **2026-08-17**. Origin: Hostinger KVM 8 at `72.61.169.154`
+(Mumbai), SSH alias `mitosia-vps`.
 
-Nothing on the VPS can fix that. The problem is how one ISP routes to one IP,
-and Jio is India's largest ISP for a product aimed at Indian users. Hostinger
-recycles addresses, so an IP can carry history you will never see.
+---
 
-The fix is for users never to connect to that IP. They reach Cloudflare's
+## 1. Why
+
+On 2026-08-11 **Reliance Jio could not reach the VPS at all.** Every port timed
+out. `traceroute` died at `136.232.253.36` — an address *inside Jio's own
+network*, never reaching Hostinger. The same IP answered normally over Airtel
+and from other networks, and the box was healthy throughout: 4 days uptime,
+load 0.01, every service running.
+
+That combination is the whole story. Nothing was wrong with the server, so
+nothing on the server could fix it. The fault was in how one ISP routed to one
+address — and:
+
+- **Jio is India's largest ISP**, for a product aimed at Indian users. "Some
+  users can't reach us" is not a tolerable steady state.
+- **Hostinger recycles addresses.** An IP arrives carrying history you cannot
+  see and cannot appeal.
+- **We had no lever.** You cannot file a routing complaint with a consumer ISP
+  on behalf of an address you rent.
+
+The fix is to make sure users never connect to that IP. They reach Cloudflare's
 anycast edge — which has PoPs in Mumbai, Delhi and Chennai with direct Indian
-ISP peering — and Cloudflare reaches the origin over its own transit. A single
+ISP peering — and Cloudflare reaches the origin over its own transit. One
 ISP's route to one address stops being a single point of failure.
 
-Side benefits: TLS terminates at the edge (a saved round trip on every new
-connection, which matters more than it sounds at Indian mobile latencies),
-plus WAF and DDoS protection the origin does not have today.
+Secondary benefits, which are real but were not the reason: TLS terminates at
+the edge (a saved round trip per new connection, which matters at Indian mobile
+latencies), plus WAF and DDoS protection the origin never had.
 
-## Pre-flight: what a nameserver move would break
+---
 
-Moving a zone to Cloudflare replaces its nameservers, so **every record that
-is not replicated stops existing**. Cloudflare's import scan catches most of
-them; the ones it misses are the ones on arbitrary names, and mail is where
-that hurts. Inventory taken 2026-08-11:
+## 2. What we built
 
-**`mitosia.cloud`** — nameservers at Hostinger (`*.dns-parking.com`). Only A
-records: a wildcard `*` and the hosts under it, all pointing at the VPS. No
-mail, no TXT. **Nothing to lose; safe to move.**
-
-**`mitosia.com`** — registered at **Spaceship** (`*.spaceship.net`), no A
-record yet, and it carries **live email**. These three must exist in
-Cloudflare before the nameservers change, or mail breaks:
-
-| Type | Name | Value |
-|---|---|---|
-| MX | `@` | `mx1.spacemail.com` (0), `mx2.spacemail.com` (0) |
-| TXT | `@` | `v=spf1 include:spf.spacemail.com ~all` |
-| TXT | `spacemail._domainkey` | `v=DKIM1;k=rsa;p=…` (copy the full value from Spaceship) |
-
-No DMARC record exists, and there are no `mail`/`webmail`/`autodiscover`
-hosts. Re-run the inventory before moving, in case that has changed:
-
-```bash
-dig +short NS mitosia.com; dig +short MX mitosia.com
-dig +short TXT mitosia.com; dig +short TXT spacemail._domainkey.mitosia.com
+```
+                                    ┌──────────────────────────────┐
+  user ──── TLS ────▶  Cloudflare edge (anycast, ~15 IPv4 ranges)  │
+                                    └──────────────┬───────────────┘
+                                                   │ TLS, Full (strict)
+                                                   │ sets cf-connecting-ip
+                                                   ▼
+                              ┌─────────────────────────────────────┐
+                              │ origin 72.61.169.154                │
+                              │                                     │
+                              │  iptables DOCKER-USER               │
+                              │    accept 80/443 from CF only       │◀── the lock
+                              │    drop everything else             │
+                              │                                     │
+                              │  Traefik 3.6.7 (plain container)    │
+                              │    trustedIPs = CF ranges           │
+                              │    wildcard *.mitosia.cloud (DNS-01)│
+                              │           │                         │
+                              │           ├──▶ staging app ──▶ Neon │
+                              │           └──▶ Dokploy panel        │
+                              │                                     │
+                              │  iptables INPUT: :22 rate-limited   │◀── always open
+                              └─────────────────────────────────────┘
 ```
 
-Because `mitosia.com` has no A record yet, there is nothing to proxy on it
-until production ships — so move `mitosia.cloud` first and treat `mitosia.com`
-as a deliberate, separate step with the mail records checked afterwards by
-sending a real message in and out.
+Hostnames, all **proxied** (orange cloud):
 
-## The order matters
-
-Applying the origin lock before DNS is proxied makes the site unreachable.
-Do these in order, verifying each.
-
-### 1. DNS onto Cloudflare
-
-Add the zone in Cloudflare, move the registrar's nameservers to the pair
-Cloudflare assigns, and wait for the zone to go active.
-
-Then set the records **proxied** (orange cloud):
-
-| Record | Value | Proxy |
+| Host | Serves | Access control |
 |---|---|---|
-| `app.mitosia.com` | `72.61.169.154` | proxied |
-| `staging.mitosia.cloud` | `72.61.169.154` | proxied |
-| `dokploy.mitosia.cloud` | `72.61.169.154` | proxied, behind Access |
+| `staging.mitosia.cloud` | staging app | app's own auth |
+| `dokploy.mitosia.cloud` | Dokploy panel | **Cloudflare Access** |
+| `app.mitosia.com` | production (when it ships) | app's own auth |
 
-The panel was going to stay unproxied, on the reasoning that your recovery tool
-must not sit behind the thing that might be broken. That is a real concern
-aimed at the wrong tool. Leaving it unproxied leaves the origin IP reachable —
-which is the entire problem this document exists to solve — and the actual
-recovery path is **SSH on port 22**, which the origin lock never touches
-(it writes only to `DOCKER-USER`; nothing here goes into `INPUT`). So the panel
-is proxied like everything else, with Cloudflare Access in front:
+Zone nameservers: `brad.ns.cloudflare.com`, `haley.ns.cloudflare.com`.
+Registrar is **Spaceship** — that detail matters in §6.
 
-| Access application | Path | Policy |
-|---|---|---|
-| `Dokploy` | `dokploy.mitosia.cloud` | Allow → your email |
-| `Dokploy webhooks` | `/api/deploy` | **Bypass → Everyone** |
-| `Dokploy webhooks 2` | `/api/webhook` | **Bypass → Everyone** |
+---
 
-The two bypasses exist because GitHub's webhook cannot log in. Keep them
-path-scoped: they are the only unauthenticated surface on the panel.
+## 3. How it was built
 
-**Access changes what your scripts see.** Anything hitting the Dokploy API now
-gets a `302` to `*.cloudflareaccess.com` instead of the API — which naive
-tooling reads as a success. For automation, create a Cloudflare **service
-token** and add a Service Auth policy on the app; don't widen the bypass paths.
+Order matters. Applying the origin lock before DNS is proxied takes the site
+offline. Each step was verified before the next.
 
-> This supersedes the note in AGENTS.md that `mitosia.cloud` stays on plain
-> Hostinger DNS. That decision was made to keep Let's Encrypt issuance simple,
-> and it was reasonable until an ISP proved the origin IP is not universally
-> reachable. Staging shares the origin, so staging shares the problem.
+### 3.1 DNS onto Cloudflare
 
-### 2. Certificates: DNS-01 wildcard
+Add the zone in Cloudflare, then change nameservers **at the registrar**
+(Spaceship for `mitosia.cloud`, not Hostinger — Hostinger was only the DNS
+host, and pointing NS at Cloudflare makes Hostinger's records irrelevant).
+Cloudflare's scan imports existing records; verify them, then set the A records
+proxied.
 
-Traefik issued via HTTP-01 (`certificatesResolvers.letsencrypt.acme.httpChallenge`).
-**HTTP-01 breaks behind Cloudflare's proxy** — the challenge is answered by the
-edge, not the origin.
+> **Before moving any zone**, inventory what would break. Changing nameservers
+> means every record that is not replicated **stops existing**. Cloudflare's
+> scan catches most, and misses records on arbitrary names — mail is where that
+> hurts. `mitosia.cloud` had only A records, so nothing to lose. **`mitosia.com`
+> carries live email** and needs these present in Cloudflare *before* its
+> nameservers change:
+>
+> | Type | Name | Value |
+> |---|---|---|
+> | MX | `@` | `mx1.spacemail.com` (0), `mx2.spacemail.com` (0) |
+> | TXT | `@` | `v=spf1 include:spf.spacemail.com ~all` |
+> | TXT | `spacemail._domainkey` | `v=DKIM1;k=rsa;p=…` (copy from Spaceship) |
+>
+> Re-run the inventory before moving, in case it has changed:
+> ```bash
+> dig +short NS mitosia.com; dig +short MX mitosia.com
+> dig +short TXT mitosia.com; dig +short TXT spacemail._domainkey.mitosia.com
+> ```
 
-Two ways through; **we chose DNS-01**, over a Cloudflare Origin Certificate.
+Set SSL/TLS mode to **Full (strict)**. Never "Flexible" — that makes Cloudflare
+talk to the origin over plain HTTP, so the padlock users see covers only half
+the path.
 
-The Origin Certificate is free, lasts 15 years and is trusted by Cloudflare —
-genuinely simpler. But it is trusted by *Cloudflare only*. Anything that ever
-reaches the origin outside the proxy sees an untrusted cert: a host you
-deliberately leave unproxied, a `--resolve` health check, a debugging session,
-or a future service that predates its DNS record. The failure mode is a cert
-error at the moment you are already debugging something else. DNS-01 keeps a
-publicly-trusted cert on the box, so the origin stays correct on its own terms
-and the proxy is an optimisation rather than a prerequisite.
+### 3.2 Certificates: DNS-01 wildcard
 
-The cost is one scoped API token on the VPS. Constrain it hard: **Zone → DNS →
-Edit, on `mitosia.cloud` only**, nothing else.
+Traefik issued via HTTP-01. **HTTP-01 breaks behind the proxy** — the ACME
+challenge is answered by the edge, not the origin, so renewal fails.
 
-Add a second resolver in `/etc/dokploy/traefik/traefik.yml` (keep the HTTP-01
-one; it costs nothing and stays available):
+Two ways through. **We chose DNS-01 over a Cloudflare Origin Certificate.**
+
+The Origin Certificate is simpler: free, 15 years, no token on the box. But it
+is trusted by *Cloudflare only*. Anything that ever reaches the origin outside
+the proxy sees an untrusted certificate — a deliberately unproxied host, a
+`--resolve` health check, a debugging session, a service that exists before its
+DNS record does. The failure arrives exactly when you are already debugging
+something else. DNS-01 keeps a publicly trusted certificate on the box, so the
+origin stays correct on its own terms and the proxy is an optimisation rather
+than a prerequisite. **That property is what makes the emergency fallback in
+§6.2 work at all.**
+
+The cost is one API token on the VPS. Scope it hard: **Zone → DNS → Edit, on
+`mitosia.cloud` only.** Nothing else. (If you also set an IP filter on the
+token, remember the VPS is dual-stack — an IPv4-only filter rejects its IPv6
+source address, and the error surfaces as a misleading "Invalid API Token".)
+
+In `/etc/dokploy/traefik/traefik.yml`, a second resolver alongside the existing
+one (`letsencrypt` is kept but unused — it costs nothing and stays available if
+a host is ever unproxied):
 
 ```yaml
 certificatesResolvers:
-  letsencrypt-dns:
+  letsencrypt:                    # HTTP-01, retained, unused
+    acme:
+      storage: /etc/dokploy/traefik/dynamic/acme.json
+  letsencrypt-dns:                # DNS-01, this is the live one
     acme:
       email: <you>
       storage: /etc/dokploy/traefik/dynamic/acme-dns.json
@@ -133,9 +154,9 @@ certificatesResolvers:
         resolvers: ["1.1.1.1:53", "8.8.8.8:53"]
 ```
 
-`CF_DNS_API_TOKEN` goes into Traefik's environment. Then serve the wildcard as
-the default certificate, so every `*.mitosia.cloud` host is covered with no
-per-host issuance:
+`CF_DNS_API_TOKEN` goes in the **Traefik container's** environment. Then serve
+the wildcard as the default certificate, so every `*.mitosia.cloud` host is
+covered with no per-host issuance:
 
 ```yaml
 # /etc/dokploy/traefik/dynamic/wildcard-default.yml
@@ -149,22 +170,14 @@ tls:
           sans: ["*.mitosia.cloud"]
 ```
 
-Set SSL mode to **Full (strict)**. Do **not** use "Flexible": it makes
-Cloudflare talk to the origin over plain HTTP, so the padlock users see covers
-only half the path.
+### 3.3 Teach Traefik who the client is
 
-`pnpm check:traefik` asserts this whole shape against the live box and fails on
-drift — including a cert inside 21 days of expiry. Exit code 2 means the host
-was unreachable, which is not the same as drift.
+Behind a proxy every request arrives from a Cloudflare address. Without
+trusting the forwarded headers, rate limits, audit records and any future
+IP-based rule all record **Cloudflare instead of the user** — wrong in a way
+that looks completely fine.
 
-### 3. Teach Traefik who the client is
-
-Behind a proxy, every request arrives from a Cloudflare address. Without
-telling Traefik to trust the forwarded headers, rate limits, audit log entries
-and any future IP-based rule all record Cloudflare instead of the user —
-wrong in a way that looks fine.
-
-In `/etc/dokploy/traefik/traefik.yml`, on both entry points:
+On both entry points in `/etc/dokploy/traefik/traefik.yml`:
 
 ```yaml
 entryPoints:
@@ -174,7 +187,7 @@ entryPoints:
       trustedIPs: &cloudflare
         - 173.245.48.0/20
         - 103.21.244.0/22
-        # … the full list from https://www.cloudflare.com/ips/
+        # … all 22 ranges from https://www.cloudflare.com/ips/ (15 v4 + 7 v6)
   websecure:
     address: :443
     forwardedHeaders:
@@ -182,93 +195,393 @@ entryPoints:
 ```
 
 Trust **only** Cloudflare's ranges. Trusting everything lets any client forge
-`X-Forwarded-For` and impersonate another IP.
+`X-Forwarded-For` and impersonate another address.
 
-Restart Traefik: `docker service update --force dokploy-traefik`.
+The app then reads `cf-connecting-ip` first (`lib/auth.ts`). That header is set
+by Cloudflare and cannot be influenced by the client — but it is trustworthy
+*because* of the origin lock in §3.5. Without the lock, anyone reaching the
+origin directly could set it to anything and forge their address in audit
+records and rate-limit buckets.
 
-### 4. Lock the origin
+### 3.4 The Dokploy panel: proxied, behind Access
 
-Until this step, anyone who knows the IP can bypass Cloudflare entirely — and
-the IP is already public in DNS history.
+The original plan left the panel unproxied, reasoning that your recovery tool
+should not sit behind the thing that might break. Sound instinct, wrong tool:
+leaving it unproxied leaves the origin IP reachable, which is the entire
+problem being solved. **The real recovery path is SSH** — the lock writes only
+to `DOCKER-USER` and never touches `INPUT`, so no Cloudflare or Access failure
+can cost you the box.
+
+So the panel is proxied like everything else, with Cloudflare Access in front.
+Three applications on `dokploy.mitosia.cloud`:
+
+| Application | Path | Policy | Why |
+|---|---|---|---|
+| `Dokploy` | whole host | **Allow** → your email | the panel itself |
+| `Dokploy webhooks` | `/api/deploy` | **Bypass** → Everyone | GitHub cannot log in |
+| `Dokploy webhooks 2` | `/api/webhook` | **Bypass** → Everyone | same |
+
+Login uses the built-in **Cloudflare** identity provider — your Cloudflare
+account and its MFA, not a one-time email PIN. The Access login page therefore
+shows a single "Cloudflare" button which leads to the normal Cloudflare account
+login. **That is correct, not a misconfiguration.**
+
+Keep the bypasses path-scoped. They are the only unauthenticated surface on the
+panel.
+
+> **Access changed what your scripts see.** Any call to the Dokploy API now
+> returns a `302` to `*.cloudflareaccess.com` instead of the API. Tooling that
+> only checks for a non-error status reads the login page as success — the same
+> failure shape as everything else in this system. For automation, create a
+> Cloudflare **service token** and add a Service Auth policy. Do **not** widen
+> the bypass paths to make a script work.
+
+### 3.5 Lock the origin
+
+Until this step anyone who knows the IP bypasses Cloudflare entirely — and the
+IP is already public in DNS history.
 
 ```bash
-sudo bash scripts/cloudflare-origin-lock.sh          # dry run, prints the plan
-sudo bash scripts/cloudflare-origin-lock.sh --apply
+sudo bash cloudflare-origin-lock.sh           # dry run, prints the plan
+sudo bash cloudflare-origin-lock.sh --apply
+sudo bash cloudflare-origin-lock.sh --status  # what is in force now
+sudo bash cloudflare-origin-lock.sh --open    # undo
 ```
 
-It allows 80/443 only from Cloudflare's published ranges, removes the blanket
-rules, and never touches port 22 — a bad run cannot lock you out of SSH.
-`--open` reverses it.
+Run it **on the VPS as root** (`scripts/cloudflare-origin-lock.sh` in this
+repo; stage a copy at `/root/`). Current state: **16 IPv4 + 8 IPv6 rules** in
+`DOCKER-USER`.
 
-Cloudflare adds ranges occasionally; re-run after any change to their list, or
-the edge starts getting blocked by your own firewall.
+**Why not ufw — this cost a full attempt.** Traefik's 80/443 are
+*Docker-published*, so packets are DNAT'd into the container through Docker's
+own chains and **never traverse `INPUT`**. A ufw rule for those ports is inert.
+The first version of this script wrote ufw rules, reported success, and changed
+nothing at all. Docker provides `DOCKER-USER` for exactly this, evaluated
+before its own rules. For the same reason the Dokploy panel's port 3000 must
+stay **unpublished** — publishing it would bypass any host firewall entirely.
 
-**Making it survive a reboot has a trap.** iptables rules are in memory only.
-The obvious fix, `apt install iptables-persistent`, **removes `ufw`** — they
-conflict, apt resolves it silently, and you lose whatever `ufw` was doing.
-Here that was SSH rate limiting, which had to be rebuilt by hand afterwards:
+### 3.6 Make it survive a reboot — and mind the trap
+
+iptables rules live in memory. The obvious fix has a sharp edge:
+
+> **`apt install iptables-persistent` removes `ufw`.** They conflict, apt
+> resolves it silently, and whatever ufw was doing is gone. Here that was SSH
+> rate limiting — which had to be rebuilt by hand, for **both** address
+> families, on a dual-stack host.
 
 ```bash
-# after iptables-persistent, restore rate limiting explicitly — BOTH families
-iptables  -I INPUT -p tcp --dport 22 -m state --state NEW \
-  -m recent --set --name SSH
+# restore SSH rate limiting explicitly after installing iptables-persistent
+iptables  -I INPUT -p tcp --dport 22 -m state --state NEW -m recent --set --name SSH
 iptables  -I INPUT -p tcp --dport 22 -m state --state NEW \
   -m recent --update --seconds 30 --hitcount 7 --name SSH -j DROP
-ip6tables -I INPUT -p tcp --dport 22 -m state --state NEW \
-  -m recent --set --name SSH
+ip6tables -I INPUT -p tcp --dport 22 -m state --state NEW -m recent --set --name SSH
 ip6tables -I INPUT -p tcp --dport 22 -m state --state NEW \
   -m recent --update --seconds 30 --hitcount 7 --name SSH -j DROP
 
-netfilter-persistent save     # nothing above survives a reboot without this
+netfilter-persistent save    # nothing above survives a reboot without this
 ```
 
-The host is dual-stack: an IPv4-only rule leaves the IPv6 door unlatched.
-Then reboot once and re-verify, rather than assuming the save worked.
+Current state: **2 IPv4 + 2 IPv6** rules on port 22, saved to
+`/etc/iptables/rules.v{4,6}`. Then **reboot once and re-verify** rather than
+assuming the save worked.
 
-### 5. Verify
+Consequence to remember: port 22 allows 6 new connections per 30s, so **SSH
+polling loops lock you out for minutes.** Poll over HTTPS or against the
+database; keep SSH to single checks.
+
+---
+
+## 4. Verifying it is healthy
+
+Run these after any change to Cloudflare, Traefik, or the firewall.
+
+**Config shape, certificates, trusted IPs** — one command, asserts against the
+live box:
 
 ```bash
-# Direct to the origin, bypassing DNS: should hang until the timeout.
-curl -m 10 -k --resolve staging.mitosia.cloud:443:72.61.169.154 \
-  https://staging.mitosia.cloud/
+pnpm check:traefik
+```
 
-# Through Cloudflare: should serve, and report a Cloudflare edge.
+Exit 0 = healthy. Exit 1 = drift. **Exit 2 = host unreachable**, which is not
+the same as drift and should not be read as one. It checks `trustedIPs`, both
+resolvers, the default wildcard cert, and fails if any certificate is inside 21
+days of expiry.
+
+**The origin refuses non-Cloudflare traffic.** Run this from a machine that is
+not the VPS, and read curl's **exit code**, not its output:
+
+```bash
+out=$(curl -m 12 -sI -k --resolve staging.mitosia.cloud:443:72.61.169.154 \
+  https://staging.mitosia.cloud/ 2>&1); rc=$?
+case $rc in
+  28) echo "blocked (expected)" ;;
+   0) echo "SERVED — the lock is not working" ;;
+   *) echo "other failure: $rc" ;;
+esac
+```
+
+Two things that will fool you here:
+
+- **Do not pipe curl into `head`** to read the result. `$?` then belongs to
+  `head`, which succeeds, and a blocked origin reports exit 0 — the test says
+  "reachable" precisely when it is not.
+- **This test is meaningless from the VPS itself.** The lock rules match on the
+  WAN interface, so traffic originating on the box bypasses them entirely and
+  the origin answers normally — even on its public IP. That is expected and
+  does *not* mean the lock is broken.
+
+Use `--resolve`, not a bare `https://<ip>/`. Without SNI, Traefik answers with
+its default certificate and the result tells you nothing about the lock.
+
+**The site serves through Cloudflare:**
+
+```bash
 curl -m 10 -sI https://staging.mitosia.cloud/ | grep -iE '^(HTTP|server|cf-ray)'
+# server: cloudflare
+# cf-ray: …-SIN
 ```
 
-Use `--resolve`, not a bare `https://<ip>/`: without SNI, Traefik answers with
-its default cert and the result tells you nothing about the lock.
-
-Then check the app still sees real client IPs — a session row written after the
-cutover should carry your address, not a Cloudflare one:
+**The app sees real client IPs.** This is the assertion that catches a broken
+`trustedIPs`, and it is invisible in the UI — everything works, the addresses
+are just quietly wrong:
 
 ```sql
-select ip_address, created_at from session order by created_at desc limit 5;
+select ip_address, created_at, updated_at from session order by created_at desc limit 5;
 ```
 
-That is the assertion that catches a missing `trustedIPs`, and it is invisible
-in the UI: everything works, the addresses are just quietly wrong.
+Two traps when re-running it:
 
-Verified 2026-08-17: a fresh sign-in recorded `2405:201:d014:c9bb::` — the
+- **A visit while already signed in only refreshes the row.** `updated_at`
+  moves; `ip_address` does not, because it is written at session *creation*
+  only. Sign out first, or use a private window — otherwise the check appears
+  to run and proves nothing.
+- **IPv6 is stored as the /64 prefix with the interface identifier zeroed**
+  (`2405:201:d014:c9bb::`), while Cloudflare's edge sees the full address —
+  compare at `https://staging.mitosia.cloud/cdn-cgi/trace`. Nothing in
+  `lib/auth.ts` does that; it is Better Auth's own normalisation, and /64 is
+  the right unit: privacy extensions rotate the low 64 bits constantly, so a
+  full-address rate-limit bucket is free to evade while a /64 maps to one
+  subscriber. **Not a bug — do not "fix" it.**
+
+An **empty** `ip_address` is the real failure signal. It means no client IP was
+resolved at all, which also silently drops rate limiting into a single shared
+per-path bucket where one abusive client consumes the limit for everybody.
+
+**Verified 2026-08-17:** fresh sign-in recorded `2405:201:d014:c9bb::` — the
 client's own network, not a Cloudflare range (`2400:cb00::/32`,
-`2606:4700::/32`). Note the shape: **IPv6 is stored as the /64 prefix with the
-interface identifier zeroed**, while Cloudflare's edge sees the full address
-(check yours at `https://staging.mitosia.cloud/cdn-cgi/trace`). Nothing in
-`lib/auth.ts` does that, so it comes from Better Auth's own resolution — and
-/64 is the right unit anyway: IPv6 privacy extensions rotate the low 64 bits
-constantly, so a full-address rate-limit bucket is evaded for free while a /64
-maps to one subscriber. Don't read the zeros as a bug or "fix" them.
+`2606:4700::/32`).
 
-Two gotchas when re-running this check. A visit while already signed in only
-**refreshes** the existing row — `updated_at` moves, `ip_address` does not,
-because it is written at session *creation* only. So sign out first, or use a
-private window. And an empty `ip_address` is the real failure signal: it means
-Better Auth resolved no client IP at all, which also drops rate limiting into
-one shared per-path bucket.
+---
 
-## What this does not fix
+## 5. When it breaks
+
+### 5.0 The one thing to remember
+
+**SSH always works.** Nothing in this system touches port 22 — the lock writes
+only to `DOCKER-USER`, never `INPUT`. If you can think of nothing else:
+
+```bash
+ssh mitosia-vps
+```
+
+Do not start changing Cloudflare settings before you have looked at the origin.
+
+### 5.1 Triage: which layer?
+
+Work outside in. Each command isolates one layer.
+
+```bash
+# 1. DNS — are we still pointed at Cloudflare?
+dig +short A staging.mitosia.cloud      # expect Cloudflare IPs (104.x / 172.6x)
+dig +short NS mitosia.cloud             # expect brad/haley.ns.cloudflare.com
+
+# 2. Edge — is Cloudflare answering at all?
+curl -m 10 -sI https://staging.mitosia.cloud/ | head -1
+
+# 3. Origin — is it up, and does it serve from behind the lock?
+ssh mitosia-vps 'uptime -p; docker ps --format "{{.Names}}\t{{.Status}}"'
+
+# 4. Origin TLS directly (from the VPS itself, which the lock does not block)
+ssh mitosia-vps 'curl -m 10 -sI --resolve staging.mitosia.cloud:443:127.0.0.1 \
+  https://staging.mitosia.cloud/ | head -1'
+```
+
+If 4 succeeds but 2 fails, the problem is between Cloudflare and the origin —
+almost always the lock (§5.2). If 4 fails too, it is the origin's own stack,
+and Cloudflare is innocent.
+
+Step 4 uses loopback deliberately. From the VPS the lock does not apply (its
+rules match the WAN interface), so this asks "is Traefik serving?" without the
+firewall confounding the answer — which is exactly what you want to know first.
+
+### 5.2 Cloudflare error codes — what each one means here
+
+| Code | Meaning | Most likely cause in this system | Fix |
+|---|---|---|---|
+| **522** | Connection timed out | The lock is dropping Cloudflare — they added IP ranges we do not allow | Re-run the lock script (§5.3) |
+| **521** | Web server is down | Traefik or the app container is not running | `docker ps`, restart |
+| **525** | SSL handshake failed | Traefik not serving TLS on 443 | Check Traefik logs |
+| **526** | Invalid SSL certificate | Full (strict) + expired/invalid origin cert | `pnpm check:traefik`, §5.4 |
+| **502/504** | Bad gateway / timeout | App container up but not answering | App logs; check the database |
+| **302** to `cloudflareaccess.com` | Access is doing its job | A script hit the Dokploy API | Service token, §3.4 |
+
+**522 is the one this architecture makes likely.** Cloudflare publishes new IP
+ranges occasionally; when they do, edge servers in the new range get dropped by
+our own firewall. The symptom is intermittent — only the new PoPs fail — which
+makes it look like a flaky origin.
+
+### 5.3 Emergency: get back online now
+
+In increasing order of "gives up a property we wanted". Try in order.
+
+**A. Re-run the origin lock** — fixes stale Cloudflare ranges, the most likely
+cause of a sudden 522, and gives up nothing:
+
+```bash
+ssh mitosia-vps
+sudo bash /root/cloudflare-origin-lock.sh --status   # look first
+sudo bash /root/cloudflare-origin-lock.sh --apply    # re-fetch ranges, rewrite
+sudo netfilter-persistent save
+```
+
+**B. Open the origin** — removes the Cloudflare-only restriction. The site is
+reachable directly again; you have given up the guarantee that nobody bypasses
+the edge, and gained a working site:
+
+```bash
+sudo bash /root/cloudflare-origin-lock.sh --open
+sudo netfilter-persistent save
+```
+
+**C. Take Cloudflare out of the path.** Grey-cloud the record (Cloudflare
+dashboard → DNS → click the orange cloud), or zone-wide via Overview →
+Advanced → **Pause Cloudflare on Site**. DNS then points straight at
+`72.61.169.154`.
+
+> **This works cleanly only because we chose DNS-01.** The origin holds a real,
+> publicly trusted Let's Encrypt wildcard, so browsers going direct see a valid
+> certificate. Had we used a Cloudflare Origin Certificate, every direct
+> visitor would get a full-page certificate error — the emergency exit would be
+> nailed shut. Do **B** before **C**, or the direct traffic hits a locked
+> origin.
+>
+> Understand what you are giving up: this restores the exact condition that
+> started all of this. **Jio users will not be able to reach the site.** It is
+> a diagnostic step and a short-term bridge, not a resting state.
+
+**D. Nameservers back to Hostinger.** The bottom of the stack, for when you
+have lost access to the Cloudflare account itself. Because the zone's NS point
+at Cloudflare, losing that account means losing all DNS control — but the
+**registrar is Spaceship**, and the registrar always wins. Change the
+nameservers at Spaceship back to Hostinger's (`*.dns-parking.com`), where the
+original A records still exist. Propagation is not instant; this is a last
+resort, not a quick fix. Do **B** first.
+
+### 5.4 Certificate problems
+
+The wildcard renews automatically via DNS-01. It fails silently if the API
+token is revoked, expires, or loses its zone scope — and you find out when the
+certificate does, up to 90 days later. `pnpm check:traefik` fails at 21 days
+remaining specifically to make that a warning rather than an outage.
+
+```bash
+pnpm check:traefik                                    # expiry + config shape
+ssh mitosia-vps 'docker logs dokploy-traefik --tail 100 2>&1 | grep -i "acme\|error"'
+```
+
+If the token is the problem, mint a new one (Zone → DNS → Edit, this zone
+only), update `CF_DNS_API_TOKEN` in the Traefik container's environment, and
+restart it. **Traefik is a plain container, not a swarm service:**
+
+```bash
+docker restart dokploy-traefik            # correct
+docker service update --force dokploy-traefik   # WRONG — "no such service"
+```
+
+To force reissue, stop Traefik, move `/etc/dokploy/traefik/dynamic/acme-dns.json`
+aside, and start it again. Let's Encrypt rate limits apply — do not loop on this.
+
+### 5.5 Locked out of the Dokploy panel
+
+Access sits in front of it, so a bad Access policy or a lost Cloudflare account
+locks you out of the panel. It does **not** lock you out of the box.
+
+```bash
+ssh mitosia-vps
+docker ps                                        # what is running
+docker service ls
+docker service logs mitosia-staging-uxa95i --tail 100
+docker service update --force mitosia-staging-uxa95i   # redeploy current spec
+```
+
+Everything Dokploy does is `docker service …` underneath. The panel is
+convenience, not control.
+
+### 5.6 Deploys stopped firing
+
+GitHub's webhook reaches `/api/deploy` and `/api/webhook` through the two
+Bypass policies. If someone tightens or reorders those policies, deploys stop —
+**silently**, because GitHub gets a `302` to a login page and considers it
+delivered.
+
+```bash
+# both should pass through Access (401 from Dokploy itself, not a 302)
+curl -m 10 -so /dev/null -w '%{http_code}\n' https://dokploy.mitosia.cloud/api/deploy/github
+curl -m 10 -so /dev/null -w '%{http_code}\n' https://dokploy.mitosia.cloud/api/webhook/github
+```
+
+A `302` to `*.cloudflareaccess.com` means the bypass is broken. Confirm the
+whole path by merging something and watching for a new task:
+
+```bash
+ssh mitosia-vps 'docker service ps mitosia-staging-uxa95i --format "{{.CurrentState}}" | head -3'
+```
+
+And check it did not deploy-then-rollback, which looks identical to never
+having deployed:
+
+```bash
+ssh mitosia-vps 'docker service inspect mitosia-staging-uxa95i \
+  --format "{{.UpdateStatus.State}} {{.UpdateStatus.Message}}"'
+```
+
+### 5.7 Client IPs wrong or empty
+
+Symptom: `session.ip_address` empty, or carrying a Cloudflare address. Cause is
+almost always `trustedIPs` — missing, or not covering a new Cloudflare range.
+See §4 for the query and its two traps; `pnpm check:traefik` asserts the
+config side.
+
+---
+
+## 6. Routine maintenance
+
+| When | Do | Why |
+|---|---|---|
+| Cloudflare publishes new IP ranges | Re-run the lock script, `netfilter-persistent save` | Otherwise new edge PoPs get dropped → intermittent 522 |
+| Any Traefik / firewall / Cloudflare change | `pnpm check:traefik` | Catches drift before users do |
+| After any iptables change | `netfilter-persistent save` | Rules are in memory; a reboot loses them |
+| Quarterly | Rotate `CF_DNS_API_TOKEN` | Scoped, but it is DNS-edit rights on a box |
+| Before `mitosia.com` goes live | Replicate MX/SPF/DKIM **first**, then move NS | Unreplicated records stop existing at cutover |
+
+---
+
+## 7. What this does not fix
 
 Cloudflare's edge still has to reach the origin. If Hostinger's address becomes
 unroutable from Cloudflare's network too, the site is down regardless. That is
-far less likely than one consumer ISP having a bad route, but it is the reason
-the origin's own health still matters.
+far less likely than one consumer ISP having a bad route — Cloudflare's transit
+is not a consumer ISP — but it is why the origin's own health still matters,
+and why §5.3 keeps a path back to a directly reachable origin.
+
+It also does not fix a bad origin. Cloudflare will faithfully serve your 502.
+
+---
+
+## 8. Related decisions
+
+- `AGENTS.md` → "Environments and deployment" — the short form of everything here.
+- `scripts/cloudflare-origin-lock.sh` — the lock, with its reasoning in the header.
+- `scripts/check-traefik-config.mjs` — the drift check.
+- `infra/traefik/` — reference copies of the live Traefik config.
+- `lib/auth.ts` — why `cf-connecting-ip` is read first, and why it is trustworthy.
