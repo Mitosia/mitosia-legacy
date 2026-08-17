@@ -1,0 +1,26 @@
+# The wildcard from the DNS-01 resolver, served as Traefik's default
+# certificate — used for any hostname that has no certificate of its own.
+#
+# Why this instead of switching each router to the DNS resolver: Dokploy
+# generates the per-app router labels (certresolver=letsencrypt) and would
+# rewrite anything edited by hand on the next deploy. A default certificate
+# needs no cooperation from those labels at all.
+#
+# What it buys:
+#   - A new subdomain works immediately, with no issuance and no HTTP-01,
+#     which is what actually broke once traffic went through Cloudflare.
+#   - Existing hosts keep their per-host certificates while those renew, and
+#     fall back to this wildcard automatically if HTTP-01 ever stops working
+#     — degradation instead of an outage.
+#
+# Traefik requests and renews this through the letsencrypt-dns resolver, so
+# it stays live without anything being copied to disk by hand.
+tls:
+  stores:
+    default:
+      defaultGeneratedCert:
+        resolver: letsencrypt-dns
+        domain:
+          main: "mitosia.cloud"
+          sans:
+            - "*.mitosia.cloud"
