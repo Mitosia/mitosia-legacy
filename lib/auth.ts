@@ -8,6 +8,23 @@ import * as schema from "./db/schema";
 import { env } from "./env";
 
 export const auth = betterAuth({
+  // Behind Cloudflare the socket address is always an edge server, so Better
+  // Auth cannot resolve a client IP on its own — it records an empty
+  // `session.ip_address` and, worse, silently drops rate limiting into "a
+  // single shared per-path bucket" (its own warning), where one abusive
+  // client consumes the limit for everybody.
+  //
+  // `cf-connecting-ip` is set by Cloudflare to the true client address and is
+  // the only header here that cannot be influenced by the client. It is
+  // trustworthy *because* the origin only accepts connections from Cloudflare
+  // (scripts/cloudflare-origin-lock.sh) — without that lock, anyone reaching
+  // the origin directly could set this header to whatever they liked and
+  // forge the address in audit records and rate limit buckets.
+  advanced: {
+    ipAddress: {
+      ipAddressHeaders: ["cf-connecting-ip", "x-forwarded-for"],
+    },
+  },
   baseURL: env.BETTER_AUTH_URL,
   database: drizzleAdapter(db, { provider: "pg", schema }),
   databaseHooks: {
