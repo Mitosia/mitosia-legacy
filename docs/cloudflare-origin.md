@@ -70,52 +70,92 @@ Then set the records **proxied** (orange cloud):
 |---|---|---|
 | `app.mitosia.com` | `72.61.169.154` | proxied |
 | `staging.mitosia.cloud` | `72.61.169.154` | proxied |
-| `dokploy.mitosia.cloud` | `72.61.169.154` | **DNS only** |
+| `dokploy.mitosia.cloud` | `72.61.169.154` | proxied, behind Access |
 
-Leave the Dokploy panel unproxied and reachable directly. If Cloudflare or the
-zone is ever misconfigured, the panel is how you fix it — putting your only
-recovery tool behind the thing that might be broken is how a small outage
-becomes a long one.
+The panel was going to stay unproxied, on the reasoning that your recovery tool
+must not sit behind the thing that might be broken. That is a real concern
+aimed at the wrong tool. Leaving it unproxied leaves the origin IP reachable —
+which is the entire problem this document exists to solve — and the actual
+recovery path is **SSH on port 22**, which the origin lock never touches
+(it writes only to `DOCKER-USER`; nothing here goes into `INPUT`). So the panel
+is proxied like everything else, with Cloudflare Access in front:
+
+| Access application | Path | Policy |
+|---|---|---|
+| `Dokploy` | `dokploy.mitosia.cloud` | Allow → your email |
+| `Dokploy webhooks` | `/api/deploy` | **Bypass → Everyone** |
+| `Dokploy webhooks 2` | `/api/webhook` | **Bypass → Everyone** |
+
+The two bypasses exist because GitHub's webhook cannot log in. Keep them
+path-scoped: they are the only unauthenticated surface on the panel.
+
+**Access changes what your scripts see.** Anything hitting the Dokploy API now
+gets a `302` to `*.cloudflareaccess.com` instead of the API — which naive
+tooling reads as a success. For automation, create a Cloudflare **service
+token** and add a Service Auth policy on the app; don't widen the bypass paths.
 
 > This supersedes the note in AGENTS.md that `mitosia.cloud` stays on plain
 > Hostinger DNS. That decision was made to keep Let's Encrypt issuance simple,
 > and it was reasonable until an ISP proved the origin IP is not universally
 > reachable. Staging shares the origin, so staging shares the problem.
 
-### 2. Certificates: Origin Certificate, not Let's Encrypt
+### 2. Certificates: DNS-01 wildcard
 
-Traefik currently issues via HTTP-01 (`/etc/dokploy/traefik/traefik.yml`,
-`certificatesResolvers.letsencrypt.acme.httpChallenge`). **HTTP-01 breaks
-behind Cloudflare's proxy** — the challenge is answered by the edge, not the
-origin.
+Traefik issued via HTTP-01 (`certificatesResolvers.letsencrypt.acme.httpChallenge`).
+**HTTP-01 breaks behind Cloudflare's proxy** — the challenge is answered by the
+edge, not the origin.
 
-Two ways through. Prefer the first:
+Two ways through; **we chose DNS-01**, over a Cloudflare Origin Certificate.
 
-**Cloudflare Origin Certificate.** SSL/TLS → Origin Server → Create
-Certificate. Free, valid 15 years, trusted only by Cloudflare — which is all
-the origin needs. Set SSL mode to **Full (strict)**.
+The Origin Certificate is free, lasts 15 years and is trusted by Cloudflare —
+genuinely simpler. But it is trusted by *Cloudflare only*. Anything that ever
+reaches the origin outside the proxy sees an untrusted cert: a host you
+deliberately leave unproxied, a `--resolve` health check, a debugging session,
+or a future service that predates its DNS record. The failure mode is a cert
+error at the moment you are already debugging something else. DNS-01 keeps a
+publicly-trusted cert on the box, so the origin stays correct on its own terms
+and the proxy is an optimisation rather than a prerequisite.
 
-Install it on the VPS and point Traefik at it:
+The cost is one scoped API token on the VPS. Constrain it hard: **Zone → DNS →
+Edit, on `mitosia.cloud` only**, nothing else.
+
+Add a second resolver in `/etc/dokploy/traefik/traefik.yml` (keep the HTTP-01
+one; it costs nothing and stays available):
 
 ```yaml
-# /etc/dokploy/traefik/dynamic/origin-cert.yml
+certificatesResolvers:
+  letsencrypt-dns:
+    acme:
+      email: <you>
+      storage: /etc/dokploy/traefik/dynamic/acme-dns.json
+      dnsChallenge:
+        provider: cloudflare
+        resolvers: ["1.1.1.1:53", "8.8.8.8:53"]
+```
+
+`CF_DNS_API_TOKEN` goes into Traefik's environment. Then serve the wildcard as
+the default certificate, so every `*.mitosia.cloud` host is covered with no
+per-host issuance:
+
+```yaml
+# /etc/dokploy/traefik/dynamic/wildcard-default.yml
 tls:
   stores:
     default:
-      defaultCertificate:
-        certFile: /etc/dokploy/traefik/dynamic/origin.pem
-        keyFile: /etc/dokploy/traefik/dynamic/origin.key
+      defaultGeneratedCert:
+        resolver: letsencrypt-dns
+        domain:
+          main: "mitosia.cloud"
+          sans: ["*.mitosia.cloud"]
 ```
 
-Keep the `letsencrypt` resolver for any host that stays unproxied (the Dokploy
-panel), so both paths keep working.
+Set SSL mode to **Full (strict)**. Do **not** use "Flexible": it makes
+Cloudflare talk to the origin over plain HTTP, so the padlock users see covers
+only half the path.
 
-**Or DNS-01.** Keeps Let's Encrypt, needs a scoped Cloudflare API token in
-Traefik's environment. More moving parts, and a token with DNS-edit rights
-sitting on the box.
-
-Do **not** use SSL mode "Flexible": it makes Cloudflare talk to the origin over
-plain HTTP, so the padlock users see covers only half the path.
+`pnpm check:traefik` asserts this whole shape against the live box and fails on
+drift — including a cert inside 21 days of expiry. Exit code 2 means the host
+was unreachable, which is not the same as drift.
 
 ### 3. Teach Traefik who the client is
 
@@ -163,18 +203,51 @@ rules, and never touches port 22 — a bad run cannot lock you out of SSH.
 Cloudflare adds ranges occasionally; re-run after any change to their list, or
 the edge starts getting blocked by your own firewall.
 
+**Making it survive a reboot has a trap.** iptables rules are in memory only.
+The obvious fix, `apt install iptables-persistent`, **removes `ufw`** — they
+conflict, apt resolves it silently, and you lose whatever `ufw` was doing.
+Here that was SSH rate limiting, which had to be rebuilt by hand afterwards:
+
+```bash
+# after iptables-persistent, restore rate limiting explicitly — BOTH families
+iptables  -I INPUT -p tcp --dport 22 -m state --state NEW \
+  -m recent --set --name SSH
+iptables  -I INPUT -p tcp --dport 22 -m state --state NEW \
+  -m recent --update --seconds 30 --hitcount 7 --name SSH -j DROP
+ip6tables -I INPUT -p tcp --dport 22 -m state --state NEW \
+  -m recent --set --name SSH
+ip6tables -I INPUT -p tcp --dport 22 -m state --state NEW \
+  -m recent --update --seconds 30 --hitcount 7 --name SSH -j DROP
+
+netfilter-persistent save     # nothing above survives a reboot without this
+```
+
+The host is dual-stack: an IPv4-only rule leaves the IPv6 door unlatched.
+Then reboot once and re-verify, rather than assuming the save worked.
+
 ### 5. Verify
 
 ```bash
-# Direct to the IP: should now fail.
-curl -m 10 -k https://72.61.169.154/
+# Direct to the origin, bypassing DNS: should hang until the timeout.
+curl -m 10 -k --resolve staging.mitosia.cloud:443:72.61.169.154 \
+  https://staging.mitosia.cloud/
 
 # Through Cloudflare: should serve, and report a Cloudflare edge.
-curl -m 10 -sI https://app.mitosia.com/ | grep -iE '^(HTTP|server|cf-ray)'
+curl -m 10 -sI https://staging.mitosia.cloud/ | grep -iE '^(HTTP|server|cf-ray)'
 ```
 
-Then check the app still sees real client IPs — an audit log entry written
-after the cutover should not carry a Cloudflare address.
+Use `--resolve`, not a bare `https://<ip>/`: without SNI, Traefik answers with
+its default cert and the result tells you nothing about the lock.
+
+Then check the app still sees real client IPs — a session row written after the
+cutover should carry your address, not a Cloudflare one:
+
+```sql
+select ip_address, created_at from session order by created_at desc limit 5;
+```
+
+That is the assertion that catches a missing `trustedIPs`, and it is invisible
+in the UI: everything works, the addresses are just quietly wrong.
 
 ## What this does not fix
 
