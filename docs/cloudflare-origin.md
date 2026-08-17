@@ -249,6 +249,23 @@ select ip_address, created_at from session order by created_at desc limit 5;
 That is the assertion that catches a missing `trustedIPs`, and it is invisible
 in the UI: everything works, the addresses are just quietly wrong.
 
+Verified 2026-08-17: a fresh sign-in recorded `2405:201:d014:c9bb::` — the
+client's own network, not a Cloudflare range (`2400:cb00::/32`,
+`2606:4700::/32`). Note the shape: **IPv6 is stored as the /64 prefix with the
+interface identifier zeroed**, while Cloudflare's edge sees the full address
+(check yours at `https://staging.mitosia.cloud/cdn-cgi/trace`). Nothing in
+`lib/auth.ts` does that, so it comes from Better Auth's own resolution — and
+/64 is the right unit anyway: IPv6 privacy extensions rotate the low 64 bits
+constantly, so a full-address rate-limit bucket is evaded for free while a /64
+maps to one subscriber. Don't read the zeros as a bug or "fix" them.
+
+Two gotchas when re-running this check. A visit while already signed in only
+**refreshes** the existing row — `updated_at` moves, `ip_address` does not,
+because it is written at session *creation* only. So sign out first, or use a
+private window. And an empty `ip_address` is the real failure signal: it means
+Better Auth resolved no client IP at all, which also drops rate limiting into
+one shared per-path bucket.
+
 ## What this does not fix
 
 Cloudflare's edge still has to reach the origin. If Hostinger's address becomes
