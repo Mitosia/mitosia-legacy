@@ -9,9 +9,16 @@
 # What it buys:
 #   - A new subdomain works immediately, with no issuance and no HTTP-01,
 #     which is what actually broke once traffic went through Cloudflare.
-#   - Existing hosts keep their per-host certificates while those renew, and
-#     fall back to this wildcard automatically if HTTP-01 ever stops working
-#     — degradation instead of an outage.
+#   - Existing hosts keep their per-host certificates while those renew.
+#
+# What it does NOT buy, despite an earlier note here claiming otherwise:
+# automatic fallback for a host that already has its own certificate. The
+# default store is consulted only when NOTHING matches the SNI, and an expired
+# per-host cert still matches — so Traefik keeps serving the expired one and
+# Cloudflare (Full strict) turns that into a 526. If HTTP-01 renewal ever
+# fails, the remedy is manual: delete that host's entry from acme.json and
+# restart Traefik, after which this wildcard covers it (verified 2026-08-18 by
+# requesting an SNI with no per-host cert — it is served this certificate).
 #
 # Traefik requests and renews this through the letsencrypt-dns resolver, so
 # it stays live without anything being copied to disk by hand.

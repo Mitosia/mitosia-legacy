@@ -132,10 +132,30 @@ cover different things:
 | `letsencrypt-dns` | DNS-01 | wildcard `*.mitosia.cloud` | `defaultGeneratedCert` — any hostname without its own |
 
 Read that table before changing anything here. **The wildcard is a fallback, not
-what the live hosts present.** Verified 2026-08-18: both hosts serve a
-single-SAN certificate (`CN = staging.mitosia.cloud`, `CN = dokploy.mitosia.cloud`,
-expiring 7 and 6 Nov), issued by the HTTP-01 resolver — so that resolver is
-load-bearing, not legacy.
+what the live hosts present.** Traefik prefers an exact SNI match and consults
+the default store only when nothing matches. Verified 2026-08-18 by asking the
+origin for three hostnames:
+
+| SNI requested | Certificate served | Issued by |
+|---|---|---|
+| `staging.mitosia.cloud` | `CN=staging.mitosia.cloud`, single SAN, exp 7 Nov | HTTP-01 |
+| `dokploy.mitosia.cloud` | `CN=dokploy.mitosia.cloud`, single SAN, exp 6 Nov | HTTP-01 |
+| `anything-else.mitosia.cloud` | `CN=mitosia.cloud`, SAN `*.mitosia.cloud`, exp 15 Nov | **DNS-01** |
+
+So **DNS-01's job is every hostname that does not have its own certificate.**
+Because `*.mitosia.cloud` already points at the VPS, a new service gets a valid
+certificate the moment it exists — no issuance, no ACME round trip, nothing to
+wait for. That is why the cutover did not have to touch the two existing hosts,
+and it is the whole reason the resolver is there. For `staging` and `dokploy`
+specifically, DNS-01 does nothing today.
+
+Both stores confirm the split — and they are deliberately separate files,
+because two resolvers must never share one:
+
+```
+acme.json      letsencrypt      2 certs: staging, dokploy
+acme-dns.json  letsencrypt-dns  1 cert:  mitosia.cloud + *.mitosia.cloud
+```
 
 **And HTTP-01 still works through Cloudflare here** — also verified 2026-08-18.
 The challenge path passes the edge and reaches Traefik rather than being
@@ -522,6 +542,14 @@ resort, not a quick fix. Do **B** first.
 Both fail **silently and late**: a certificate stops renewing now and stops
 *working* up to 90 days later. `pnpm check:traefik` fails at 21 days remaining
 specifically to turn that into a warning rather than an outage.
+
+**Do not expect the wildcard to catch a failed per-host renewal.** The default
+store is consulted only when nothing matches the SNI, and an expired per-host
+certificate still matches — so Traefik keeps serving the expired one and
+Cloudflare (Full strict) turns that into a 526. The remedy is manual: delete
+that host's entry from `acme.json`, restart Traefik, and the wildcard covers it.
+(An earlier comment in `wildcard-default.yml` claimed this fallback was
+automatic. It is not, and that comment has been corrected.)
 
 ```bash
 pnpm check:traefik            # expiry + config shape
