@@ -56,7 +56,8 @@ latencies), plus WAF and DDoS protection the origin never had.
                               │                                     │
                               │  Traefik 3.6.7 (plain container)    │
                               │    trustedIPs = CF ranges           │
-                              │    wildcard *.mitosia.cloud (DNS-01)│
+                              │    per-host certs (HTTP-01) + a     │
+                              │    *.mitosia.cloud fallback (DNS-01)│
                               │           │                         │
                               │           ├──▶ staging app ──▶ Neon │
                               │           └──▶ Dokploy panel        │
@@ -114,38 +115,72 @@ Set SSL/TLS mode to **Full (strict)**. Never "Flexible" — that makes Cloudflar
 talk to the origin over plain HTTP, so the padlock users see covers only half
 the path.
 
-### 3.2 Certificates: DNS-01 wildcard
+### 3.2 Certificates: two resolvers, and what each one actually serves
 
-Traefik issued via HTTP-01. **HTTP-01 breaks behind the proxy** — the ACME
-challenge is answered by the edge, not the origin, so renewal fails.
+Traefik was issuing per-host certificates over HTTP-01. **HTTP-01 is the
+challenge a CDN can break**: the ACME request for
+`/.well-known/acme-challenge/…` has to cross the edge and reach the origin, and
+a forced redirect, a WAF rule, or the origin firewall can each stop it — months
+before anyone notices, because a certificate fails at renewal, not at cutover.
 
-Two ways through. **We chose DNS-01 over a Cloudflare Origin Certificate.**
+So a second resolver was **added, not substituted**. Both are live, and they
+cover different things:
 
-The Origin Certificate is simpler: free, 15 years, no token on the box. But it
-is trusted by *Cloudflare only*. Anything that ever reaches the origin outside
-the proxy sees an untrusted certificate — a deliberately unproxied host, a
-`--resolve` health check, a debugging session, a service that exists before its
-DNS record does. The failure arrives exactly when you are already debugging
-something else. DNS-01 keeps a publicly trusted certificate on the box, so the
-origin stays correct on its own terms and the proxy is an optimisation rather
-than a prerequisite. **That property is what makes the emergency fallback in
-§6.2 work at all.**
+| Resolver | Challenge | Issues | What it covers |
+|---|---|---|---|
+| `letsencrypt` | HTTP-01 | per-host certs | **`staging` and `dokploy` — the certificates actually served today** |
+| `letsencrypt-dns` | DNS-01 | wildcard `*.mitosia.cloud` | `defaultGeneratedCert` — any hostname without its own |
 
-The cost is one API token on the VPS. Scope it hard: **Zone → DNS → Edit, on
-`mitosia.cloud` only.** Nothing else. (If you also set an IP filter on the
-token, remember the VPS is dual-stack — an IPv4-only filter rejects its IPv6
-source address, and the error surfaces as a misleading "Invalid API Token".)
+Read that table before changing anything here. **The wildcard is a fallback, not
+what the live hosts present.** Verified 2026-08-18: both hosts serve a
+single-SAN certificate (`CN = staging.mitosia.cloud`, `CN = dokploy.mitosia.cloud`,
+expiring 7 and 6 Nov), issued by the HTTP-01 resolver — so that resolver is
+load-bearing, not legacy.
 
-In `/etc/dokploy/traefik/traefik.yml`, a second resolver alongside the existing
-one (`letsencrypt` is kept but unused — it costs nothing and stays available if
-a host is ever unproxied):
+**And HTTP-01 still works through Cloudflare here** — also verified 2026-08-18.
+The challenge path passes the edge and reaches Traefik rather than being
+redirected or answered at the edge:
+
+```bash
+curl -m 15 -sS -D- http://staging.mitosia.cloud/.well-known/acme-challenge/probe
+# HTTP/1.1 404 Not Found   ← from Traefik: unknown token, empty body
+# cf-cache-status: DYNAMIC ← forwarded to origin, not served or blocked at the edge
+# (no Location header — "Always Use HTTPS" is not intercepting this path)
+```
+
+Re-run that probe if you ever enable a redirect rule, a WAF rule, or a cache
+rule that could match `/.well-known/`. A 403, an HTML body, or a redirect that
+does not resolve means renewals will fail in roughly 60 days' time.
+
+The wildcard's job is different: it makes a **new** subdomain work immediately,
+with no issuance at all. It is wired as a default certificate rather than by
+pointing each router at the DNS resolver because **Dokploy regenerates the
+per-app router labels (`certresolver=letsencrypt`) on every deploy** and would
+overwrite anything edited by hand.
+
+> **Not used: a Cloudflare Origin Certificate.** Considered, rejected, and
+> never installed. It is trusted by Cloudflare *only*, so any path reaching the
+> origin outside the proxy — an unproxied host, a `--resolve` health check, the
+> §5.3 C fallback — would show a certificate error. If you ever find one
+> installed on this box, something has gone wrong.
+
+The DNS-01 resolver costs one API token on the VPS. Scope it hard: **Zone → DNS
+→ Edit, on `mitosia.cloud` only.** Nothing else. (If you also set an IP filter,
+remember the VPS is dual-stack — an IPv4-only filter rejects its IPv6 source
+address, and the error surfaces as a misleading "Invalid API Token".)
+
+Both resolvers in `/etc/dokploy/traefik/traefik.yml`. **They must not share one
+storage file:**
 
 ```yaml
 certificatesResolvers:
-  letsencrypt:                    # HTTP-01, retained, unused
+  letsencrypt:                    # HTTP-01 — issued every current certificate
     acme:
+      email: <you>
       storage: /etc/dokploy/traefik/dynamic/acme.json
-  letsencrypt-dns:                # DNS-01, this is the live one
+      httpChallenge:
+        entryPoint: web
+  letsencrypt-dns:                # DNS-01 — the wildcard
     acme:
       email: <you>
       storage: /etc/dokploy/traefik/dynamic/acme-dns.json
@@ -154,9 +189,8 @@ certificatesResolvers:
         resolvers: ["1.1.1.1:53", "8.8.8.8:53"]
 ```
 
-`CF_DNS_API_TOKEN` goes in the **Traefik container's** environment. Then serve
-the wildcard as the default certificate, so every `*.mitosia.cloud` host is
-covered with no per-host issuance:
+`CF_DNS_API_TOKEN` goes in the **Traefik container's** environment. Then the
+wildcard as the default certificate:
 
 ```yaml
 # /etc/dokploy/traefik/dynamic/wildcard-default.yml
@@ -421,7 +455,7 @@ firewall confounding the answer — which is exactly what you want to know first
 | **522** | Connection timed out | The lock is dropping Cloudflare — they added IP ranges we do not allow | Re-run the lock script (§5.3) |
 | **521** | Web server is down | Traefik or the app container is not running | `docker ps`, restart |
 | **525** | SSL handshake failed | Traefik not serving TLS on 443 | Check Traefik logs |
-| **526** | Invalid SSL certificate | Full (strict) + expired/invalid origin cert | `pnpm check:traefik`, §5.4 |
+| **526** | Invalid SSL certificate | the origin's certificate expired or went invalid | `pnpm check:traefik`, §5.4 |
 | **502/504** | Bad gateway / timeout | App container up but not answering | App logs; check the database |
 | **302** to `cloudflareaccess.com` | Access is doing its job | A script hit the Dokploy API | Service token, §3.4 |
 
@@ -458,12 +492,10 @@ dashboard → DNS → click the orange cloud), or zone-wide via Overview →
 Advanced → **Pause Cloudflare on Site**. DNS then points straight at
 `72.61.169.154`.
 
-> **This works cleanly only because we chose DNS-01.** The origin holds a real,
-> publicly trusted Let's Encrypt wildcard, so browsers going direct see a valid
-> certificate. Had we used a Cloudflare Origin Certificate, every direct
-> visitor would get a full-page certificate error — the emergency exit would be
-> nailed shut. Do **B** before **C**, or the direct traffic hits a locked
-> origin.
+> **This works because of the certificate choice in §3.2.** The origin holds a
+> real, publicly trusted Let's Encrypt wildcard, so browsers reaching it
+> directly see a valid certificate and nothing about this step is user-visible.
+> Do **B** before **C**, or the direct traffic hits a locked origin.
 >
 > Understand what you are giving up: this restores the exact condition that
 > started all of this. **Jio users will not be able to reach the site.** It is
@@ -479,14 +511,31 @@ resort, not a quick fix. Do **B** first.
 
 ### 5.4 Certificate problems
 
-The wildcard renews automatically via DNS-01. It fails silently if the API
-token is revoked, expires, or loses its zone scope — and you find out when the
-certificate does, up to 90 days later. `pnpm check:traefik` fails at 21 days
-remaining specifically to make that a warning rather than an outage.
+**Two renewal paths can fail, and they fail for different reasons** (§3.2):
+
+- **Per-host certs, via HTTP-01** — what `staging` and `dokploy` actually
+  serve. Breaks if a redirect, WAF or cache rule starts matching
+  `/.well-known/acme-challenge/`, or if port 80 stops reaching the origin.
+- **The wildcard, via DNS-01** — the fallback for hosts without their own.
+  Breaks if `CF_DNS_API_TOKEN` is revoked, expires, or loses its zone scope.
+
+Both fail **silently and late**: a certificate stops renewing now and stops
+*working* up to 90 days later. `pnpm check:traefik` fails at 21 days remaining
+specifically to turn that into a warning rather than an outage.
 
 ```bash
-pnpm check:traefik                                    # expiry + config shape
+pnpm check:traefik            # expiry + config shape
 ssh mitosia-vps 'docker logs dokploy-traefik --tail 100 2>&1 | grep -i "acme\|error"'
+
+# which certificate is each host actually serving? (run on the VPS —
+# through Cloudflare you would see the edge's cert, not the origin's)
+ssh mitosia-vps 'echo | openssl s_client -connect 127.0.0.1:443 \
+  -servername staging.mitosia.cloud 2>/dev/null \
+  | openssl x509 -noout -issuer -subject -ext subjectAltName -enddate'
+
+# is the HTTP-01 challenge path still reaching the origin?
+curl -m 15 -sS -D- http://staging.mitosia.cloud/.well-known/acme-challenge/probe
+# want: 404, empty body, cf-cache-status: DYNAMIC, no Location header
 ```
 
 If the token is the problem, mint a new one (Zone → DNS → Edit, this zone
@@ -498,8 +547,10 @@ docker restart dokploy-traefik            # correct
 docker service update --force dokploy-traefik   # WRONG — "no such service"
 ```
 
-To force reissue, stop Traefik, move `/etc/dokploy/traefik/dynamic/acme-dns.json`
-aside, and start it again. Let's Encrypt rate limits apply — do not loop on this.
+To force reissue, stop Traefik, move the relevant storage file aside —
+`acme.json` for per-host HTTP-01 certs, `acme-dns.json` for the wildcard; they
+are deliberately separate and must stay that way — then start it again. Let's
+Encrypt rate limits apply, so do not loop on this.
 
 ### 5.5 Locked out of the Dokploy panel
 
