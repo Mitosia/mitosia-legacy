@@ -33,6 +33,13 @@ export type SourceStatus = (typeof SOURCE_STATUSES)[number];
 const INGEST_STEPS = [
   "probe",
   "hls",
+  // Distinct from "hls" because it is the second half of the same stage and
+  // is not short: the ladder is transcoded, then every playlist and segment
+  // is pushed to storage. On the two-hour exit source that upload ran for
+  // ~10 minutes while the badge still read "Preparing playback 100%", which
+  // is indistinguishable from a hang. The column is plain `text` (no check
+  // constraint), so adding a value needs no migration.
+  "publish",
   "thumbnails",
   "audio",
   "waveform",
