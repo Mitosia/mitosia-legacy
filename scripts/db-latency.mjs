@@ -43,7 +43,6 @@ for (let i = 0; i < 3; i += 1) {
   // biome-ignore lint/performance/noAwaitInLoops: measuring serial latency is the point
   await probe.connect();
   connectSamples.push(Date.now() - started);
-  // biome-ignore lint/performance/noAwaitInLoops: measuring serial latency is the point
   await probe.end();
 }
 process.stdout.write(`connect     ${summarise(connectSamples)}\n`);
@@ -66,13 +65,10 @@ for (let i = 0; i < ROUNDS; i += 1) {
   const started = Date.now();
   // biome-ignore lint/performance/noAwaitInLoops: measuring serial latency is the point
   await client.query("BEGIN");
-  // biome-ignore lint/performance/noAwaitInLoops: measuring serial latency is the point
   await client.query("SELECT set_config('app.organization_id', $1, true)", [
     ORG_ID,
   ]);
-  // biome-ignore lint/performance/noAwaitInLoops: measuring serial latency is the point
   await client.query("SELECT 1");
-  // biome-ignore lint/performance/noAwaitInLoops: measuring serial latency is the point
   await client.query("COMMIT");
   scopeSamples.push(Date.now() - started);
 }
