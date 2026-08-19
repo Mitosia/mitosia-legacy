@@ -1,4 +1,5 @@
 import { eq } from "drizzle-orm";
+import { OfflineBanner } from "@/components/app/offline-banner";
 import { AppSidebar } from "@/components/app-sidebar";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -39,6 +40,7 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
         user={{ email: session.user.email, name: session.user.name }}
       />
       <SidebarInset>
+        <OfflineBanner />
         <header className="flex h-14 shrink-0 items-center gap-2 border-b px-4">
           <SidebarTrigger className="-ml-1" />
           <Separator className="mr-2 h-4" orientation="vertical" />
