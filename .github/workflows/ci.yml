@@ -129,17 +129,18 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
 
-      # The browser binary is cached; its apt dependencies live outside that
-      # path and are not, so they are installed either way.
-      - name: Install Playwright browser
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
+      # One unconditional step, not a cache-hit/miss pair. `playwright install`
+      # is a 0.8s no-op when the binary is already present, so the cache still
+      # saves the ~150s download — while the apt half runs exactly as it did
+      # before the cache existed.
+      #
+      # The split version put `install-deps` on the cache-hit path and it hung
+      # for the full 10-minute timeout on its first run, apt stalled partway
+      # through. apt was always part of `--with-deps` and never a problem;
+      # moving it onto its own conditional branch is what made it one.
+      - name: Install Playwright browser and system dependencies
         timeout-minutes: 10
         run: pnpm exec playwright install --with-deps chromium
-
-      - name: Install Playwright system dependencies
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        timeout-minutes: 10
-        run: pnpm exec playwright install-deps chromium
 
       # The ingest e2e generates its fixture and runs the real pipeline, so
       # CI's ffmpeg has to be the one the image ships (Alpine 3.24 → 8.1.x).
