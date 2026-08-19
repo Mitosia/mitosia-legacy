@@ -28,6 +28,8 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    # Measured at ~1 minute; this is a hang backstop, not a budget.
+    timeout-minutes: 10
     services:
       postgres:
         image: postgres:18
@@ -69,6 +71,11 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    # Measured at 5-7 minutes. A run with no ceiling sat on a stalled
+    # Playwright download for 3.5 hours before anyone noticed, holding up a
+    # merge the whole time; GitHub's own default is 6 hours, which is not a
+    # ceiling in any useful sense.
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:18
@@ -106,8 +113,33 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # 159s of a ~430s job, downloaded fresh every run, and the step that
+      # stalled for 3.5 hours. Keyed on the Playwright version so a bump
+      # invalidates it — a browser that disagrees with the test runner fails
+      # in ways that look like flakes.
+      - name: Resolve Playwright version
+        id: playwright
+        run: |
+          echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browser
+        id: playwright-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      # The browser binary is cached; its apt dependencies live outside that
+      # path and are not, so they are installed either way.
       - name: Install Playwright browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 10
         run: pnpm exec playwright install --with-deps chromium
+
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        timeout-minutes: 10
+        run: pnpm exec playwright install-deps chromium
 
       # The ingest e2e generates its fixture and runs the real pipeline, so
       # CI's ffmpeg has to be the one the image ships (Alpine 3.24 → 8.1.x).
