@@ -25,11 +25,13 @@ export const ingestSourceTask = task({
   // real run was OOM-killed (TASK_PROCESS_OOM_KILLED) on a *small* test
   // file, after five minutes of thrashing that wrote no progress at all.
   //
-  // large-1x is 4 vCPU / 8 GB. The memory is headroom; the vCPUs are the
-  // point, because the ladder is CPU-bound (~0.26x realtime on the 8-vCPU
-  // VPS) and Trigger bills by the second — a machine that is 2x faster on
-  // CPU-bound work costs about the same in total and halves the wall clock.
-  machine: "large-1x",
+  // large-2x is 8 vCPU / 16 GB, matching the VPS core count. The vCPUs are
+  // the point, not the memory: the ladder is CPU-bound and Trigger bills by
+  // the second, so on CPU-bound work a machine twice as fast costs roughly
+  // the same in total while halving the wall clock. large-1x measured 1.21x
+  // the source duration on a 130s clip (vs 0.26x on the 8-vCPU VPS), which
+  // would put a two-hour source near 2.4 hours.
+  machine: "large-2x",
   run: async (payload: IngestPayload) => {
     await runIngestPipeline(payload);
   },
