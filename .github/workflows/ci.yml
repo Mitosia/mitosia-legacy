@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets the e2e job be run against a branch on demand — before a risky
+  # merge, or to reproduce a failure that only main saw.
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -69,7 +72,27 @@ jobs:
       - name: Build
         run: pnpm build
 
+  # Runs on main and on demand, NOT on every pull request.
+  #
+  # A PR gates on `checks` (~2 min: lint, typecheck, cross-tenant tests,
+  # build) and this runs after the merge, so a break is known within ~7
+  # minutes while the change is still fresh — and main deploys to staging,
+  # not production, so the blast radius is a staging environment.
+  #
+  # Why the whole job rather than a fast subset: no single spec dominates
+  # (the slowest is ~15s, the suite ~50s locally), while roughly 40% of the
+  # job is fixed setup — containers, node, pnpm, Playwright, ffmpeg, MinIO,
+  # migrations. Splitting would pay that setup twice to save nothing.
+  #
+  # The saving is per *push*, not per PR: this used to re-run on every push
+  # to every branch, so a PR that was rebased three times cost three full
+  # runs. Now it costs one, at merge.
+  #
+  # Revisit when main being green matters to someone other than the person
+  # who broke it — that is the point where pre-merge enforcement earns its
+  # wait again.
   e2e:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     # Measured at 5-7 minutes. A run with no ceiling sat on a stalled
     # Playwright download for 3.5 hours before anyone noticed, holding up a
