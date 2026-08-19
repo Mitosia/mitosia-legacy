@@ -69,3 +69,28 @@ export async function ageUpload(
     );
   }
 }
+
+// The ingest reaper acts on a row that claims to be processing and has not
+// been written to for a full stall window. A hard-killed pipeline leaves
+// exactly that shape behind — status frozen at 'processing', ingest_step
+// frozen at whatever it was running, ingest_error still null because
+// recordFailure never got to run — so setting it directly is a faithful
+// simulation rather than a shortcut around the logic under test, and the
+// only way to make thirty minutes pass inside a test.
+export async function stallIngest(
+  sourceId: string,
+  minutes: number
+): Promise<void> {
+  const rows = await queryRows(
+    `UPDATE source
+       SET status = 'processing',
+           ingest_step = 'hls',
+           ingest_error = NULL,
+           updated_at = now() - make_interval(mins => $2)
+     WHERE id = $1 RETURNING id`,
+    [sourceId, minutes]
+  );
+  if (rows.length !== 1) {
+    throw new Error(`expected one source ${sourceId}, updated ${rows.length}`);
+  }
+}

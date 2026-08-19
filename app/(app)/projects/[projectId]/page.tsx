@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/card";
 import { campaign, project, source, sourceArtifact } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
+import { isStalledIngest, scheduleIngestReap } from "@/lib/ingest-reaper";
 import { requireOrg } from "@/lib/org";
 import { isStaleUpload, scheduleUploadReap } from "@/lib/uploads";
 
@@ -60,6 +61,9 @@ export default async function ProjectDetailPage(
         // Computed in the database (time-zone-safe) rather than compared
         // against a JS clock here: whether this row is an abandoned upload.
         stale: sql<boolean>`(${isStaleUpload})`,
+        // Same treatment for an ingest whose process died: computed in the
+        // database so the sweep is only scheduled when one is really here.
+        stalled: sql<boolean>`(${isStalledIngest})`,
         status: source.status,
         title: source.title,
       })
@@ -99,6 +103,7 @@ export default async function ProjectDetailPage(
     return {
       ...projectRow,
       hasStaleUpload: sourceRows.some((row) => row.stale),
+      hasStalledIngest: sourceRows.some((row) => row.stalled),
       sources,
     };
   });
@@ -114,6 +119,13 @@ export default async function ProjectDetailPage(
   // to failed lands on its next tick.
   if (data.hasStaleUpload) {
     scheduleUploadReap(organizationId);
+  }
+
+  // Same deal for an ingest whose process was killed: the row still says
+  // "processing" and its step will never advance, so this list is where it
+  // shows up and this render is what pays to clean it up.
+  if (data.hasStalledIngest) {
+    scheduleIngestReap(organizationId);
   }
 
   const hasActiveSources = data.sources.some(
