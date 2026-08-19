@@ -116,19 +116,38 @@ async function walkFiles(dir: string, prefix = ""): Promise<string[]> {
 // callers can attribute bytes to the artifact rows they create.
 async function uploadDirectory(
   localDir: string,
-  keyPrefix: string
+  keyPrefix: string,
+  onProgress?: (fraction: number) => void
 ): Promise<Map<string, number>> {
   const files = await walkFiles(localDir);
+
+  // Sizes up front so progress can be reported in bytes rather than in files
+  // completed: an HLS ladder is thousands of ~2s segments plus a handful of
+  // playlists, and counting files would jump around relative to real work.
+  const fileSizes = new Map<string, number>();
+  let totalBytes = 0;
+  for (const relative of files) {
+    // biome-ignore lint/performance/noAwaitInLoops: local stat, and the total must be known before the first upload reports
+    const { size } = await stat(join(localDir, relative));
+    fileSizes.set(relative, size);
+    totalBytes += size;
+  }
+
   const sizes = new Map<string, number>();
+  let uploadedBytes = 0;
   await mapWithConcurrency(files, UPLOAD_CONCURRENCY, async (relative) => {
     const filePath = join(localDir, relative);
-    const { size } = await stat(filePath);
+    const size = fileSizes.get(relative) ?? 0;
     await putFile(
       `${keyPrefix}${relative}`,
       filePath,
       contentTypeFor(relative)
     );
     sizes.set(relative, size);
+    uploadedBytes += size;
+    if (totalBytes > 0) {
+      onProgress?.(uploadedBytes / totalBytes);
+    }
   });
   return sizes;
 }
@@ -161,17 +180,13 @@ const PROGRESS_WRITE_INTERVAL_MS = 10_000;
 // Throttled progress writer for a long step. Returns a function to hand to
 // runMediaCommand, plus the flush the step awaits at the end so a write
 // started mid-run cannot outlive it.
-function progressReporter(payload: IngestPayload, totalSeconds: number) {
+function throttledProgress(payload: IngestPayload) {
   let lastWrite = 0;
   let pending: Promise<void> = Promise.resolve();
 
   return {
     flush: () => pending,
-    onStdout: (chunk: Buffer) => {
-      const seconds = parseProgressSeconds(chunk.toString());
-      if (seconds === null || totalSeconds <= 0) {
-        return;
-      }
+    report: (fraction: number) => {
       const now = performance.now();
       if (now - lastWrite < PROGRESS_WRITE_INTERVAL_MS) {
         return;
@@ -180,22 +195,39 @@ function progressReporter(payload: IngestPayload, totalSeconds: number) {
 
       // Clamped: ffmpeg can report a position slightly past the duration on
       // the final flush, and a badge reading 103% is worse than one at 100.
-      const fraction = Math.min(1, Math.max(0, seconds / totalSeconds));
+      const clamped = Math.min(1, Math.max(0, fraction));
       pending = pending
         .then(() =>
           withOrgScope(payload.organizationId, (tx) =>
             tx
               .update(source)
-              .set({ ingestProgress: fraction })
+              .set({ ingestProgress: clamped })
               .where(eq(source.id, payload.sourceId))
           )
         )
         // A dropped progress write must never fail the ingest: it is a
-        // cosmetic signal, and the transcode behind it is still fine.
+        // cosmetic signal, and the work behind it is still fine.
         .then(
           () => undefined,
           () => undefined
         );
+    },
+  };
+}
+
+// Throttled progress writer for a long step. Returns a function to hand to
+// runMediaCommand, plus the flush the step awaits at the end so a write
+// started mid-run cannot outlive it.
+function progressReporter(payload: IngestPayload, totalSeconds: number) {
+  const writer = throttledProgress(payload);
+  return {
+    flush: writer.flush,
+    onStdout: (chunk: Buffer) => {
+      const seconds = parseProgressSeconds(chunk.toString());
+      if (seconds === null || totalSeconds <= 0) {
+        return;
+      }
+      writer.report(seconds / totalSeconds);
     },
   };
 }
@@ -298,7 +330,18 @@ async function runHlsStep(
   }
   await writeFile(join(hlsDir, "master.m3u8"), renderMasterPlaylist(entries));
 
-  const sizes = await uploadDirectory(hlsDir, `${keyPrefix}hls/`);
+  // The ladder is built; pushing it to storage is the other half of this
+  // stage and takes minutes at feature length. Reported as its own step so
+  // the badge stops claiming "Preparing playback 100%" while thousands of
+  // segments are still in flight.
+  await setIngestStep(payload, "publish");
+  const publishProgress = throttledProgress(payload);
+  const sizes = await uploadDirectory(
+    hlsDir,
+    `${keyPrefix}hls/`,
+    publishProgress.report
+  );
+  await publishProgress.flush();
   return [
     {
       kind: "hls_master",

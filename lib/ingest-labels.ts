@@ -8,6 +8,7 @@ export const INGEST_STEP_LABELS: Record<IngestStep, string> = {
   finalize: "Almost ready",
   hls: "Preparing playback",
   probe: "Checking recording",
+  publish: "Saving playback",
   thumbnails: "Creating previews",
   waveform: "Building waveform",
 };

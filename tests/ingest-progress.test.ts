@@ -68,4 +68,21 @@ describe("progress labels", () => {
       "Preparing playback"
     );
   });
+
+  // Transcoding the ladder and pushing it to storage are two halves of one
+  // stage, and only the first reported. On the two-hour exit source the
+  // badge sat on "Preparing playback 100%" for ~10 minutes of uploading —
+  // the same "healthy work looks like a hang" failure the ladder progress
+  // was added to fix, just moved to the end.
+  it("reports the upload as its own step rather than parking at 100%", () => {
+    expect(ingestStepProgressLabel("publish", 0.63)).toBe(
+      "Saving playback 63%"
+    );
+  });
+
+  it("never labels the upload with the transcode's name", () => {
+    expect(ingestStepProgressLabel("publish", 1)).not.toContain(
+      "Preparing playback"
+    );
+  });
 });
