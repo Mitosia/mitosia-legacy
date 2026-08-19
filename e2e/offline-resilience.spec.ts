@@ -16,34 +16,52 @@ import { createAccountWithOrg } from "./support/auth";
 // so a pageerror sweep passes on exactly the broken behaviour this guards.
 
 const OFFLINE_BANNER = /No connection/;
+const CLIENTS_LINK = /Clients/i;
 
-test("a connectivity drop does not navigate away from the app", async ({
+test("a connectivity drop does not replace the document", async ({
   page,
   context,
 }) => {
   await createAccountWithOrg(page, "offline");
+  await page.goto("/dashboard");
 
-  const urlBefore = page.url();
-  const marker = "__mitosia_offline_probe__";
-  // Tag the live document. A hard navigation replaces it and loses the tag,
-  // which is the failure we are guarding against.
+  // Tag the live document. Only a real navigation clears this, so it is the
+  // difference between "the soft navigation was held pending" (the fix) and
+  // "the browser navigated and rendered its error page" (the bug).
+  const MARKER = "__mitosiaOfflineProbe";
   await page.evaluate((key) => {
-    (window as unknown as Record<string, unknown>)[key] = true;
-  }, marker);
+    (window as unknown as Record<string, string>)[key] = "alive";
+  }, MARKER);
 
   await context.setOffline(true);
-  // Force the same RSC fetch the poller issues.
-  await page.evaluate(() => {
-    window.dispatchEvent(new Event("offline"));
-  });
-  await page.reload({ waitUntil: "commit" }).catch(() => {
-    // A reload while offline is expected to fail at the network layer; the
-    // point of the test is what happens to soft navigation, checked below.
-  });
-  await context.setOffline(false);
 
-  await page.goto(urlBefore);
-  await expect(page).toHaveURL(urlBefore);
+  // A soft navigation issues exactly the RSC fetch the 3.5s poller issues.
+  // Offline and unfixed, fetchServerResponse falls through to its MPA
+  // fallback and the browser leaves the app.
+  await page
+    .getByRole("link", { name: CLIENTS_LINK })
+    .first()
+    .click({ timeout: 5000 })
+    .catch(() => {
+      // Whether the click resolves is not the assertion; surviving is.
+    });
+
+  // Give the failed fetch time to fall back, if it is going to.
+  await page.waitForTimeout(3000);
+
+  const survived = await page
+    .evaluate(
+      (key) => (window as unknown as Record<string, string>)[key] ?? null,
+      MARKER
+    )
+    .catch(() => null);
+
+  expect(
+    survived,
+    "the document was replaced — Next fell back to a browser navigation while offline"
+  ).toBe("alive");
+
+  await context.setOffline(false);
 });
 
 test("the offline banner appears and clears with connectivity", async ({
