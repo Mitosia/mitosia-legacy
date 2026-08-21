@@ -45,7 +45,7 @@ jobs:
         ports:
           - 5432:5432
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
 
@@ -101,7 +101,7 @@ jobs:
       # Must match the e2e dev server port or Better Auth rejects auth as cross-origin
       BETTER_AUTH_URL: http://localhost:3001
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v6
 
