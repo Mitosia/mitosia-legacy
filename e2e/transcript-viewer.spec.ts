@@ -76,8 +76,13 @@ test("the transcript panel seeks, searches, and highlights", async ({
   const panel = page.getByTestId("transcript-panel");
   await expect(panel).toBeVisible({ timeout: 30_000 });
 
-  // Deterministic mock content rendered with speaker chips
-  await expect(panel.getByText("Welcome")).toBeVisible();
+  // Deterministic mock content rendered with speaker chips. The full
+  // spaced sentence is the assertion on purpose: words are individual
+  // inline-block buttons, and a trailing space *inside* a button collapses
+  // — this caught paragraphs rendering as one unbroken string.
+  await expect(
+    panel.getByText("Welcome to the Mitosia mock transcript.")
+  ).toBeVisible();
   await expect(page.getByTestId("transcript-speaker").first()).toHaveText(
     "Speaker 1"
   );

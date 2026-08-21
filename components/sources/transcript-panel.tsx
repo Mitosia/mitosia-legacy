@@ -2,7 +2,15 @@
 
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { ChangeEvent, MouseEvent } from "react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -124,21 +132,25 @@ const ParagraphRow = memo(function ParagraphRowInner({
             background = "bg-amber-200/40 dark:bg-amber-300/20 rounded-sm";
           }
           return (
-            <button
-              className={`cursor-pointer rounded-sm hover:bg-muted ${background} ${
-                lowConfidence
-                  ? "underline decoration-amber-500 decoration-dotted underline-offset-4"
-                  : ""
-              }`}
-              data-low-confidence={lowConfidence || undefined}
-              data-start-ms={word.startMs}
-              data-word-index={globalIndex}
-              key={globalIndex}
-              onClick={handleWordClick}
-              type="button"
-            >
-              {word.text}{" "}
-            </button>
+            // The separator lives OUTSIDE the button: inline-block elements
+            // swallow trailing whitespace, which rendered every paragraph
+            // as one unbroken string.
+            <Fragment key={globalIndex}>
+              <button
+                className={`cursor-pointer rounded-sm hover:bg-muted ${background} ${
+                  lowConfidence
+                    ? "underline decoration-amber-500 decoration-dotted underline-offset-4"
+                    : ""
+                }`}
+                data-low-confidence={lowConfidence || undefined}
+                data-start-ms={word.startMs}
+                data-word-index={globalIndex}
+                onClick={handleWordClick}
+                type="button"
+              >
+                {word.text}
+              </button>{" "}
+            </Fragment>
           );
         })}
       </p>
