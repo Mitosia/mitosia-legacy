@@ -635,6 +635,25 @@ export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
       artifacts,
       (Date.now() - startedAt) / 1000
     );
+
+    // Transcription is a follow-on job, not an eighth step: "ready" keeps
+    // meaning playable, and a provider outage cannot fail an ingest that
+    // already succeeded. Enqueued after finalize so the audio artifact row
+    // it reads is committed. Errors are the job's own to record — a failed
+    // enqueue must not mark a finished ingest failed — hence the catch.
+    if (probe.audio) {
+      try {
+        const { enqueueTranscription } = await import(
+          "@/lib/transcription/enqueue"
+        );
+        await enqueueTranscription(payload);
+      } catch (error) {
+        console.error(
+          `[ingest] transcription enqueue failed for ${payload.sourceId}:`,
+          error
+        );
+      }
+    }
   } catch (error) {
     await recordFailure(payload, error);
     throw error;

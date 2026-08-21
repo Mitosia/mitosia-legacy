@@ -143,7 +143,9 @@ export const usageLedger = pgTable(
     correlationId: text("correlation_id").notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     entryType: text("entry_type", {
-      enum: ["storage_bytes", "processing_minutes"],
+      // Plain text column (no check constraint): adding a value here needs
+      // no migration, same as ingest_step.
+      enum: ["storage_bytes", "processing_minutes", "transcription_minutes"],
     }).notNull(),
     id: uuid("id").primaryKey().default(sql`uuidv7()`),
     metadata: jsonb("metadata"),

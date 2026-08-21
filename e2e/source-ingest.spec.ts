@@ -140,6 +140,63 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   );
   expect(Number(totals.ledger)).toBe(Number(totals.artifacts));
 
+  // Transcription is a follow-on job after ready (mock provider, set by
+  // playwright.config.ts): the card reaches "ready" via the poller…
+  await expect(page.locator("[data-transcript-status]")).toHaveAttribute(
+    "data-transcript-status",
+    "ready",
+    { timeout: 30_000 }
+  );
+
+  // …backed by a revision row whose bytes are metered, plus media minutes.
+  const [transcriptRow] = await queryRows<{
+    id: string;
+    revision: string;
+    size_bytes: string;
+    status: string;
+    storage_key: string;
+  }>(
+    `SELECT t.id, t.status, r.revision, r.size_bytes, r.storage_key
+       FROM transcript t JOIN transcript_revision r ON r.transcript_id = t.id
+      WHERE t.source_id = $1`,
+    [sourceId]
+  );
+  expect(transcriptRow.status).toBe("ready");
+  expect(Number(transcriptRow.revision)).toBe(1);
+  expect(Number(transcriptRow.size_bytes)).toBeGreaterThan(0);
+
+  const [transcriptLedger] = await queryRows<{
+    minutes: string;
+    storage: string;
+  }>(
+    `SELECT
+       (SELECT COALESCE(SUM(quantity), 0) FROM usage_ledger
+          WHERE source_id = $1 AND entry_type = 'transcription_minutes')
+         AS minutes,
+       (SELECT COALESCE(SUM(quantity), 0) FROM usage_ledger
+          WHERE source_id = $1
+            AND entry_type = 'storage_bytes'
+            AND metadata->>'category' = 'transcript') AS storage`,
+    [sourceId]
+  );
+  expect(Number(transcriptLedger.minutes)).toBeCloseTo(FIXTURE_SECONDS / 60, 3);
+  expect(Number(transcriptLedger.storage)).toBe(
+    Number(transcriptRow.size_bytes)
+  );
+
+  // The canonical JSON is served through the authenticated media proxy —
+  // the same org-prefix boundary as every other media object.
+  const transcriptResponse = await page.request.get(
+    `/api/media/${transcriptRow.storage_key}`
+  );
+  expect(transcriptResponse.status()).toBe(200);
+  const transcriptJson = (await transcriptResponse.json()) as {
+    version: number;
+    words: { endMs: number; speaker: string | null }[];
+  };
+  expect(transcriptJson.version).toBe(1);
+  expect(transcriptJson.words.length).toBeGreaterThan(10);
+
   // hls.js must load the master playlist and segments through /api/media —
   // a real duration on the video element proves the whole delivery path.
   await page
