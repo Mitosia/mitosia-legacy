@@ -1,10 +1,10 @@
-import { eq, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
 import { RefreshPoller } from "@/components/sources/refresh-poller";
 import { RetryIngestButton } from "@/components/sources/retry-ingest-button";
-import { SourcePlayer } from "@/components/sources/source-player";
+import { SourceWorkspace } from "@/components/sources/source-workspace";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -13,7 +13,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { project, source, sourceArtifact, transcript } from "@/lib/db/schema";
+import {
+  project,
+  source,
+  sourceArtifact,
+  transcript,
+  transcriptRevision,
+} from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { formatBytes, formatDuration } from "@/lib/format";
 import { ingestStepLabel, SOURCE_STATUS_LABELS } from "@/lib/ingest-labels";
@@ -146,6 +152,20 @@ function TranscriptStatusCard({
   );
 }
 
+function workspaceTranscript(data: {
+  transcript: { speakerLabels: unknown } | null;
+  transcriptKey: string | null;
+}): { speakerLabels: Record<string, string> | null; url: string } | null {
+  if (!data.transcriptKey) {
+    return null;
+  }
+  return {
+    speakerLabels:
+      (data.transcript?.speakerLabels as Record<string, string> | null) ?? null,
+    url: `/api/media/${data.transcriptKey}`,
+  };
+}
+
 export default async function SourceDetailPage(
   props: PageProps<"/sources/[sourceId]">
 ) {
@@ -193,7 +213,9 @@ export default async function SourceDetailPage(
     const [transcriptRow] = await tx
       .select({
         error: transcript.error,
+        id: transcript.id,
         language: transcript.language,
+        speakerLabels: transcript.speakerLabels,
         // Staleness evaluated in the database, same as the ingest reaper
         stalled: sql<boolean>`(${isStalledTranscription})`,
         status: transcript.status,
@@ -202,7 +224,24 @@ export default async function SourceDetailPage(
       .where(eq(transcript.sourceId, sourceRow.id))
       .limit(1);
 
-    return { ...sourceRow, artifacts, transcript: transcriptRow ?? null };
+    // Current revision = highest revision number (no pointer column).
+    let transcriptKey: string | null = null;
+    if (transcriptRow?.status === "ready") {
+      const [revisionRow] = await tx
+        .select({ storageKey: transcriptRevision.storageKey })
+        .from(transcriptRevision)
+        .where(eq(transcriptRevision.transcriptId, transcriptRow.id))
+        .orderBy(desc(transcriptRevision.revision))
+        .limit(1);
+      transcriptKey = revisionRow?.storageKey ?? null;
+    }
+
+    return {
+      ...sourceRow,
+      artifacts,
+      transcript: transcriptRow ?? null,
+      transcriptKey,
+    };
   });
 
   if (!data) {
@@ -261,10 +300,11 @@ export default async function SourceDetailPage(
       </div>
 
       {data.status === "ready" && hlsKey ? (
-        <SourcePlayer
+        <SourceWorkspace
           hlsUrl={`/api/media/${hlsKey}`}
           peaksUrl={waveformKey ? `/api/media/${waveformKey}` : null}
           posterUrl={posterKey ? `/api/media/${posterKey}` : null}
+          transcript={workspaceTranscript(data)}
         />
       ) : (
         <PipelineStateCard
@@ -274,7 +314,7 @@ export default async function SourceDetailPage(
         />
       )}
 
-      {data.transcript ? (
+      {data.transcript && data.transcript.status !== "ready" ? (
         <TranscriptStatusCard transcript={data.transcript} />
       ) : null}
 
