@@ -23,6 +23,9 @@ import { sourcePrefixFromOriginalKey } from "@/lib/storage/keys";
 import { inputArgs, parseProgressSeconds, runMediaCommand } from "./ffmpeg";
 import {
   buildHlsArgs,
+  buildIframePlaylistArgs,
+  HLS_IFRAME_DIR,
+  HLS_KEYFRAME_SECONDS,
   type MasterPlaylistEntry,
   planHlsLadder,
   renderMasterPlaylist,
@@ -303,8 +306,12 @@ async function runHlsStep(
 
   // Master playlist bandwidths come from measured variant sizes.
   const entries: MasterPlaylistEntry[] = [];
+  const iframeEntries: MasterPlaylistEntry[] = [];
   for (const variant of plan) {
     const variantDir = join(hlsDir, variant.dirName);
+    // Rung bytes are measured BEFORE the iframe rendition lands in the
+    // same tree, so its bandwidth stays the bandwidth of what a player
+    // streaming this rung actually fetches.
     // biome-ignore lint/performance/noAwaitInLoops: few variants, trivial cost
     const files = await walkFiles(variantDir);
     let variantBytes = 0;
@@ -327,8 +334,54 @@ async function runHlsStep(
       path: `${variant.dirName}/index.m3u8`,
       width: variant.width,
     });
+
+    if (variant.kind !== "video") {
+      continue;
+    }
+
+    // I-frame-only rendition, derived from the just-verified local rung
+    // (cheap: only keyframes are decoded, ~1 frame per 2s re-encoded).
+    const iframeDir = join(variantDir, HLS_IFRAME_DIR);
+    await mkdir(iframeDir, { recursive: true });
+    await runMediaCommand(
+      "ffmpeg",
+      buildIframePlaylistArgs(
+        join(variantDir, "index.m3u8"),
+        variant,
+        iframeDir
+      )
+    );
+
+    // ffmpeg gives the last I-frame its frame duration rather than the
+    // distance to end-of-stream, so full coverage sums to the media
+    // duration minus at most one keyframe interval — that is the floor.
+    const iframePlaylist = await readFile(
+      join(iframeDir, "index.m3u8"),
+      "utf8"
+    );
+    assertCoversDuration(
+      `HLS I-frame playlist ${variant.dirName}`,
+      sumPlaylistSeconds(iframePlaylist),
+      Math.max(0, probe.durationSeconds - HLS_KEYFRAME_SECONDS)
+    );
+
+    const iframeFiles = await walkFiles(iframeDir);
+    let iframeBytes = 0;
+    for (const file of iframeFiles) {
+      // biome-ignore lint/performance/noAwaitInLoops: few files, trivial cost
+      iframeBytes += (await stat(join(iframeDir, file))).size;
+    }
+    iframeEntries.push({
+      bandwidth: (iframeBytes * 8) / probe.durationSeconds,
+      height: variant.height,
+      path: `${variant.dirName}/${HLS_IFRAME_DIR}/index.m3u8`,
+      width: variant.width,
+    });
   }
-  await writeFile(join(hlsDir, "master.m3u8"), renderMasterPlaylist(entries));
+  await writeFile(
+    join(hlsDir, "master.m3u8"),
+    renderMasterPlaylist(entries, iframeEntries)
+  );
 
   // The ladder is built; pushing it to storage is the other half of this
   // stage and takes minutes at feature length. Reported as its own step so
@@ -635,6 +688,25 @@ export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
       artifacts,
       (Date.now() - startedAt) / 1000
     );
+
+    // Transcription is a follow-on job, not an eighth step: "ready" keeps
+    // meaning playable, and a provider outage cannot fail an ingest that
+    // already succeeded. Enqueued after finalize so the audio artifact row
+    // it reads is committed. Errors are the job's own to record — a failed
+    // enqueue must not mark a finished ingest failed — hence the catch.
+    if (probe.audio) {
+      try {
+        const { enqueueTranscription } = await import(
+          "@/lib/transcription/enqueue"
+        );
+        await enqueueTranscription(payload);
+      } catch (error) {
+        console.error(
+          `[ingest] transcription enqueue failed for ${payload.sourceId}:`,
+          error
+        );
+      }
+    }
   } catch (error) {
     await recordFailure(payload, error);
     throw error;

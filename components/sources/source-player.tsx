@@ -79,6 +79,11 @@ const Player = createPlayer({ features: videoFeatures });
 
 interface SourcePlayerProps {
   hlsUrl: string;
+  // Hands the mounted media element to a sibling consumer (the transcript
+  // panel) and null on unmount. Consumers follow the same passive contract
+  // as the peaks adapter: read state, add/remove their own listeners, set
+  // currentTime — never load() and never inspect source/error state.
+  onVideoElement?: (video: HTMLVideoElement | null) => void;
   peaksUrl: string | null;
   posterUrl: string | null;
 }
@@ -220,6 +225,7 @@ async function initWaveform(setup: WaveformSetup): Promise<void> {
 
 export function SourcePlayer({
   hlsUrl,
+  onVideoElement,
   peaksUrl,
   posterUrl,
 }: SourcePlayerProps) {
@@ -242,6 +248,8 @@ export function SourcePlayer({
     let cancelled = false;
     let peaksInstance: PeaksInstance | undefined;
     let removePlayedColorListener: (() => void) | undefined;
+
+    onVideoElement?.(video);
 
     const logMediaError = () => {
       // Playback failures must be diagnosable from logs alone (the e2e
@@ -285,10 +293,14 @@ export function SourcePlayer({
 
     return () => {
       cancelled = true;
+      onVideoElement?.(null);
       video.removeEventListener("error", logMediaError);
       removePlayedColorListener?.();
       peaksInstance?.destroy();
     };
+    // onVideoElement deliberately not a dependency: parents pass state
+    // setters, and re-running this effect (peaks teardown + reinit) on a
+    // parent render would be the churn rule 2 exists to avoid.
   }, [hlsUrl, peaksUrl, mounted]);
 
   if (!mounted) {

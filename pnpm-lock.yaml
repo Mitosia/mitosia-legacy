@@ -23,12 +23,18 @@ importers:
       '@base-ui/react':
         specifier: ^1.7.0
         version: 1.7.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      '@deepgram/sdk':
+        specifier: ^5.8.0
+        version: 5.8.0
       '@hugeicons/core-free-icons':
         specifier: ^4.2.3
         version: 4.2.3
       '@hugeicons/react':
         specifier: ^1.1.9
         version: 1.1.9(react@19.2.8)
+      '@tanstack/react-virtual':
+        specifier: ^3.14.10
+        version: 3.14.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@trigger.dev/sdk':
         specifier: ^4.5.10
         version: 4.5.10(react@19.2.8)(zod@4.4.3)
@@ -530,6 +536,10 @@ packages:
   '@clack/prompts@1.7.0':
     resolution: {integrity: sha512-y7/yvZ2TPAnR9+jnc00klvNNLkJiXFFrQA/hlLCcxA9a2A4zQIOimyFQ9XfwYKiGD1fb5GY8vbKIIgO8d5Tb2A==}
     engines: {node: '>= 20.12.0'}
+
+  '@deepgram/sdk@5.8.0':
+    resolution: {integrity: sha512-AqsdchmyrTOZdvmv1Y5VQ8BF+xH2O8ZvYE7Ts0u12jhAR99Z0EBKrLV82xBHKRGcVsoK5dUGfsE4H0blSzD9gg==}
+    engines: {node: '>=18.0.0'}
 
   '@dotenvx/dotenvx@1.75.1':
     resolution: {integrity: sha512-/BITOC9dmS/edY2zQwZNicQ059O6RKabtQfyEafV0nGtfYRNHYy1DIPiYVcov40+tob9hfmBnbR963dS+EQ1DQ==}
@@ -1577,6 +1587,15 @@ packages:
 
   '@tailwindcss/postcss@4.3.3':
     resolution: {integrity: sha512-JTSZZGQi1AyKirbLN3azmjVzef92tcX7h+iSqPdaeStyFpGpDlKvvpxeOE8njhbUanbRwr3z8DyzhICWnMtQeg==}
+
+  '@tanstack/react-virtual@3.14.10':
+    resolution: {integrity: sha512-SRyoUbdFMRHuYXMijV5H4ZarQWpXkj3iANq8OFre+pybeVap8ZJjZ3Nz9bVjx4d8PfobVUQUdKyyyHYk3E+djw==}
+    peerDependencies:
+      react: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+      react-dom: ^16.8.0 || ^17.0.0 || ^18.0.0 || ^19.0.0
+
+  '@tanstack/virtual-core@3.17.8':
+    resolution: {integrity: sha512-BfEvehNpOT75r5Ksc5xW6NZuXujTfb7nlSEyVu4XHG3gdxNg1KqXruWbDewXOUaUYIo4oRbSfkjIajz4MAT8tA==}
 
   '@transloadit/prettier-bytes@0.3.5':
     resolution: {integrity: sha512-xF4A3d/ZyX2LJWeQZREZQw+qFX4TGQ8bGVP97OLRt6sPO6T0TNHBFTuRHOJh7RNmYOBmQ9MHxpolD9bXihpuVA==}
@@ -4554,6 +4573,13 @@ snapshots:
       fast-wrap-ansi: 0.2.2
       sisteransi: 1.0.5
 
+  '@deepgram/sdk@5.8.0':
+    dependencies:
+      ws: 8.21.3
+    transitivePeerDependencies:
+      - bufferutil
+      - utf-8-validate
+
   '@dotenvx/dotenvx@1.75.1':
     dependencies:
       '@dotenvx/primitives': 0.8.0
@@ -5313,6 +5339,14 @@ snapshots:
       '@tailwindcss/oxide': 4.3.3
       postcss: 8.5.26
       tailwindcss: 4.3.3
+
+  '@tanstack/react-virtual@3.14.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)':
+    dependencies:
+      '@tanstack/virtual-core': 3.17.8
+      react: 19.2.8
+      react-dom: 19.2.8(react@19.2.8)
+
+  '@tanstack/virtual-core@3.17.8': {}
 
   '@transloadit/prettier-bytes@0.3.5': {}
 

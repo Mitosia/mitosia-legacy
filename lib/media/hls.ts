@@ -179,6 +179,73 @@ export function buildHlsArgs(
   return args;
 }
 
+// Directory under each video rung holding its I-frame-only rendition.
+export const HLS_IFRAME_DIR = "iframe";
+
+// I-frame-only playlist for a finished video rung (editor-study §5:
+// keyframe-only filmstrip/scrub decode; MediaBunny models these as
+// hasOnlyKeyPackets). Reads the LOCAL rung output — never the remote
+// source — decoding only its keyframes (`-skip_frame nokey`, so ~1 frame
+// per HLS_KEYFRAME_SECONDS reaches the decoder) and re-encoding them
+// intra-only at the rung's own quality.
+//
+// Shape verified against the pinned ffmpeg 8.1.x in the Alpine container,
+// because the obvious cheaper recipes are traps there:
+// - `-c copy` with `-hls_flags iframes_only` does NOT filter: it only adds
+//   the #EXT-X-I-FRAMES-ONLY tag while every B/P packet still lands in the
+//   segments — a playlist that lies about its contents.
+// - `iframes_only+single_file` (Apple-style EXT-X-BYTERANGE into one file)
+//   writes every byterange offset as `@0` in 8.1.2, producing undecodable
+//   ranges.
+// So each I-frame becomes its own tiny .ts (`-hls_time 0` cuts at every
+// keyframe, and `-g 1` makes every output frame one). `-fps_mode
+// passthrough` keeps the source timestamps so each EXTINF is the real gap
+// to the next I-frame — ffmpeg's one deviation from RFC 8216 is the LAST
+// entry, which gets the frame's own duration instead of the distance to
+// end-of-stream, so a playlist's EXTINF sum covers the media duration
+// minus at most one keyframe interval.
+export function buildIframePlaylistArgs(
+  rungPlaylistPath: string,
+  variant: HlsVariantPlan,
+  outDir: string
+): string[] {
+  return [
+    "-v",
+    "error",
+    "-y",
+    "-skip_frame",
+    "nokey",
+    "-i",
+    rungPlaylistPath,
+    "-map",
+    "0:v:0",
+    "-an",
+    "-c:v",
+    "libx264",
+    "-profile:v",
+    "high",
+    "-preset",
+    "veryfast",
+    "-crf",
+    String(variant.crf ?? 23),
+    "-g",
+    "1",
+    "-fps_mode",
+    "passthrough",
+    "-f",
+    "hls",
+    "-hls_time",
+    "0",
+    "-hls_playlist_type",
+    "vod",
+    "-hls_flags",
+    "iframes_only",
+    "-hls_segment_filename",
+    `${outDir}/seg%05d.ts`,
+    `${outDir}/index.m3u8`,
+  ];
+}
+
 export interface MasterPlaylistEntry {
   // Measured bits/second of the finished variant
   bandwidth: number;
@@ -191,8 +258,15 @@ export interface MasterPlaylistEntry {
 // Variants are written top-quality-first: native HLS players (Safari)
 // default to the FIRST variant in the master playlist, so ordering is the
 // Safari-side half of "start at review quality" (hls.js gets startLevel).
-export function renderMasterPlaylist(entries: MasterPlaylistEntry[]): string {
-  const lines = ["#EXTM3U", "#EXT-X-VERSION:3"];
+// I-frame entries (URI is an attribute, no line of its own) follow the
+// variants; their presence bumps the playlist to version 4, matching the
+// #EXT-X-I-FRAMES-ONLY media playlists they point at.
+export function renderMasterPlaylist(
+  entries: MasterPlaylistEntry[],
+  iframeEntries: MasterPlaylistEntry[] = []
+): string {
+  const version = iframeEntries.length > 0 ? 4 : 3;
+  const lines = ["#EXTM3U", `#EXT-X-VERSION:${version}`];
   for (const entry of entries) {
     const attributes = [
       `BANDWIDTH=${Math.max(1, Math.round(entry.bandwidth))}`,
@@ -201,6 +275,16 @@ export function renderMasterPlaylist(entries: MasterPlaylistEntry[]): string {
       attributes.push(`RESOLUTION=${entry.width}x${entry.height}`);
     }
     lines.push(`#EXT-X-STREAM-INF:${attributes.join(",")}`, entry.path);
+  }
+  for (const entry of iframeEntries) {
+    const attributes = [
+      `BANDWIDTH=${Math.max(1, Math.round(entry.bandwidth))}`,
+    ];
+    if (entry.width && entry.height) {
+      attributes.push(`RESOLUTION=${entry.width}x${entry.height}`);
+    }
+    attributes.push(`URI="${entry.path}"`);
+    lines.push(`#EXT-X-I-FRAME-STREAM-INF:${attributes.join(",")}`);
   }
   return `${lines.join("\n")}\n`;
 }

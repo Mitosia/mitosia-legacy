@@ -24,6 +24,10 @@ const UPLOAD_BUTTON = /Upload 1 file/;
 const SETTINGS_BUTTON = /settings/i;
 const UPLOAD_COMPLETE = /Complete/;
 const SOURCE_PAGE_URL = /\/sources\//;
+const MASTER_PLAYLIST_FILE = /master\.m3u8$/;
+const IFRAME_STREAM_INF = /^#EXT-X-I-FRAME-STREAM-INF:.*URI="([^"]+)"/gm;
+const STREAM_INF = /^#EXT-X-STREAM-INF:/gm;
+const EXTINF = /^#EXTINF:\s*([0-9.]+)/gm;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -141,6 +145,104 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
     [sourceId]
   );
   expect(Number(totals.ledger)).toBe(Number(totals.artifacts));
+
+  // Transcription is a follow-on job after ready (mock provider, set by
+  // playwright.config.ts): the card reaches "ready" via the poller…
+  await expect(page.locator("[data-transcript-status]")).toHaveAttribute(
+    "data-transcript-status",
+    "ready",
+    { timeout: 30_000 }
+  );
+
+  // …backed by a revision row whose bytes are metered, plus media minutes.
+  const [transcriptRow] = await queryRows<{
+    id: string;
+    revision: string;
+    size_bytes: string;
+    status: string;
+    storage_key: string;
+  }>(
+    `SELECT t.id, t.status, r.revision, r.size_bytes, r.storage_key
+       FROM transcript t JOIN transcript_revision r ON r.transcript_id = t.id
+      WHERE t.source_id = $1`,
+    [sourceId]
+  );
+  expect(transcriptRow.status).toBe("ready");
+  expect(Number(transcriptRow.revision)).toBe(1);
+  expect(Number(transcriptRow.size_bytes)).toBeGreaterThan(0);
+
+  const [transcriptLedger] = await queryRows<{
+    minutes: string;
+    storage: string;
+  }>(
+    `SELECT
+       (SELECT COALESCE(SUM(quantity), 0) FROM usage_ledger
+          WHERE source_id = $1 AND entry_type = 'transcription_minutes')
+         AS minutes,
+       (SELECT COALESCE(SUM(quantity), 0) FROM usage_ledger
+          WHERE source_id = $1
+            AND entry_type = 'storage_bytes'
+            AND metadata->>'category' = 'transcript') AS storage`,
+    [sourceId]
+  );
+  expect(Number(transcriptLedger.minutes)).toBeCloseTo(FIXTURE_SECONDS / 60, 3);
+  expect(Number(transcriptLedger.storage)).toBe(
+    Number(transcriptRow.size_bytes)
+  );
+
+  // The canonical JSON is served through the authenticated media proxy —
+  // the same org-prefix boundary as every other media object.
+  const transcriptResponse = await page.request.get(
+    `/api/media/${transcriptRow.storage_key}`
+  );
+  expect(transcriptResponse.status()).toBe(200);
+  const transcriptJson = (await transcriptResponse.json()) as {
+    version: number;
+    words: { endMs: number; speaker: string | null }[];
+  };
+  expect(transcriptJson.version).toBe(1);
+  expect(transcriptJson.words.length).toBeGreaterThan(10);
+
+  // Every video rung publishes an I-frame-only companion playlist (scrub/
+  // filmstrip decode, editor-study §5), referenced from the master via
+  // EXT-X-I-FRAME-STREAM-INF. Fetched through /api/media like a real
+  // client, because the playlists have no other UI surface.
+  const [hlsMaster] = await queryRows<{ storage_key: string }>(
+    "SELECT storage_key FROM source_artifact WHERE source_id = $1 AND kind = 'hls_master'",
+    [sourceId]
+  );
+  const masterResponse = await page.request.get(
+    `/api/media/${hlsMaster.storage_key}`
+  );
+  expect(masterResponse.status()).toBe(200);
+  const master = await masterResponse.text();
+  const iframeUris = [...master.matchAll(IFRAME_STREAM_INF)].map(
+    (match) => match[1] ?? ""
+  );
+  const streamInfCount = master.match(STREAM_INF)?.length ?? 0;
+  expect(iframeUris, "one I-frame playlist per video rung").toHaveLength(
+    streamInfCount
+  );
+
+  const hlsPrefix = hlsMaster.storage_key.replace(MASTER_PLAYLIST_FILE, "");
+  for (const uri of iframeUris) {
+    // biome-ignore lint/performance/noAwaitInLoops: one playlist per rung, and the fixture has one rung
+    const response = await page.request.get(`/api/media/${hlsPrefix}${uri}`);
+    expect(response.status()).toBe(200);
+    const playlist = await response.text();
+    expect(playlist).toContain("#EXT-X-I-FRAMES-ONLY");
+
+    // Each EXTINF is the gap to the next I-frame; ffmpeg gives the last
+    // one its frame duration instead of the distance to end-of-stream, so
+    // full coverage is the media duration minus at most one keyframe
+    // interval (2s). A truncated rendition falls short of that floor.
+    let extinfSeconds = 0;
+    for (const match of playlist.matchAll(EXTINF)) {
+      extinfSeconds += Number.parseFloat(match[1] ?? "0");
+    }
+    expect(extinfSeconds).toBeGreaterThan(FIXTURE_SECONDS - 2 - 0.5);
+    expect(extinfSeconds).toBeLessThanOrEqual(FIXTURE_SECONDS + 0.5);
+  }
 
   // The media proxy must honor Range requests with a real 206. Browser
   // media libraries (MediaBunny et al., docs/editor-study.md §5) probe with
