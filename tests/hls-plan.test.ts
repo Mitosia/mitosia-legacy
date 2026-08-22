@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildHlsArgs,
+  buildIframePlaylistArgs,
   planHlsLadder,
   renderMasterPlaylist,
 } from "../lib/media/hls";
@@ -162,6 +163,33 @@ describe("buildHlsArgs", () => {
   });
 });
 
+describe("buildIframePlaylistArgs", () => {
+  it("decodes only keyframes from the local rung and re-encodes intra-only", () => {
+    const plan = planHlsLadder(videoProbe(1920, 1080));
+    const args = buildIframePlaylistArgs(
+      "/tmp/out/v0/index.m3u8",
+      // biome-ignore lint/style/noNonNullAssertion: plan shape asserted above
+      plan[0]!,
+      "/tmp/out/v0/iframe"
+    );
+    const joined = args.join(" ");
+
+    // Keyframe-only decode must precede -i (it is a decoder option), and
+    // the input is the finished local rung, never the remote source.
+    expect(joined).toContain("-skip_frame nokey -i /tmp/out/v0/index.m3u8");
+    // Every output frame an I-frame, one file per frame, real timestamps.
+    expect(joined).toContain("-g 1");
+    expect(joined).toContain("-fps_mode passthrough");
+    expect(joined).toContain("-hls_time 0");
+    expect(joined).toContain("-hls_flags iframes_only");
+    // Rung quality carries over; audio never belongs in an I-frame stream.
+    expect(joined).toContain("-crf 20");
+    expect(args).toContain("-an");
+    expect(joined).toContain("/tmp/out/v0/iframe/seg%05d.ts");
+    expect(joined).toContain("/tmp/out/v0/iframe/index.m3u8");
+  });
+});
+
 describe("renderMasterPlaylist", () => {
   it("renders stream entries with bandwidth and resolution, top first", () => {
     const playlist = renderMasterPlaylist([
@@ -193,6 +221,38 @@ describe("renderMasterPlaylist", () => {
     ]);
     expect(playlist).toContain("#EXT-X-STREAM-INF:BANDWIDTH=128000\n");
     expect(playlist).not.toContain("RESOLUTION");
+  });
+
+  it("appends I-frame entries with inline URIs and bumps to version 4", () => {
+    const playlist = renderMasterPlaylist(
+      [
+        {
+          bandwidth: 5_200_000,
+          height: 1080,
+          path: "v0/index.m3u8",
+          width: 1920,
+        },
+      ],
+      [
+        {
+          bandwidth: 210_000,
+          height: 1080,
+          path: "v0/iframe/index.m3u8",
+          width: 1920,
+        },
+      ]
+    );
+
+    expect(playlist).toBe(
+      [
+        "#EXTM3U",
+        "#EXT-X-VERSION:4",
+        "#EXT-X-STREAM-INF:BANDWIDTH=5200000,RESOLUTION=1920x1080",
+        "v0/index.m3u8",
+        '#EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=210000,RESOLUTION=1920x1080,URI="v0/iframe/index.m3u8"',
+        "",
+      ].join("\n")
+    );
   });
 });
 
