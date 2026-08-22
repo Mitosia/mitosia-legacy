@@ -11,6 +11,8 @@ import {
   project,
   source,
   sourceArtifact,
+  transcript,
+  transcriptRevision,
   usageLedger,
 } from "../lib/db/schema";
 
@@ -130,6 +132,23 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
       sourceId: sourceRow!.id,
       storageKey: `org/${organizationId}/source/seed/hls/master.m3u8`,
     });
+    const [transcriptRow] = await tx
+      .insert(transcript)
+      .values({
+        organizationId,
+        // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+        sourceId: sourceRow!.id,
+        status: "ready",
+      })
+      .returning({ id: transcript.id });
+    await tx.insert(transcriptRevision).values({
+      organizationId,
+      revision: 1,
+      sizeBytes: 128,
+      storageKey: `org/${organizationId}/source/seed/transcript/rev-1.json`,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      transcriptId: transcriptRow!.id,
+    });
     const [ledgerRow] = await tx
       .insert(usageLedger)
       .values({
@@ -170,6 +189,8 @@ const TENANT_TABLES = [
   { label: "audit_log", table: auditLog },
   { label: "source", table: source },
   { label: "source_artifact", table: sourceArtifact },
+  { label: "transcript", table: transcript },
+  { label: "transcript_revision", table: transcriptRevision },
   { label: "usage_ledger", table: usageLedger },
 ] as const;
 

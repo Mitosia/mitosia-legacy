@@ -3,7 +3,7 @@ import type { OrgTransaction } from "./db/tenant";
 
 interface UsageEntry {
   correlationId: string;
-  entryType: "storage_bytes" | "processing_minutes";
+  entryType: "storage_bytes" | "processing_minutes" | "transcription_minutes";
   metadata?: Record<string, unknown>;
   organizationId: string;
   quantity: number;
