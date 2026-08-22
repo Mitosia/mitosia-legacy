@@ -24,6 +24,10 @@ const UPLOAD_BUTTON = /Upload 1 file/;
 const SETTINGS_BUTTON = /settings/i;
 const UPLOAD_COMPLETE = /Complete/;
 const SOURCE_PAGE_URL = /\/sources\//;
+const MASTER_PLAYLIST_FILE = /master\.m3u8$/;
+const IFRAME_STREAM_INF = /^#EXT-X-I-FRAME-STREAM-INF:.*URI="([^"]+)"/gm;
+const STREAM_INF = /^#EXT-X-STREAM-INF:/gm;
+const EXTINF = /^#EXTINF:\s*([0-9.]+)/gm;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -112,9 +116,11 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   const artifacts = await queryRows<{
     kind: string;
     size_bytes: string | null;
-  }>("SELECT kind, size_bytes FROM source_artifact WHERE source_id = $1", [
-    sourceId,
-  ]);
+    storage_key: string;
+  }>(
+    "SELECT kind, size_bytes, storage_key FROM source_artifact WHERE source_id = $1",
+    [sourceId]
+  );
   expect(artifacts.length).toBeGreaterThan(0);
   expect(
     artifacts.filter((artifact) => Number(artifact.size_bytes ?? 0) <= 0),
@@ -196,6 +202,74 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   };
   expect(transcriptJson.version).toBe(1);
   expect(transcriptJson.words.length).toBeGreaterThan(10);
+
+  // Every video rung publishes an I-frame-only companion playlist (scrub/
+  // filmstrip decode, editor-study §5), referenced from the master via
+  // EXT-X-I-FRAME-STREAM-INF. Fetched through /api/media like a real
+  // client, because the playlists have no other UI surface.
+  const [hlsMaster] = await queryRows<{ storage_key: string }>(
+    "SELECT storage_key FROM source_artifact WHERE source_id = $1 AND kind = 'hls_master'",
+    [sourceId]
+  );
+  const masterResponse = await page.request.get(
+    `/api/media/${hlsMaster.storage_key}`
+  );
+  expect(masterResponse.status()).toBe(200);
+  const master = await masterResponse.text();
+  const iframeUris = [...master.matchAll(IFRAME_STREAM_INF)].map(
+    (match) => match[1] ?? ""
+  );
+  const streamInfCount = master.match(STREAM_INF)?.length ?? 0;
+  expect(iframeUris, "one I-frame playlist per video rung").toHaveLength(
+    streamInfCount
+  );
+
+  const hlsPrefix = hlsMaster.storage_key.replace(MASTER_PLAYLIST_FILE, "");
+  for (const uri of iframeUris) {
+    // biome-ignore lint/performance/noAwaitInLoops: one playlist per rung, and the fixture has one rung
+    const response = await page.request.get(`/api/media/${hlsPrefix}${uri}`);
+    expect(response.status()).toBe(200);
+    const playlist = await response.text();
+    expect(playlist).toContain("#EXT-X-I-FRAMES-ONLY");
+
+    // Each EXTINF is the gap to the next I-frame; ffmpeg gives the last
+    // one its frame duration instead of the distance to end-of-stream, so
+    // full coverage is the media duration minus at most one keyframe
+    // interval (2s). A truncated rendition falls short of that floor.
+    let extinfSeconds = 0;
+    for (const match of playlist.matchAll(EXTINF)) {
+      extinfSeconds += Number.parseFloat(match[1] ?? "0");
+    }
+    expect(extinfSeconds).toBeGreaterThan(FIXTURE_SECONDS - 2 - 0.5);
+    expect(extinfSeconds).toBeLessThanOrEqual(FIXTURE_SECONDS + 0.5);
+  }
+
+  // The media proxy must honor Range requests with a real 206. Browser
+  // media libraries (MediaBunny et al., docs/editor-study.md §5) probe with
+  // Range and silently degrade to sequential-only reading when the server
+  // answers 200 — packet-accurate seeking over 2-hour proxies depends on
+  // this, and nothing in playback would look wrong if it regressed: hls.js
+  // fetches whole segments, so only editor-grade seeking would slow down.
+  const audio = artifacts.find((artifact) => artifact.kind === "audio");
+  if (!audio) {
+    throw new Error("audio artifact missing");
+  }
+  const audioBytes = Number(audio.size_bytes);
+  expect(audioBytes).toBeGreaterThan(1024);
+  const mediaUrl = `/api/media/${audio.storage_key}`;
+
+  const partial = await page.request.get(mediaUrl, {
+    headers: { range: "bytes=0-1023" },
+  });
+  expect(partial.status(), "ranged GET must answer 206, not 200").toBe(206);
+  expect(partial.headers()["content-range"]).toBe(`bytes 0-1023/${audioBytes}`);
+  expect(partial.headers()["accept-ranges"]).toBe("bytes");
+  expect((await partial.body()).byteLength).toBe(1024);
+
+  const full = await page.request.get(mediaUrl);
+  expect(full.status()).toBe(200);
+  expect(Number(full.headers()["content-length"])).toBe(audioBytes);
+  expect((await full.body()).byteLength).toBe(audioBytes);
 
   // hls.js must load the master playlist and segments through /api/media —
   // a real duration on the video element proves the whole delivery path.
