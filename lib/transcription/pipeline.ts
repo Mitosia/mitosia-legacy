@@ -10,8 +10,8 @@ import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { presignGetUrl, putJson } from "@/lib/storage";
 import { sourcePrefixFromOriginalKey } from "@/lib/storage/keys";
-import { getTranscriptionProvider } from "./provider";
-import type { TranscriptData } from "./types";
+import { getTranscriptionProviders } from "./provider";
+import type { TranscriptData, TranscriptionProvider } from "./types";
 
 // The S3 transcription workflow: claim → hand the audio artifact's presigned
 // URL to the provider → sanity-check → store canonical JSON → revision row +
@@ -125,10 +125,10 @@ export async function runTranscription(
   }
 
   try {
-    const provider = getTranscriptionProvider();
-    if (!provider) {
+    const providers = getTranscriptionProviders();
+    if (providers.length === 0) {
       throw new Error(
-        "No transcription provider configured (set DEEPGRAM_API_KEY or TRANSCRIPTION_PROVIDER)"
+        "No transcription provider configured (set DEEPGRAM_API_KEY, ASSEMBLYAI_API_KEY, or TRANSCRIPTION_PROVIDER)"
       );
     }
 
@@ -179,12 +179,39 @@ export async function runTranscription(
     }
 
     const audioUrl = await presignGetUrl(context.audioRow.storageKey);
-    const result = await provider.transcribe({
-      audioUrl,
-      durationSeconds,
-      mimeType: context.audioRow.mimeType,
-    });
-    assertWithinDuration(result.data);
+
+    // Ordered failover: a primary-provider outage degrades to the next
+    // adapter instead of a failed transcript. A result that fails the
+    // duration sanity check counts as a provider failure too — garbage
+    // output must not shadow a healthy fallback.
+    let result: Awaited<
+      ReturnType<TranscriptionProvider["transcribe"]>
+    > | null = null;
+    let lastError: unknown;
+    for (const provider of providers) {
+      try {
+        // biome-ignore lint/performance/noAwaitInLoops: providers are tried strictly in order
+        const attempt = await provider.transcribe({
+          audioUrl,
+          durationSeconds,
+          mimeType: context.audioRow.mimeType,
+        });
+        assertWithinDuration(attempt.data);
+        result = attempt;
+        break;
+      } catch (error) {
+        lastError = error;
+        console.error(
+          `[transcription] provider ${provider.name} failed for ${payload.sourceId}:`,
+          error
+        );
+      }
+    }
+    if (!result) {
+      throw lastError instanceof Error
+        ? lastError
+        : new Error("Every transcription provider failed");
+    }
 
     const revision = (context.latestRevision?.revision ?? 0) + 1;
     const keyPrefix = sourcePrefixFromOriginalKey(originalKey);
