@@ -56,3 +56,6 @@ next-env.d.ts
 
 # esbuild output for one-shot scripts (see package.json)
 /scripts/*.cjs
+
+# Real-transcript eval fixtures stay local (drop as local-*.json)
+/evals/fixtures/local-*.json
