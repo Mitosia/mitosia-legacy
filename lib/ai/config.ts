@@ -36,7 +36,9 @@ export const TASK_ROUTES = {
   // Summary, entities, and speaker intelligence: editorial quality matters,
   // and the speaker-merge suggestions carry real product risk if sloppy.
   "source-analysis.editorial": {
-    maxOutputTokens: 8000,
+    // Generous: adaptive thinking counts against the output budget, and a
+    // 2.5h interview legitimately produces a long entity/speaker inventory
+    maxOutputTokens: 16_000,
     tier: "sonnet",
   },
 } as const;
