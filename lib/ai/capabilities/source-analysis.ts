@@ -1,14 +1,8 @@
 import { z } from "zod";
 import { buildParagraphs } from "@/lib/transcription/paragraphs";
 import type { TranscriptData } from "@/lib/transcription/types";
-import {
-  type AiTask,
-  estimateCostUsd,
-  MODEL_TIERS,
-  routeForTask,
-} from "../config";
 import type { SourceContextPack } from "../context";
-import { getModelCandidates } from "../provider";
+import { generateStructured, type StructuredUsage } from "../generate";
 
 // The S4 source-analysis capability: chapters (haiku-tier broad pass) +
 // editorial (sonnet-tier summary/topics/entities/speaker intelligence),
@@ -32,42 +26,48 @@ export const chaptersOutputSchema = z.object({
   chapters: z.array(chapterSchema).min(1).max(60),
 });
 
-export const editorialOutputSchema = z.object({
-  entities: z
-    .array(
+// Property order is generation order for native structured output: the
+// high-value scalar fields come first so a budget squeeze degrades the
+// entity tail, never the summary. Entities allow 60 at the schema (models
+// enumerate enthusiastically on dense content — a 2.5h geopolitics
+// interview blew a 40 cap on staging) and are trimmed to 40 after.
+// Built with chained .extend() so the property order SURVIVES formatters —
+// each link appends one key, and single-key literals give the key-sorter
+// nothing to sort.
+export const editorialOutputSchema = z
+  .object({ summary: z.string().min(50).max(2000) })
+  .extend({ topics: z.array(z.string().min(1).max(60)).max(12) })
+  .extend({
+    speakers: z.array(
       z.object({
-        name: z.string().min(1).max(120),
-        type: z.enum(["person", "organization", "product", "place", "other"]),
+        // Confidence 0-1 in the suggestion; UI shows it, never auto-applies
+        confidence: z.number().min(0).max(1),
+        // Short quote from the transcript that justifies the suggestion
+        evidence: z.string().max(300),
+        // Another speaker id this one appears to be the same person as
+        mergeWith: z.string().nullable(),
+        speaker: z.string(),
+        suggestedName: z.string().max(80).nullable(),
       })
-    )
-    .max(40),
-  speakers: z.array(
-    z.object({
-      // Confidence 0-1 in the suggestion; UI shows it, never auto-applies
-      confidence: z.number().min(0).max(1),
-      // Short quote from the transcript that justifies the suggestion
-      evidence: z.string().max(300),
-      // Another speaker id this one appears to be the same person as
-      mergeWith: z.string().nullable(),
-      speaker: z.string(),
-      suggestedName: z.string().max(80).nullable(),
-    })
-  ),
-  summary: z.string().min(1).max(2000),
-  topics: z.array(z.string().min(1).max(60)).max(12),
-});
+    ),
+  })
+  .extend({
+    entities: z
+      .array(
+        z.object({
+          name: z.string().min(1).max(120),
+          type: z.enum(["person", "organization", "product", "place", "other"]),
+        })
+      )
+      .max(60),
+  });
+
+const MAX_ENTITIES = 40;
 
 export type ChaptersOutput = z.infer<typeof chaptersOutputSchema>;
 export type EditorialOutput = z.infer<typeof editorialOutputSchema>;
 
-export interface AnalysisUsage {
-  costUsd: number | null;
-  inputTokens: number;
-  model: string;
-  outputTokens: number;
-  provider: string;
-  task: AiTask;
-}
+export type AnalysisUsage = StructuredUsage;
 
 export interface SourceAnalysisResult {
   chapters: ChaptersOutput["chapters"];
@@ -124,7 +124,8 @@ const EDITORIAL_INSTRUCTIONS = `You are an editorial analyst for a content agenc
 Given a diarized transcript, produce:
 - summary: an executive summary (3-6 sentences) a strategist would trust.
 - topics: up to 12 short topic tags.
-- entities: people, organizations, products, and places actually discussed.
+- entities: the most significant people, organizations, products, and
+  places actually discussed — at most 25, ranked by importance.
 - speakers: for EVERY speaker id present, infer the real name when the
   transcript reveals it (introductions, addressing each other); when two
   ids clearly belong to the same person (one voice over-segmented by
@@ -133,69 +134,6 @@ Given a diarized transcript, produce:
   reflects the evidence; quote the evidence briefly.
 Never invent names that are not supported by the transcript.`;
 
-interface TaskRunResult<T> {
-  output: T;
-  usage: AnalysisUsage;
-}
-
-async function runStructuredTask<T extends Record<string, unknown>>(
-  task: AiTask,
-  instructions: string,
-  userMessage: string,
-  schema: z.ZodType<T>
-): Promise<TaskRunResult<T>> {
-  const route = routeForTask(task);
-  const candidates = await getModelCandidates(task);
-  if (candidates.length === 0) {
-    throw new Error("No AI provider configured");
-  }
-
-  const { Agent } = await import("@mastra/core/agent");
-  let lastError: unknown;
-  for (const candidate of candidates) {
-    try {
-      const agent = new Agent({
-        id: task,
-        instructions,
-        model: candidate.model,
-        name: task,
-      });
-      // biome-ignore lint/performance/noAwaitInLoops: candidates are tried strictly in order
-      const result = await agent.generate(userMessage, {
-        modelSettings: { maxOutputTokens: route.maxOutputTokens },
-        structuredOutput: { schema },
-      });
-      const output = schema.parse(result.object);
-      const inputTokens = result.usage?.inputTokens ?? 0;
-      const outputTokens = result.usage?.outputTokens ?? 0;
-      return {
-        output,
-        usage: {
-          costUsd: estimateCostUsd(
-            MODEL_TIERS[route.tier],
-            inputTokens,
-            outputTokens
-          ),
-          inputTokens,
-          model: MODEL_TIERS[route.tier],
-          outputTokens,
-          provider: candidate.provider,
-          task,
-        },
-      };
-    } catch (error) {
-      lastError = error;
-      console.error(
-        `[analysis] ${task} failed on ${candidate.provider}:`,
-        error
-      );
-    }
-  }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error(`Every provider failed for ${task}`);
-}
-
 // Chapters the model got slightly wrong (overlaps, out of range) are
 // repaired, not failed: clamp to the media duration, sort, and drop
 // zero-length results. Deterministic post-processing beats re-prompting.
@@ -203,7 +141,21 @@ export function normalizeChapters(
   chapters: ChaptersOutput["chapters"],
   durationMs: number
 ): ChaptersOutput["chapters"] {
-  const sorted = [...chapters].sort((a, b) => a.startMs - b.startMs);
+  // Unit repair first: models sometimes emit SECONDS despite instructions
+  // (observed on staging — every chapter of a 44-minute source "started"
+  // in the first 3 seconds). If the whole set fits inside 1% of the
+  // duration, treat the values as seconds.
+  const maxEndMs = Math.max(0, ...chapters.map((chapter) => chapter.endMs));
+  const scale =
+    durationMs > 60_000 && maxEndMs > 0 && maxEndMs <= durationMs / 100
+      ? 1000
+      : 1;
+  const scaled = chapters.map((chapter) => ({
+    ...chapter,
+    endMs: chapter.endMs * scale,
+    startMs: chapter.startMs * scale,
+  }));
+  const sorted = scaled.sort((a, b) => a.startMs - b.startMs);
   const repaired: ChaptersOutput["chapters"] = [];
   for (const chapter of sorted) {
     const startMs = Math.max(
@@ -277,13 +229,13 @@ export async function runSourceAnalysis(
   const userMessage = `${preamble}\n\nTRANSCRIPT:\n${transcriptText}`;
 
   const [chaptersRun, editorialRun] = await Promise.all([
-    runStructuredTask(
+    generateStructured(
       "source-analysis.chapters",
       CHAPTERS_INSTRUCTIONS,
       userMessage,
       chaptersOutputSchema
     ),
-    runStructuredTask(
+    generateStructured(
       "source-analysis.editorial",
       EDITORIAL_INSTRUCTIONS,
       userMessage,
@@ -293,7 +245,10 @@ export async function runSourceAnalysis(
 
   return {
     chapters: normalizeChapters(chaptersRun.output.chapters, input.durationMs),
-    editorial: editorialRun.output,
+    editorial: {
+      ...editorialRun.output,
+      entities: editorialRun.output.entities.slice(0, MAX_ENTITIES),
+    },
     usage: [chaptersRun.usage, editorialRun.usage],
   };
 }

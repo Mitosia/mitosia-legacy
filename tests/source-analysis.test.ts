@@ -85,6 +85,30 @@ describe("normalizeChapters", () => {
     ]);
   });
 
+  it("repairs seconds-as-milliseconds output", () => {
+    // Observed on staging: a 44-minute source whose chapters all "started"
+    // within the first 3 seconds — the model emitted seconds.
+    const repaired = normalizeChapters(
+      [
+        { endMs: 1200, startMs: 0, summary: "a", title: "A" },
+        { endMs: 2640, startMs: 1200, summary: "b", title: "B" },
+      ],
+      2_640_000
+    );
+    expect(repaired).toEqual([
+      { endMs: 1_200_000, startMs: 0, summary: "a", title: "A" },
+      { endMs: 2_640_000, startMs: 1_200_000, summary: "b", title: "B" },
+    ]);
+  });
+
+  it("leaves genuine millisecond output unscaled", () => {
+    const repaired = normalizeChapters(
+      [{ endMs: 2_640_000, startMs: 0, summary: "a", title: "A" }],
+      2_640_000
+    );
+    expect(repaired[0]?.endMs).toBe(2_640_000);
+  });
+
   it("drops subsumed and out-of-range chapters", () => {
     const repaired = normalizeChapters(
       [
