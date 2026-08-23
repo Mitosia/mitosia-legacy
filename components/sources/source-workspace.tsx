@@ -2,6 +2,11 @@
 
 import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  SourceMap,
+  type SourceMapAnalysis,
+  SpeakerSuggestionBanner,
+} from "./source-map";
 import { SourcePlayer } from "./source-player";
 import { TranscriptPanel } from "./transcript-panel";
 
@@ -11,6 +16,7 @@ import { TranscriptPanel } from "./transcript-panel";
 // source of truth, per the player's passive-consumer contract.
 
 interface SourceWorkspaceProps {
+  analysis: SourceMapAnalysis | null;
   hlsUrl: string;
   peaksUrl: string | null;
   posterUrl: string | null;
@@ -23,6 +29,7 @@ interface SourceWorkspaceProps {
 }
 
 export function SourceWorkspace({
+  analysis,
   hlsUrl,
   peaksUrl,
   posterUrl,
@@ -39,6 +46,14 @@ export function SourceWorkspace({
         peaksUrl={peaksUrl}
         posterUrl={posterUrl}
       />
+      {analysis ? <SourceMap analysis={analysis} video={video} /> : null}
+      {analysis && transcript ? (
+        <SpeakerSuggestionBanner
+          sourceId={sourceId}
+          speakerLabels={transcript.speakerLabels}
+          suggestions={analysis.speakerSuggestions}
+        />
+      ) : null}
       {transcript ? (
         <Card data-testid="transcript-card" data-transcript-status="ready">
           <CardHeader>

@@ -72,6 +72,7 @@ test("the transcript panel seeks, searches, and highlights", async ({
 
   await page.getByRole("link", { name: "viewer-source" }).click();
   await page.waitForURL(SOURCE_PAGE_URL, { timeout: 30_000 });
+  const sourceId = new URL(page.url()).pathname.split("/").pop() ?? "";
 
   // The mock transcription settles moments after ready; the poller swaps
   // the status card for the panel.
@@ -128,6 +129,73 @@ test("the transcript panel seeks, searches, and highlights", async ({
   await expect(page.getByTestId("transcript-follow")).toBeHidden();
   await page.getByTestId("transcript-search").fill("");
 
+  // Analysis chains after transcription (mock analyzer): the lifecycle
+  // lands ready with chapters, a summary, speaker suggestions, and the
+  // context snapshot recorded for provenance.
+  await expect
+    .poll(
+      async () => {
+        const rows = await queryRows<{ status: string }>(
+          "SELECT status FROM source_analysis WHERE source_id = $1",
+          [sourceId]
+        );
+        return rows[0]?.status ?? "missing";
+      },
+      { timeout: 30_000 }
+    )
+    .toBe("ready");
+  const [analysis] = await queryRows<{
+    chapter_count: string;
+    context_snapshot_id: string | null;
+    speaker_suggestions: unknown;
+    summary: string | null;
+  }>(
+    `SELECT a.summary, a.context_snapshot_id, a.speaker_suggestions,
+            (SELECT count(*) FROM source_chapter c WHERE c.analysis_id = a.id)
+              AS chapter_count
+       FROM source_analysis a WHERE a.source_id = $1`,
+    [sourceId]
+  );
+  expect(Number(analysis.chapter_count)).toBe(3);
+  expect(analysis.summary).toBeTruthy();
+  expect(analysis.context_snapshot_id).not.toBeNull();
+  expect(Array.isArray(analysis.speaker_suggestions)).toBe(true);
+
+  // Source map UI: the poller swaps the page once analysis lands — chapters
+  // render and clicking one seeks the media element.
+  const sourceMap = page.getByTestId("source-map");
+  await expect(sourceMap).toBeVisible({ timeout: 15_000 });
+  const chapterItems = sourceMap.getByTestId("chapter-item");
+  await expect(chapterItems).toHaveCount(3);
+  const secondChapterMs = Number(
+    await chapterItems.nth(1).getAttribute("data-start-ms")
+  );
+  expect(secondChapterMs).toBeGreaterThan(0);
+  await chapterItems.nth(1).click();
+  await page.waitForFunction(
+    (expectedSeconds) => {
+      const video = document.querySelector("video");
+      return Boolean(
+        video && Math.abs(video.currentTime - expectedSeconds) < 0.75
+      );
+    },
+    secondChapterMs / 1000,
+    { timeout: 10_000 }
+  );
+
+  // Speaker intelligence: the mock suggests names; Apply is the confirmed-
+  // suggestion path driving the same speaker_labels action as the dialog.
+  // (The manual rename earlier set both to "Host", so suggestions with
+  // different names still show as changes.)
+  const banner = page.getByTestId("speaker-suggestions");
+  await expect(banner).toBeVisible();
+  await page.getByTestId("apply-speaker-suggestions").click();
+  await expect(banner).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("transcript-speaker").first()).toHaveText(
+    "Mock Host",
+    { timeout: 15_000 }
+  );
+
   // Speaker naming — and the diarization-repair path: giving two ids the
   // SAME name is how an over-segmented voice gets merged, so that exact
   // flow is what gets exercised.
@@ -163,7 +231,6 @@ test("the transcript panel seeks, searches, and highlights", async ({
     { timeout: 15_000 }
   );
 
-  const sourceId = new URL(page.url()).pathname.split("/").pop() ?? "";
   const revisions = await queryRows<{
     created_by: string | null;
     revision: string;
@@ -196,38 +263,6 @@ test("the transcript panel seeks, searches, and highlights", async ({
   const vttBody = await vtt.text();
   expect(vttBody.startsWith("WEBVTT")).toBe(true);
   expect(vttBody).toContain("<v Host>");
-
-  // Analysis chains after transcription (mock analyzer): the lifecycle
-  // lands ready with chapters, a summary, speaker suggestions, and the
-  // context snapshot recorded for provenance.
-  await expect
-    .poll(
-      async () => {
-        const rows = await queryRows<{ status: string }>(
-          "SELECT status FROM source_analysis WHERE source_id = $1",
-          [sourceId]
-        );
-        return rows[0]?.status ?? "missing";
-      },
-      { timeout: 30_000 }
-    )
-    .toBe("ready");
-  const [analysis] = await queryRows<{
-    chapter_count: string;
-    context_snapshot_id: string | null;
-    speaker_suggestions: unknown;
-    summary: string | null;
-  }>(
-    `SELECT a.summary, a.context_snapshot_id, a.speaker_suggestions,
-            (SELECT count(*) FROM source_chapter c WHERE c.analysis_id = a.id)
-              AS chapter_count
-       FROM source_analysis a WHERE a.source_id = $1`,
-    [sourceId]
-  );
-  expect(Number(analysis.chapter_count)).toBe(3);
-  expect(analysis.summary).toBeTruthy();
-  expect(analysis.context_snapshot_id).not.toBeNull();
-  expect(Array.isArray(analysis.speaker_suggestions)).toBe(true);
 
   expect(errors, errors.join("\n")).toEqual([]);
 });

@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { z } from "zod";
 import { RefreshPoller } from "@/components/sources/refresh-poller";
 import { RetryIngestButton } from "@/components/sources/retry-ingest-button";
+import type { SourceMapAnalysis } from "@/components/sources/source-map";
 import { SourceWorkspace } from "@/components/sources/source-workspace";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -19,6 +20,7 @@ import {
   source,
   sourceAnalysis,
   sourceArtifact,
+  sourceChapter,
   transcript,
   transcriptRevision,
 } from "@/lib/db/schema";
@@ -192,6 +194,32 @@ function pageIsSettled(data: {
   );
 }
 
+function workspaceAnalysis(data: {
+  analysis: {
+    entities: unknown;
+    speakerSuggestions: unknown;
+    status: string;
+    summary: string | null;
+    topics: unknown;
+  } | null;
+  chapters: SourceMapAnalysis["chapters"];
+}): SourceMapAnalysis | null {
+  if (data.analysis?.status !== "ready") {
+    return null;
+  }
+  return {
+    chapters: data.chapters,
+    entities:
+      (data.analysis.entities as SourceMapAnalysis["entities"] | null) ?? [],
+    speakerSuggestions:
+      (data.analysis.speakerSuggestions as
+        | SourceMapAnalysis["speakerSuggestions"]
+        | null) ?? [],
+    summary: data.analysis.summary,
+    topics: (data.analysis.topics as string[] | null) ?? [],
+  };
+}
+
 export default async function SourceDetailPage(
   props: PageProps<"/sources/[sourceId]">
 ) {
@@ -252,12 +280,31 @@ export default async function SourceDetailPage(
 
     const [analysisRow] = await tx
       .select({
+        entities: sourceAnalysis.entities,
+        id: sourceAnalysis.id,
+        speakerSuggestions: sourceAnalysis.speakerSuggestions,
         stalled: sql<boolean>`(${isStalledAnalysis})`,
         status: sourceAnalysis.status,
+        summary: sourceAnalysis.summary,
+        topics: sourceAnalysis.topics,
       })
       .from(sourceAnalysis)
       .where(eq(sourceAnalysis.sourceId, sourceRow.id))
       .limit(1);
+
+    const chapters =
+      analysisRow?.status === "ready"
+        ? await tx
+            .select({
+              endMs: sourceChapter.endMs,
+              startMs: sourceChapter.startMs,
+              summary: sourceChapter.summary,
+              title: sourceChapter.title,
+            })
+            .from(sourceChapter)
+            .where(eq(sourceChapter.analysisId, analysisRow.id))
+            .orderBy(sourceChapter.idx)
+        : [];
 
     // Current revision = highest revision number (no pointer column).
     let currentRevision: { revision: number; storageKey: string } | null = null;
@@ -278,6 +325,7 @@ export default async function SourceDetailPage(
       ...sourceRow,
       analysis: analysisRow ?? null,
       artifacts,
+      chapters,
       currentRevision,
       transcript: transcriptRow ?? null,
     };
@@ -338,6 +386,7 @@ export default async function SourceDetailPage(
 
       {data.status === "ready" && hlsKey ? (
         <SourceWorkspace
+          analysis={workspaceAnalysis(data)}
           hlsUrl={`/api/media/${hlsKey}`}
           peaksUrl={waveformKey ? `/api/media/${waveformKey}` : null}
           posterUrl={posterKey ? `/api/media/${posterKey}` : null}
