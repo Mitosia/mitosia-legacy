@@ -126,7 +126,7 @@ describe("context pack hashing", () => {
           Object.entries(pack.source).reverse()
         ) as SourceContextPack["source"],
       }).reverse()
-    ) as SourceContextPack;
+    ) as unknown as SourceContextPack;
     expect(Object.keys(reordered)).not.toEqual(Object.keys(pack));
     expect(hashContextPack(pack)).toBe(hashContextPack(reordered));
     expect(canonicalJson(pack)).toBe(canonicalJson(reordered));
