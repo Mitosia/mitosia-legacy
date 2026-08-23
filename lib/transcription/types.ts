@@ -42,6 +42,11 @@ export interface TranscriptionRequest {
   // the mock uses it to span realistic timings and the pipeline sanity-
   // checks the result against it.
   durationSeconds: number;
+  // Diarization hint for providers that accept one (AssemblyAI's
+  // max_speakers_expected): when the caller knows how many voices there
+  // are, over-segmentation gets constrained at the source. Unset today —
+  // wired up when re-transcription with a hint gets UI.
+  maxSpeakers?: number;
   mimeType: string;
 }
 

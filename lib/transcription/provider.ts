@@ -1,3 +1,4 @@
+import { createAssemblyAiProvider } from "./assemblyai";
 import { createDeepgramProvider } from "./deepgram";
 import { createMockProvider } from "./mock";
 import type { TranscriptionProvider } from "./types";
@@ -8,33 +9,55 @@ import type { TranscriptionProvider } from "./types";
 // boot — and the Trigger deploy indexes lib/env.ts at import, so a required
 // key there becomes a deploy-time constraint for every entrypoint.
 //
-// TRANSCRIPTION_PROVIDER: "deepgram" (default when DEEPGRAM_API_KEY is set)
-// or "mock" (deterministic fake for e2e/dev — see ./mock.ts). AssemblyAI
-// lands as the fallback provider later in S3 behind this same seam.
+// Returns the ORDERED list the pipeline tries: Deepgram primary,
+// AssemblyAI fallback (tech-stack §6.2) — a provider outage degrades to
+// the next adapter instead of a failed transcript. TRANSCRIPTION_PROVIDER
+// pins a single provider explicitly: "deepgram", "assemblyai", or "mock"
+// (deterministic fake for e2e/dev — see ./mock.ts, never a deployed
+// default).
 
-export function getTranscriptionProvider(): TranscriptionProvider | null {
+export function getTranscriptionProviders(): TranscriptionProvider[] {
   const explicit = process.env.TRANSCRIPTION_PROVIDER;
-  if (explicit === "mock") {
-    return createMockProvider();
-  }
   const deepgramKey = process.env.DEEPGRAM_API_KEY;
-  if (explicit === "deepgram" || (explicit === undefined && deepgramKey)) {
+  const assemblyAiKey = process.env.ASSEMBLYAI_API_KEY;
+
+  if (explicit === "mock") {
+    return [createMockProvider()];
+  }
+  if (explicit === "deepgram") {
     if (!deepgramKey) {
       throw new Error(
         "TRANSCRIPTION_PROVIDER=deepgram requires DEEPGRAM_API_KEY"
       );
     }
-    return createDeepgramProvider(deepgramKey);
+    return [createDeepgramProvider(deepgramKey)];
+  }
+  if (explicit === "assemblyai") {
+    if (!assemblyAiKey) {
+      throw new Error(
+        "TRANSCRIPTION_PROVIDER=assemblyai requires ASSEMBLYAI_API_KEY"
+      );
+    }
+    return [createAssemblyAiProvider(assemblyAiKey)];
   }
   if (explicit !== undefined) {
     throw new Error(`Unknown TRANSCRIPTION_PROVIDER: ${explicit}`);
   }
-  return null;
+
+  const providers: TranscriptionProvider[] = [];
+  if (deepgramKey) {
+    providers.push(createDeepgramProvider(deepgramKey));
+  }
+  if (assemblyAiKey) {
+    providers.push(createAssemblyAiProvider(assemblyAiKey));
+  }
+  return providers;
 }
 
 export function isTranscriptionConfigured(): boolean {
   return (
     process.env.TRANSCRIPTION_PROVIDER === "mock" ||
-    Boolean(process.env.DEEPGRAM_API_KEY)
+    Boolean(process.env.DEEPGRAM_API_KEY) ||
+    Boolean(process.env.ASSEMBLYAI_API_KEY)
   );
 }
