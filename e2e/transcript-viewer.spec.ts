@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { createAccountWithOrg } from "./support/auth";
+import { queryRows } from "./support/db";
 import { createHierarchy } from "./support/hierarchy";
 
 // Transcript viewer interactions (project rule: interactive UI is exercised
@@ -19,6 +20,7 @@ const PIPELINE_TIMEOUT_MS = 90_000;
 const UPLOAD_BUTTON = /Upload 1 file/;
 const UPLOAD_COMPLETE = /Complete/;
 const SOURCE_PAGE_URL = /\/sources\//;
+const SRT_TIMING = /\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3}/;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -124,6 +126,76 @@ test("the transcript panel seeks, searches, and highlights", async ({
   await expect(page.getByTestId("transcript-follow")).toBeVisible();
   await page.getByTestId("transcript-follow").click();
   await expect(page.getByTestId("transcript-follow")).toBeHidden();
+  await page.getByTestId("transcript-search").fill("");
+
+  // Speaker naming — and the diarization-repair path: giving two ids the
+  // SAME name is how an over-segmented voice gets merged, so that exact
+  // flow is what gets exercised.
+  await page.getByTestId("transcript-speakers").click();
+  const speakersDialog = page.getByTestId("speaker-labels-dialog");
+  await expect(speakersDialog).toBeVisible();
+  await speakersDialog.getByLabel("Speaker 1").fill("Host");
+  await speakersDialog.getByLabel("Speaker 2").fill("Host");
+  await speakersDialog.getByTestId("speaker-labels-save").click();
+  await expect(speakersDialog).toBeHidden({ timeout: 15_000 });
+  await expect(page.getByTestId("transcript-speaker").first()).toHaveText(
+    "Host",
+    { timeout: 15_000 }
+  );
+  // Merged: every visible chip now carries the same name
+  const chipTexts = await page
+    .getByTestId("transcript-speaker")
+    .allTextContents();
+  expect(new Set(chipTexts)).toEqual(new Set(["Host"]));
+
+  // Word correction: double-click → dialog → save produces a NEW revision
+  // whose JSON the panel re-fetches.
+  const firstWord = panel.locator("button[data-word-index='0']");
+  await expect(firstWord).toHaveText("Welcome");
+  await firstWord.dblclick();
+  const correctDialog = page.getByTestId("correct-word-dialog");
+  await expect(correctDialog).toBeVisible();
+  await correctDialog.getByLabel("Replacement").fill("Greetings");
+  await correctDialog.getByTestId("correct-word-save").click();
+  await expect(correctDialog).toBeHidden({ timeout: 15_000 });
+  await expect(panel.locator("button[data-word-index='0']")).toHaveText(
+    "Greetings",
+    { timeout: 15_000 }
+  );
+
+  const sourceId = new URL(page.url()).pathname.split("/").pop() ?? "";
+  const revisions = await queryRows<{
+    created_by: string | null;
+    revision: string;
+  }>(
+    `SELECT r.revision, r.created_by
+       FROM transcript_revision r JOIN transcript t ON t.id = r.transcript_id
+      WHERE t.source_id = $1 ORDER BY r.revision`,
+    [sourceId]
+  );
+  expect(revisions).toHaveLength(2);
+  expect(revisions[0].created_by).toBeNull();
+  expect(revisions[1].created_by).not.toBeNull();
+
+  // Exports reflect the correction and the speaker merge immediately
+  const srt = await page.request.get(
+    `/api/sources/${sourceId}/transcript?format=srt`
+  );
+  expect(srt.status()).toBe(200);
+  const srtBody = await srt.text();
+  expect(srtBody).toContain("[Host]");
+  expect(srtBody).toContain("Greetings");
+  expect(srtBody).toMatch(SRT_TIMING);
+  // Merge means no second speaker name survives anywhere
+  expect(srtBody).not.toContain("Speaker 2");
+
+  const vtt = await page.request.get(
+    `/api/sources/${sourceId}/transcript?format=vtt`
+  );
+  expect(vtt.status()).toBe(200);
+  const vttBody = await vtt.text();
+  expect(vttBody.startsWith("WEBVTT")).toBe(true);
+  expect(vttBody).toContain("<v Host>");
 
   expect(errors, errors.join("\n")).toEqual([]);
 });
