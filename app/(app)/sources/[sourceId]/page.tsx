@@ -13,9 +13,11 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { isStalledAnalysis, scheduleAnalysisReap } from "@/lib/analysis/reaper";
 import {
   project,
   source,
+  sourceAnalysis,
   sourceArtifact,
   transcript,
   transcriptRevision,
@@ -171,6 +173,25 @@ function workspaceTranscript(data: {
   };
 }
 
+// The poller runs until the source AND its follow-on jobs settle; a
+// missing row (no audio, or the capability unconfigured) counts as
+// settled — absence is final.
+function jobSettled(row: { status: string } | null): boolean {
+  return !row || row.status === "ready" || row.status === "failed";
+}
+
+function pageIsSettled(data: {
+  analysis: { status: string } | null;
+  status: string;
+  transcript: { status: string } | null;
+}): boolean {
+  return (
+    (data.status === "ready" || data.status === "failed") &&
+    jobSettled(data.transcript) &&
+    jobSettled(data.analysis)
+  );
+}
+
 export default async function SourceDetailPage(
   props: PageProps<"/sources/[sourceId]">
 ) {
@@ -229,6 +250,15 @@ export default async function SourceDetailPage(
       .where(eq(transcript.sourceId, sourceRow.id))
       .limit(1);
 
+    const [analysisRow] = await tx
+      .select({
+        stalled: sql<boolean>`(${isStalledAnalysis})`,
+        status: sourceAnalysis.status,
+      })
+      .from(sourceAnalysis)
+      .where(eq(sourceAnalysis.sourceId, sourceRow.id))
+      .limit(1);
+
     // Current revision = highest revision number (no pointer column).
     let currentRevision: { revision: number; storageKey: string } | null = null;
     if (transcriptRow?.status === "ready") {
@@ -246,6 +276,7 @@ export default async function SourceDetailPage(
 
     return {
       ...sourceRow,
+      analysis: analysisRow ?? null,
       artifacts,
       currentRevision,
       transcript: transcriptRow ?? null,
@@ -267,15 +298,13 @@ export default async function SourceDetailPage(
   // The transcript arrives after "ready", so the poller keeps running until
   // it settles too. A source with no transcript row (no audio, or
   // transcription unconfigured) counts as settled — absence is final.
-  const transcriptSettled =
-    !data.transcript ||
-    data.transcript.status === "ready" ||
-    data.transcript.status === "failed";
-  const isSettled =
-    (data.status === "ready" || data.status === "failed") && transcriptSettled;
+  const isSettled = pageIsSettled(data);
 
   if (data.transcript?.stalled) {
     scheduleTranscriptionReap(organizationId);
+  }
+  if (data.analysis?.stalled) {
+    scheduleAnalysisReap(organizationId);
   }
 
   return (

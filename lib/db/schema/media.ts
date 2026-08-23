@@ -145,7 +145,12 @@ export const usageLedger = pgTable(
     entryType: text("entry_type", {
       // Plain text column (no check constraint): adding a value here needs
       // no migration, same as ingest_step.
-      enum: ["storage_bytes", "processing_minutes", "transcription_minutes"],
+      enum: [
+        "storage_bytes",
+        "processing_minutes",
+        "transcription_minutes",
+        "ai_tokens",
+      ],
     }).notNull(),
     id: uuid("id").primaryKey().default(sql`uuidv7()`),
     metadata: jsonb("metadata"),
@@ -154,7 +159,7 @@ export const usageLedger = pgTable(
       .references(() => organization.id, { onDelete: "cascade" }),
     quantity: doublePrecision("quantity").notNull(),
     sourceId: uuid("source_id"),
-    unit: text("unit", { enum: ["bytes", "minutes"] }).notNull(),
+    unit: text("unit", { enum: ["bytes", "minutes", "tokens"] }).notNull(),
   },
   (table) => [
     index("usage_ledger_org_idx").on(table.organizationId, table.entryType),

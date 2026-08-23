@@ -273,6 +273,19 @@ export async function runTranscription(
     // unique (transcript_id, revision) index makes the insert the arbiter —
     // a duplicate throws, recordTranscriptFailure marks it, and the claim
     // gate prevents concurrent runs in the first place.
+
+    // Analysis is the next follow-on job (transcription's own pattern, one
+    // level up): enqueued once the transcript is committed, errors
+    // contained — a failed enqueue must not fail a finished transcription.
+    try {
+      const { enqueueAnalysis } = await import("@/lib/analysis/enqueue");
+      await enqueueAnalysis(payload);
+    } catch (error) {
+      console.error(
+        `[transcription] analysis enqueue failed for ${payload.sourceId}:`,
+        error
+      );
+    }
   } catch (error) {
     await recordTranscriptFailure(payload, claimed.transcriptId, error);
     throw error;

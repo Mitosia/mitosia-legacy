@@ -197,5 +197,37 @@ test("the transcript panel seeks, searches, and highlights", async ({
   expect(vttBody.startsWith("WEBVTT")).toBe(true);
   expect(vttBody).toContain("<v Host>");
 
+  // Analysis chains after transcription (mock analyzer): the lifecycle
+  // lands ready with chapters, a summary, speaker suggestions, and the
+  // context snapshot recorded for provenance.
+  await expect
+    .poll(
+      async () => {
+        const rows = await queryRows<{ status: string }>(
+          "SELECT status FROM source_analysis WHERE source_id = $1",
+          [sourceId]
+        );
+        return rows[0]?.status ?? "missing";
+      },
+      { timeout: 30_000 }
+    )
+    .toBe("ready");
+  const [analysis] = await queryRows<{
+    chapter_count: string;
+    context_snapshot_id: string | null;
+    speaker_suggestions: unknown;
+    summary: string | null;
+  }>(
+    `SELECT a.summary, a.context_snapshot_id, a.speaker_suggestions,
+            (SELECT count(*) FROM source_chapter c WHERE c.analysis_id = a.id)
+              AS chapter_count
+       FROM source_analysis a WHERE a.source_id = $1`,
+    [sourceId]
+  );
+  expect(Number(analysis.chapter_count)).toBe(3);
+  expect(analysis.summary).toBeTruthy();
+  expect(analysis.context_snapshot_id).not.toBeNull();
+  expect(Array.isArray(analysis.speaker_suggestions)).toBe(true);
+
   expect(errors, errors.join("\n")).toEqual([]);
 });
