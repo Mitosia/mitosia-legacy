@@ -1,4 +1,4 @@
-import type { LanguageModel } from "ai";
+import type { MastraModelConfig } from "@mastra/core/llm";
 import { type AiTask, MODEL_TIERS, routeForTask } from "./config";
 
 // Model-provider seam (decision 2026-08-23, inverting tech-stack §7's
@@ -13,7 +13,10 @@ import { type AiTask, MODEL_TIERS, routeForTask } from "./config";
 // never a boot failure.
 
 export interface ModelCandidate {
-  model: LanguageModel;
+  // Mastra's model union: it accepts any live AI SDK spec version, which
+  // is what lets a v7 Anthropic model and a v5-line OpenRouter model share
+  // one seam without adapter shims.
+  model: MastraModelConfig;
   provider: "anthropic" | "openrouter";
 }
 

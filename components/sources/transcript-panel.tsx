@@ -453,6 +453,7 @@ export function TranscriptPanel({
             </Button>
             <Button
               data-testid="transcript-export-srt"
+              nativeButton={false}
               render={
                 <a
                   href={`/api/sources/${editable.sourceId}/transcript?format=srt`}
@@ -465,6 +466,7 @@ export function TranscriptPanel({
             </Button>
             <Button
               data-testid="transcript-export-vtt"
+              nativeButton={false}
               render={
                 <a
                   href={`/api/sources/${editable.sourceId}/transcript?format=vtt`}

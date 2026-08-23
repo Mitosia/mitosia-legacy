@@ -8,9 +8,12 @@ import {
   brand,
   campaign,
   client,
+  contextSnapshot,
   project,
   source,
+  sourceAnalysis,
   sourceArtifact,
+  sourceChapter,
   transcript,
   transcriptRevision,
   usageLedger,
@@ -132,6 +135,35 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
       sourceId: sourceRow!.id,
       storageKey: `org/${organizationId}/source/seed/hls/master.m3u8`,
     });
+    const [snapshotRow] = await tx
+      .insert(contextSnapshot)
+      .values({
+        content: { seeded: true },
+        hash: `hash-${organizationId}`,
+        kind: "source-analysis",
+        organizationId,
+      })
+      .returning({ id: contextSnapshot.id });
+    const [analysisRow] = await tx
+      .insert(sourceAnalysis)
+      .values({
+        // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+        contextSnapshotId: snapshotRow!.id,
+        organizationId,
+        // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+        sourceId: sourceRow!.id,
+        status: "ready",
+      })
+      .returning({ id: sourceAnalysis.id });
+    await tx.insert(sourceChapter).values({
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      analysisId: analysisRow!.id,
+      endMs: 1000,
+      idx: 0,
+      organizationId,
+      startMs: 0,
+      title: `${organizationId} chapter`,
+    });
     const [transcriptRow] = await tx
       .insert(transcript)
       .values({
@@ -191,6 +223,9 @@ const TENANT_TABLES = [
   { label: "source_artifact", table: sourceArtifact },
   { label: "transcript", table: transcript },
   { label: "transcript_revision", table: transcriptRevision },
+  { label: "context_snapshot", table: contextSnapshot },
+  { label: "source_analysis", table: sourceAnalysis },
+  { label: "source_chapter", table: sourceChapter },
   { label: "usage_ledger", table: usageLedger },
 ] as const;
 

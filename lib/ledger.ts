@@ -3,12 +3,16 @@ import type { OrgTransaction } from "./db/tenant";
 
 interface UsageEntry {
   correlationId: string;
-  entryType: "storage_bytes" | "processing_minutes" | "transcription_minutes";
+  entryType:
+    | "storage_bytes"
+    | "processing_minutes"
+    | "transcription_minutes"
+    | "ai_tokens";
   metadata?: Record<string, unknown>;
   organizationId: string;
   quantity: number;
   sourceId?: string;
-  unit: "bytes" | "minutes";
+  unit: "bytes" | "minutes" | "tokens";
 }
 
 // Append-only usage metering. correlation_id carries a unique index and

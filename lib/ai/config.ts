@@ -45,3 +45,31 @@ export type AiTask = keyof typeof TASK_ROUTES;
 export function routeForTask(task: AiTask): TaskRoute {
   return TASK_ROUTES[task];
 }
+
+// USD per million tokens (first-party list prices, 2026-08). Used only for
+// the estimated-cost metadata on ledger entries — billing truth is the
+// provider invoice; this is the "cost per source-hour" visibility the S4
+// exit criterion asks for.
+export const MODEL_PRICING_PER_MTOK: Record<
+  (typeof MODEL_TIERS)[ModelTier],
+  { input: number; output: number }
+> = {
+  "claude-haiku-4-5": { input: 1, output: 5 },
+  "claude-opus-5": { input: 5, output: 25 },
+  "claude-sonnet-5": { input: 3, output: 15 },
+};
+
+export function estimateCostUsd(
+  modelId: string,
+  inputTokens: number,
+  outputTokens: number
+): number | null {
+  const pricing =
+    MODEL_PRICING_PER_MTOK[modelId as keyof typeof MODEL_PRICING_PER_MTOK];
+  if (!pricing) {
+    return null;
+  }
+  return (
+    (inputTokens * pricing.input + outputTokens * pricing.output) / 1_000_000
+  );
+}
