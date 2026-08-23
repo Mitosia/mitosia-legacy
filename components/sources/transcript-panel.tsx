@@ -21,6 +21,11 @@ import {
   type TranscriptParagraph,
 } from "@/lib/transcription/paragraphs";
 import type { TranscriptData } from "@/lib/transcription/types";
+import {
+  CorrectWordDialog,
+  SpeakerLabelsDialog,
+  type WordToCorrect,
+} from "./transcript-dialogs";
 
 // Transcript viewer: virtualized paragraphs over the canonical word JSON,
 // click-word-to-seek, active-word highlight during playback, search, and
@@ -77,7 +82,9 @@ interface ParagraphRowProps {
   activeWordIndex: number;
   // Global index of the focused search match when inside this paragraph
   focusedMatchIndex: number;
+  onSpeakerClick: (() => void) | null;
   onWordClick: (startMs: number) => void;
+  onWordDoubleClick: ((word: WordToCorrect) => void) | null;
   paragraph: TranscriptParagraph;
   searchQuery: string;
   speakerLabel: string;
@@ -86,7 +93,9 @@ interface ParagraphRowProps {
 const ParagraphRow = memo(function ParagraphRowInner({
   activeWordIndex,
   focusedMatchIndex,
+  onSpeakerClick,
   onWordClick,
+  onWordDoubleClick,
   paragraph,
   searchQuery,
   speakerLabel,
@@ -100,15 +109,35 @@ const ParagraphRow = memo(function ParagraphRowInner({
     },
     [onWordClick]
   );
+  const handleWordDoubleClick = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      onWordDoubleClick?.({
+        index: Number(event.currentTarget.dataset.wordIndex),
+        text: event.currentTarget.textContent?.trim() ?? "",
+      });
+    },
+    [onWordDoubleClick]
+  );
   return (
     <div className="px-1 pb-4">
       <p className="mb-1 flex items-baseline gap-2 text-xs">
-        <span
-          className={`font-medium ${speakerColorClass(paragraph.speaker)}`}
-          data-testid="transcript-speaker"
-        >
-          {speakerLabel}
-        </span>
+        {onSpeakerClick ? (
+          <button
+            className={`cursor-pointer font-medium hover:underline ${speakerColorClass(paragraph.speaker)}`}
+            data-testid="transcript-speaker"
+            onClick={onSpeakerClick}
+            type="button"
+          >
+            {speakerLabel}
+          </button>
+        ) : (
+          <span
+            className={`font-medium ${speakerColorClass(paragraph.speaker)}`}
+            data-testid="transcript-speaker"
+          >
+            {speakerLabel}
+          </span>
+        )}
         <span className="text-muted-foreground tabular-nums">
           {formatTimestamp(paragraph.startMs)}
         </span>
@@ -146,6 +175,7 @@ const ParagraphRow = memo(function ParagraphRowInner({
                 data-start-ms={word.startMs}
                 data-word-index={globalIndex}
                 onClick={handleWordClick}
+                onDoubleClick={handleWordDoubleClick}
                 type="button"
               >
                 {word.text}
@@ -159,12 +189,16 @@ const ParagraphRow = memo(function ParagraphRowInner({
 });
 
 interface TranscriptPanelProps {
+  // Present when the viewer can correct: revision the page rendered
+  // (optimistic-concurrency base) and the source to correct.
+  editable: { baseRevision: number; sourceId: string } | null;
   speakerLabels: Record<string, string> | null;
   transcriptUrl: string;
   video: HTMLVideoElement | null;
 }
 
 export function TranscriptPanel({
+  editable,
   speakerLabels,
   transcriptUrl,
   video,
@@ -176,6 +210,10 @@ export function TranscriptPanel({
   const [following, setFollowing] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [matchCursor, setMatchCursor] = useState(0);
+  const [speakersOpen, setSpeakersOpen] = useState(false);
+  const [wordToCorrect, setWordToCorrect] = useState<WordToCorrect | null>(
+    null
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -304,6 +342,19 @@ export function TranscriptPanel({
   }, [matchCount]);
   const resumeFollow = useCallback(() => setFollowing(true), []);
   const suspendFollow = useCallback(() => setFollowing(false), []);
+  const openSpeakers = useCallback(() => setSpeakersOpen(true), []);
+  const closeSpeakers = useCallback(() => setSpeakersOpen(false), []);
+  const closeCorrect = useCallback(() => setWordToCorrect(null), []);
+
+  const speakers = useMemo(() => {
+    const ids = new Set<string>();
+    for (const word of words) {
+      if (word.speaker !== null) {
+        ids.add(word.speaker);
+      }
+    }
+    return [...ids].sort((a, b) => Number(a) - Number(b));
+  }, [words]);
 
   // Jumping between matches scrolls to the match's paragraph — a search
   // jump is an explicit navigation, so it also suspends following.
@@ -389,6 +440,43 @@ export function TranscriptPanel({
             Jump to current
           </Button>
         )}
+        {editable ? (
+          <div className={following ? "ml-auto flex gap-2" : "flex gap-2"}>
+            <Button
+              data-testid="transcript-speakers"
+              onClick={openSpeakers}
+              size="sm"
+              type="button"
+              variant="outline"
+            >
+              Speakers
+            </Button>
+            <Button
+              data-testid="transcript-export-srt"
+              render={
+                <a
+                  href={`/api/sources/${editable.sourceId}/transcript?format=srt`}
+                />
+              }
+              size="sm"
+              variant="outline"
+            >
+              SRT
+            </Button>
+            <Button
+              data-testid="transcript-export-vtt"
+              render={
+                <a
+                  href={`/api/sources/${editable.sourceId}/transcript?format=vtt`}
+                />
+              }
+              size="sm"
+              variant="outline"
+            >
+              VTT
+            </Button>
+          </div>
+        ) : null}
       </div>
       <div
         className="h-[480px] overflow-y-auto rounded-md border"
@@ -425,7 +513,9 @@ export function TranscriptPanel({
                   focusedMatchIndex={
                     contains(focusedMatchIndex) ? focusedMatchIndex : -1
                   }
+                  onSpeakerClick={editable ? openSpeakers : null}
                   onWordClick={seekTo}
+                  onWordDoubleClick={editable ? setWordToCorrect : null}
                   paragraph={paragraph}
                   searchQuery={searchQuery}
                   speakerLabel={speakerDisplayName(
@@ -438,6 +528,23 @@ export function TranscriptPanel({
           })}
         </div>
       </div>
+      {editable ? (
+        <>
+          <SpeakerLabelsDialog
+            onClose={closeSpeakers}
+            open={speakersOpen}
+            sourceId={editable.sourceId}
+            speakerLabels={speakerLabels}
+            speakers={speakers}
+          />
+          <CorrectWordDialog
+            baseRevision={editable.baseRevision}
+            onClose={closeCorrect}
+            sourceId={editable.sourceId}
+            word={wordToCorrect}
+          />
+        </>
+      ) : null}
     </div>
   );
 }

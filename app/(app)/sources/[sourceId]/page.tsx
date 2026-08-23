@@ -153,16 +153,21 @@ function TranscriptStatusCard({
 }
 
 function workspaceTranscript(data: {
+  currentRevision: { revision: number; storageKey: string } | null;
   transcript: { speakerLabels: unknown } | null;
-  transcriptKey: string | null;
-}): { speakerLabels: Record<string, string> | null; url: string } | null {
-  if (!data.transcriptKey) {
+}): {
+  revision: number;
+  speakerLabels: Record<string, string> | null;
+  url: string;
+} | null {
+  if (!data.currentRevision) {
     return null;
   }
   return {
+    revision: data.currentRevision.revision,
     speakerLabels:
       (data.transcript?.speakerLabels as Record<string, string> | null) ?? null,
-    url: `/api/media/${data.transcriptKey}`,
+    url: `/api/media/${data.currentRevision.storageKey}`,
   };
 }
 
@@ -225,22 +230,25 @@ export default async function SourceDetailPage(
       .limit(1);
 
     // Current revision = highest revision number (no pointer column).
-    let transcriptKey: string | null = null;
+    let currentRevision: { revision: number; storageKey: string } | null = null;
     if (transcriptRow?.status === "ready") {
       const [revisionRow] = await tx
-        .select({ storageKey: transcriptRevision.storageKey })
+        .select({
+          revision: transcriptRevision.revision,
+          storageKey: transcriptRevision.storageKey,
+        })
         .from(transcriptRevision)
         .where(eq(transcriptRevision.transcriptId, transcriptRow.id))
         .orderBy(desc(transcriptRevision.revision))
         .limit(1);
-      transcriptKey = revisionRow?.storageKey ?? null;
+      currentRevision = revisionRow ?? null;
     }
 
     return {
       ...sourceRow,
       artifacts,
+      currentRevision,
       transcript: transcriptRow ?? null,
-      transcriptKey,
     };
   });
 
@@ -304,6 +312,7 @@ export default async function SourceDetailPage(
           hlsUrl={`/api/media/${hlsKey}`}
           peaksUrl={waveformKey ? `/api/media/${waveformKey}` : null}
           posterUrl={posterKey ? `/api/media/${posterKey}` : null}
+          sourceId={data.id}
           transcript={workspaceTranscript(data)}
         />
       ) : (

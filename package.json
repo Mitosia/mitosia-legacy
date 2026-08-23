@@ -32,6 +32,7 @@
     "@deepgram/sdk": "^5.8.0",
     "@hugeicons/core-free-icons": "^4.2.3",
     "@hugeicons/react": "^1.1.9",
+    "@remotion/captions": "^4.0.515",
     "@tanstack/react-virtual": "^3.14.10",
     "@trigger.dev/sdk": "^4.5.10",
     "@uppy/aws-s3": "^5.1.0",

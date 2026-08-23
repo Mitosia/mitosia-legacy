@@ -32,6 +32,9 @@ importers:
       '@hugeicons/react':
         specifier: ^1.1.9
         version: 1.1.9(react@19.2.8)
+      '@remotion/captions':
+        specifier: ^4.0.515
+        version: 4.0.515
       '@tanstack/react-virtual':
         specifier: ^3.14.10
         version: 3.14.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
@@ -1292,6 +1295,9 @@ packages:
 
   '@protobuf-ts/runtime@2.11.1':
     resolution: {integrity: sha512-KuDaT1IfHkugM2pyz+FwiY80ejWrkH1pAtOBOZFuR6SXEFTsnb/jiQWQ1rCIrcKx2BtyxnxW6BWwsVSA/Ie+WQ==}
+
+  '@remotion/captions@4.0.515':
+    resolution: {integrity: sha512-UGWNW6/zx5l65rJCO9B56EHuEhVS1hXDazXyoJEO7dHKLKf/SOQZ8Hu90nYWGTFRqKbajLMpeHxjNgeNlbTSUw==}
 
   '@rolldown/binding-android-arm64@1.2.3':
     resolution: {integrity: sha512-zrJtHDcaZJ1Fp7xf4hNl+7seH9Cn/N5TwLYkhgXREtBwAd/jaqW3uqeHxpDugJLVICWg4eW44kOQEGJ1r6jCGw==}
@@ -5129,6 +5135,8 @@ snapshots:
       - magicast
 
   '@protobuf-ts/runtime@2.11.1': {}
+
+  '@remotion/captions@4.0.515': {}
 
   '@rolldown/binding-android-arm64@1.2.3':
     optional: true

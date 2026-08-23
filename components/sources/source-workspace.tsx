@@ -14,7 +14,9 @@ interface SourceWorkspaceProps {
   hlsUrl: string;
   peaksUrl: string | null;
   posterUrl: string | null;
+  sourceId: string;
   transcript: {
+    revision: number;
     speakerLabels: Record<string, string> | null;
     url: string;
   } | null;
@@ -24,6 +26,7 @@ export function SourceWorkspace({
   hlsUrl,
   peaksUrl,
   posterUrl,
+  sourceId,
   transcript,
 }: SourceWorkspaceProps) {
   const [video, setVideo] = useState<HTMLVideoElement | null>(null);
@@ -43,6 +46,7 @@ export function SourceWorkspace({
           </CardHeader>
           <CardContent>
             <TranscriptPanel
+              editable={{ baseRevision: transcript.revision, sourceId }}
               speakerLabels={transcript.speakerLabels}
               transcriptUrl={transcript.url}
               video={video}
