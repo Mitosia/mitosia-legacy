@@ -4,5 +4,7 @@ export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { tuneOutboundConnections } = await import("@/lib/net-tuning");
     tuneOutboundConnections();
+    const { initAiTelemetry } = await import("@/lib/ai/telemetry");
+    await initAiTelemetry();
   }
 }
