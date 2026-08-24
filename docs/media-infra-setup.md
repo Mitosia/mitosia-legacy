@@ -151,16 +151,19 @@ Manual (fallback, and until the switch is set):
 TRIGGER_PROJECT_REF=proj_… npx trigger.dev@4.5.12 deploy
 ```
 
-`trigger.config.ts` already includes the **ffmpeg build extension**, so the
-cloud image has ffmpeg/ffprobe.
+`trigger.config.ts` includes the custom **`pinnedFfmpeg` build extension**
+(not the bundled `ffmpeg()`, which installs Debian's 5.1.x), so the cloud
+image gets the same checksummed 8.1.x static build CI uses — mirrored on
+this repo's own `ffmpeg-static/*` GitHub release (see the ffmpeg rules in
+AGENTS.md and `scripts/ffmpeg-pin.mjs`).
 
-> **Pin its ffmpeg before you enable this.** `ffmpeg()` with no options
-> installs Debian's apt build (5.1.x) — three minors behind the 8.1.x that
-> the app image, CI and dev machines are pinned to (see AGENTS.md). The
-> extension can't be pointed at 8.x through its options, so it needs a
-> replacement build layer that downloads the same pinned static build CI
-> uses. Until then, ingest on Trigger.dev runs on an ffmpeg nothing has
-> tested, and an option it lacks fails the task outright.
+> **Deploys need GitHub auth on the deploying machine.** Config-eval
+> downloads the pinned archive from the private repo's release and ships
+> it to Trigger's builders inside the image build context — the builders
+> themselves can't reach a private release. The CI job passes
+> `GH_TOKEN: ${{ github.token }}`; for a manual deploy, an authenticated
+> `gh` (`gh auth status`) is enough. Without it the deploy aborts at
+> config-eval with instructions, before anything is uploaded.
 
 ### Environment variables in the Trigger dashboard
 
