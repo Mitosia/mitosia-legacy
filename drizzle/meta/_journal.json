@@ -57,6 +57,13 @@
       "when": 1787569643336,
       "tag": "0007_s5-source-index",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1787570606504,
+      "tag": "0008_s5-extraction",
+      "breakpoints": true
     }
   ]
 }

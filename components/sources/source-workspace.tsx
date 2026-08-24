@@ -3,6 +3,11 @@
 import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
+  type HighlightExtraction,
+  HighlightsPanel,
+  type HighlightsRun,
+} from "./highlights-panel";
+import {
   SourceMap,
   type SourceMapAnalysis,
   SpeakerSuggestionBanner,
@@ -17,6 +22,10 @@ import { TranscriptPanel } from "./transcript-panel";
 
 interface SourceWorkspaceProps {
   analysis: SourceMapAnalysis | null;
+  highlights: {
+    extractions: HighlightExtraction[];
+    run: HighlightsRun;
+  } | null;
   hlsUrl: string;
   peaksUrl: string | null;
   posterUrl: string | null;
@@ -30,6 +39,7 @@ interface SourceWorkspaceProps {
 
 export function SourceWorkspace({
   analysis,
+  highlights,
   hlsUrl,
   peaksUrl,
   posterUrl,
@@ -47,6 +57,15 @@ export function SourceWorkspace({
         posterUrl={posterUrl}
       />
       {analysis ? <SourceMap analysis={analysis} video={video} /> : null}
+      {highlights ? (
+        <HighlightsPanel
+          extractions={highlights.extractions}
+          run={highlights.run}
+          sourceId={sourceId}
+          speakerLabels={transcript?.speakerLabels ?? null}
+          video={video}
+        />
+      ) : null}
       {analysis && transcript ? (
         <SpeakerSuggestionBanner
           sourceId={sourceId}

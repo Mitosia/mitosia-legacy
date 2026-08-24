@@ -273,6 +273,22 @@ export async function runAnalysis(payload: AnalysisPayload): Promise<void> {
       context.durationSeconds,
       result
     );
+
+    // Extraction is the next follow-on job (the transcription→analysis
+    // pattern, one level down): enqueued once the analysis is committed so
+    // its passes can reuse the summary/chapters, errors contained — a
+    // failed enqueue must not fail a finished analysis.
+    try {
+      const { enqueueExtraction } = await import(
+        "@/lib/intelligence/extract-enqueue"
+      );
+      await enqueueExtraction(payload);
+    } catch (error) {
+      console.error(
+        `[analysis] extraction enqueue failed for ${payload.sourceId}:`,
+        error
+      );
+    }
   } catch (error) {
     await recordAnalysisFailure(payload, claimed.analysisId, error);
     throw error;

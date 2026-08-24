@@ -14,6 +14,8 @@ import {
   sourceAnalysis,
   sourceArtifact,
   sourceChapter,
+  sourceExtraction,
+  sourceExtractionRun,
   sourceIndex,
   transcript,
   transcriptChunk,
@@ -166,6 +168,32 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
       startMs: 0,
       title: `${organizationId} chapter`,
     });
+    const [extractionRunRow] = await tx
+      .insert(sourceExtractionRun)
+      .values({
+        organizationId,
+        revision: 1,
+        // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+        sourceId: sourceRow!.id,
+        status: "ready",
+      })
+      .returning({ id: sourceExtractionRun.id });
+    await tx.insert(sourceExtraction).values({
+      confidence: 0.9,
+      endMs: 1000,
+      grounded: true,
+      groundingScore: 1,
+      kind: "quote",
+      organizationId,
+      revision: 1,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      runId: extractionRunRow!.id,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      sourceId: sourceRow!.id,
+      speaker: "0",
+      startMs: 0,
+      text: `${organizationId} extraction`,
+    });
     await tx.insert(sourceIndex).values({
       organizationId,
       revision: 1,
@@ -248,6 +276,8 @@ const TENANT_TABLES = [
   { label: "transcript_revision", table: transcriptRevision },
   { label: "source_index", table: sourceIndex },
   { label: "transcript_chunk", table: transcriptChunk },
+  { label: "source_extraction_run", table: sourceExtractionRun },
+  { label: "source_extraction", table: sourceExtraction },
   { label: "context_snapshot", table: contextSnapshot },
   { label: "source_analysis", table: sourceAnalysis },
   { label: "source_chapter", table: sourceChapter },

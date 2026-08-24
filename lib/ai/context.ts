@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 export interface SourceContextPack {
   brand: { name: string } | null;
   client: { name: string } | null;
-  kind: "source-analysis";
+  kind: "source-analysis" | "source-extraction";
   organization: { name: string };
   project: { name: string } | null;
   source: {
