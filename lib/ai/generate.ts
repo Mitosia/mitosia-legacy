@@ -2,6 +2,7 @@ import { generateObject } from "ai";
 import type { z } from "zod";
 import {
   type AiTask,
+  EFFORT_TIERS,
   estimateCostUsd,
   MODEL_TIERS,
   routeForTask,
@@ -120,9 +121,11 @@ export async function generateStructured<T>(
         model: candidate.model as any,
         schema,
         system,
-        // Adaptive-thinking effort from the task route (ignored by
-        // non-Anthropic candidates — providerOptions are per-provider).
-        ...(route.effort
+        // Adaptive-thinking effort from the task route — sent ONLY for
+        // tiers that accept it (haiku-4-5 rejects the parameter with a
+        // hard API error; staging 2026-08-24). Ignored by non-Anthropic
+        // candidates — providerOptions are per-provider.
+        ...(route.effort && EFFORT_TIERS.has(route.tier)
           ? { providerOptions: { anthropic: { effort: route.effort } } }
           : {}),
         ...(options?.cachedPrefix
