@@ -44,7 +44,11 @@ export default defineConfig({
     // to the server Playwright starts itself: a reused dev server (local
     // runs) must have TRANSCRIPTION_PROVIDER=mock in its own env or the
     // transcript assertions in source-ingest.spec.ts will time out.
-    env: { ANALYSIS_PROVIDER: "mock", TRANSCRIPTION_PROVIDER: "mock" },
+    env: {
+      ANALYSIS_PROVIDER: "mock",
+      EMBEDDING_PROVIDER: "mock",
+      TRANSCRIPTION_PROVIDER: "mock",
+    },
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     // The readiness probe doubles as a warm-up: pointing it at /sign-up makes

@@ -206,6 +206,60 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   expect(transcriptJson.version).toBe(1);
   expect(transcriptJson.words.length).toBeGreaterThan(10);
 
+  // Indexing is a follow-on job after transcription (mock embedding
+  // provider, set by playwright.config.ts): chunks with embeddings land in
+  // transcript_chunk and the lifecycle row reaches ready. DB-asserted —
+  // the index has no UI surface until the search panel.
+  await expect
+    .poll(
+      async () => {
+        const [indexRow] = await queryRows<{ status: string }>(
+          "SELECT status FROM source_index WHERE source_id = $1",
+          [sourceId]
+        );
+        return indexRow?.status ?? "missing";
+      },
+      { message: "source_index should reach ready", timeout: 30_000 }
+    )
+    .toBe("ready");
+
+  const [indexRow] = await queryRows<{
+    chunk_count: string;
+    embedding_model: string;
+    revision: string;
+  }>(
+    "SELECT chunk_count, embedding_model, revision FROM source_index WHERE source_id = $1",
+    [sourceId]
+  );
+  expect(Number(indexRow.revision)).toBe(1);
+  expect(Number(indexRow.chunk_count)).toBeGreaterThan(0);
+
+  const chunkRows = await queryRows<{
+    end_ms: string;
+    revision: string;
+    start_ms: string;
+    token_count: string;
+  }>(
+    "SELECT start_ms, end_ms, revision, token_count FROM transcript_chunk WHERE source_id = $1 ORDER BY idx",
+    [sourceId]
+  );
+  expect(chunkRows.length).toBe(Number(indexRow.chunk_count));
+  for (const chunk of chunkRows) {
+    expect(Number(chunk.revision)).toBe(1);
+    expect(Number(chunk.end_ms)).toBeGreaterThan(Number(chunk.start_ms));
+    expect(Number(chunk.end_ms)).toBeLessThanOrEqual(FIXTURE_SECONDS * 1000);
+    expect(Number(chunk.token_count)).toBeGreaterThan(0);
+  }
+
+  // Embedding tokens are metered (cross-cutting rule 1)
+  const [embedLedger] = await queryRows<{ tokens: string }>(
+    `SELECT COALESCE(SUM(quantity), 0) AS tokens FROM usage_ledger
+      WHERE source_id = $1 AND entry_type = 'ai_tokens'
+        AND metadata->>'kind' = 'embedding'`,
+    [sourceId]
+  );
+  expect(Number(embedLedger.tokens)).toBeGreaterThan(0);
+
   // Every video rung publishes an I-frame-only companion playlist (scrub/
   // filmstrip decode, editor-study §5), referenced from the master via
   // EXT-X-I-FRAME-STREAM-INF. Fetched through /api/media like a real

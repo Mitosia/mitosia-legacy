@@ -2,7 +2,10 @@ name: mitosia-dev
 
 services:
   postgres:
-    image: postgres:18-alpine
+    # postgres:18 + the pgvector extension (S5 semantic search). Debian-based:
+    # switching from the old alpine image needs a fresh volume — a musl-
+    # initialized cluster under glibc risks silent collation corruption.
+    image: pgvector/pgvector:pg18
     restart: unless-stopped
     environment:
       POSTGRES_USER: mitosia
