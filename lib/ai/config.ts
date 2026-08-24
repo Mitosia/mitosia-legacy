@@ -57,8 +57,10 @@ export const TASK_ROUTES = {
   // staging source because thinking consumed the whole budget before any
   // JSON (staging 2026-08-24; the S4 editorial route learned the same
   // lesson). Budgets are allowances, not spend — only real tokens bill.
+  // Claims is the widest pass: the shared schema's 48-item bound × ~520
+  // tokens/item + thinking ≈ 30k worst case, so 32k cannot truncate.
   "source-extraction.claims": {
-    maxOutputTokens: 24_000,
+    maxOutputTokens: 32_000,
     tier: "sonnet",
   },
   // No effort: haiku rejects the parameter (see EFFORT_TIERS); haiku
