@@ -94,7 +94,8 @@ jobs:
       MIGRATE_DATABASE_URL: postgres://ci:ci@localhost:5432/ci
     services:
       postgres:
-        image: postgres:18
+        # postgres:18 + pgvector, matching docker-compose.yml (S5 semantic search)
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_DB: ci
           POSTGRES_PASSWORD: ci
@@ -220,7 +221,8 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:18
+        # postgres:18 + pgvector, matching docker-compose.yml (S5 semantic search)
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_DB: ci
           POSTGRES_PASSWORD: ci

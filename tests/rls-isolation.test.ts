@@ -14,7 +14,9 @@ import {
   sourceAnalysis,
   sourceArtifact,
   sourceChapter,
+  sourceIndex,
   transcript,
+  transcriptChunk,
   transcriptRevision,
   usageLedger,
 } from "../lib/db/schema";
@@ -164,6 +166,27 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
       startMs: 0,
       title: `${organizationId} chapter`,
     });
+    await tx.insert(sourceIndex).values({
+      organizationId,
+      revision: 1,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      sourceId: sourceRow!.id,
+      status: "ready",
+    });
+    await tx.insert(transcriptChunk).values({
+      embedding: new Array(1024).fill(0),
+      embeddingModel: "mock-embed-1",
+      endMs: 1000,
+      idx: 0,
+      organizationId,
+      revision: 1,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      sourceId: sourceRow!.id,
+      speakers: ["0"],
+      startMs: 0,
+      text: `${organizationId} chunk`,
+      tokenCount: 2,
+    });
     const [transcriptRow] = await tx
       .insert(transcript)
       .values({
@@ -223,6 +246,8 @@ const TENANT_TABLES = [
   { label: "source_artifact", table: sourceArtifact },
   { label: "transcript", table: transcript },
   { label: "transcript_revision", table: transcriptRevision },
+  { label: "source_index", table: sourceIndex },
+  { label: "transcript_chunk", table: transcriptChunk },
   { label: "context_snapshot", table: contextSnapshot },
   { label: "source_analysis", table: sourceAnalysis },
   { label: "source_chapter", table: sourceChapter },

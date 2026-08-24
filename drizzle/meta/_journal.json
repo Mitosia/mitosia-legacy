@@ -50,6 +50,13 @@
       "when": 1787483959429,
       "tag": "0006_s4-source-analysis",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787569643336,
+      "tag": "0007_s5-source-index",
+      "breakpoints": true
     }
   ]
 }

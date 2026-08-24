@@ -61,6 +61,20 @@ export const MODEL_PRICING_PER_MTOK: Record<
   "claude-sonnet-5": { input: 3, output: 15 },
 };
 
+// Embedding models bill on input tokens only. voyage-4 verified 2026-08-24
+// ($0.06/M, 200M free tokens per account — pre-alpha volume is free).
+export const EMBEDDING_PRICING_PER_MTOK: Record<string, number> = {
+  "voyage-4": 0.06,
+};
+
+export function estimateEmbeddingCostUsd(
+  modelId: string,
+  tokens: number
+): number | null {
+  const pricing = EMBEDDING_PRICING_PER_MTOK[modelId];
+  return pricing === undefined ? null : (tokens * pricing) / 1_000_000;
+}
+
 export function estimateCostUsd(
   modelId: string,
   inputTokens: number,

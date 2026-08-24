@@ -14,6 +14,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { isEmbeddingConfigured } from "@/lib/ai/embeddings/provider";
 import { isStalledAnalysis, scheduleAnalysisReap } from "@/lib/analysis/reaper";
 import {
   project,
@@ -21,12 +22,18 @@ import {
   sourceAnalysis,
   sourceArtifact,
   sourceChapter,
+  sourceIndex,
   transcript,
   transcriptRevision,
 } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { formatBytes, formatDuration } from "@/lib/format";
 import { ingestStepLabel, SOURCE_STATUS_LABELS } from "@/lib/ingest-labels";
+import { scheduleSourceIndexBackfill } from "@/lib/intelligence/index-enqueue";
+import {
+  isStalledSourceIndex,
+  scheduleSourceIndexReap,
+} from "@/lib/intelligence/index-reaper";
 import { requireOrg } from "@/lib/org";
 import {
   isStalledTranscription,
@@ -184,13 +191,15 @@ function jobSettled(row: { status: string } | null): boolean {
 
 function pageIsSettled(data: {
   analysis: { status: string } | null;
+  index: { status: string } | null;
   status: string;
   transcript: { status: string } | null;
 }): boolean {
   return (
     (data.status === "ready" || data.status === "failed") &&
     jobSettled(data.transcript) &&
-    jobSettled(data.analysis)
+    jobSettled(data.analysis) &&
+    jobSettled(data.index)
   );
 }
 
@@ -218,6 +227,50 @@ function workspaceAnalysis(data: {
     summary: data.analysis.summary,
     topics: (data.analysis.topics as string[] | null) ?? [],
   };
+}
+
+// Opportunistic maintenance from this page's own query results (the
+// reaper-scheduling pattern): stalled follow-on jobs get reaped, and a
+// ready transcript with no index row (a pre-S5 source) or an index built
+// from an older revision (a correction landed) gets re-enqueued.
+// pending/processing/failed index rows are left alone — failed means a
+// human should look, not a loop.
+function scheduleSourceMaintenance(
+  organizationId: string,
+  data: {
+    analysis: { stalled: boolean } | null;
+    currentRevision: { revision: number } | null;
+    id: string;
+    index: { revision: number | null; stalled: boolean; status: string } | null;
+    transcript: { stalled: boolean } | null;
+  }
+): void {
+  if (data.transcript?.stalled) {
+    scheduleTranscriptionReap(organizationId);
+  }
+  if (data.analysis?.stalled) {
+    scheduleAnalysisReap(organizationId);
+  }
+  if (data.index?.stalled) {
+    scheduleSourceIndexReap(organizationId);
+  }
+  if (
+    data.currentRevision &&
+    indexNeedsBackfill(data.index, data.currentRevision.revision) &&
+    isEmbeddingConfigured()
+  ) {
+    scheduleSourceIndexBackfill({ organizationId, sourceId: data.id });
+  }
+}
+
+function indexNeedsBackfill(
+  index: { revision: number | null; status: string } | null,
+  currentRevision: number
+): boolean {
+  if (index === null) {
+    return true;
+  }
+  return index.status === "ready" && (index.revision ?? 0) < currentRevision;
 }
 
 export default async function SourceDetailPage(
@@ -292,6 +345,16 @@ export default async function SourceDetailPage(
       .where(eq(sourceAnalysis.sourceId, sourceRow.id))
       .limit(1);
 
+    const [indexRow] = await tx
+      .select({
+        revision: sourceIndex.revision,
+        stalled: sql<boolean>`(${isStalledSourceIndex})`,
+        status: sourceIndex.status,
+      })
+      .from(sourceIndex)
+      .where(eq(sourceIndex.sourceId, sourceRow.id))
+      .limit(1);
+
     const chapters =
       analysisRow?.status === "ready"
         ? await tx
@@ -327,6 +390,7 @@ export default async function SourceDetailPage(
       artifacts,
       chapters,
       currentRevision,
+      index: indexRow ?? null,
       transcript: transcriptRow ?? null,
     };
   });
@@ -348,12 +412,7 @@ export default async function SourceDetailPage(
   // transcription unconfigured) counts as settled — absence is final.
   const isSettled = pageIsSettled(data);
 
-  if (data.transcript?.stalled) {
-    scheduleTranscriptionReap(organizationId);
-  }
-  if (data.analysis?.stalled) {
-    scheduleAnalysisReap(organizationId);
-  }
+  scheduleSourceMaintenance(organizationId, data);
 
   return (
     <div className="flex flex-col gap-6">
