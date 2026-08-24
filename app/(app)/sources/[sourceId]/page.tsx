@@ -44,6 +44,7 @@ import {
   isStalledSourceIndex,
   scheduleSourceIndexReap,
 } from "@/lib/intelligence/index-reaper";
+import { listRecentQuestions } from "@/lib/intelligence/qa";
 import { requireOrg } from "@/lib/org";
 import {
   isStalledTranscription,
@@ -216,6 +217,7 @@ function pageIsSettled(data: {
 }
 
 function workspaceHighlights(data: {
+  analysis: { status: string } | null;
   currentRevision: { revision: number } | null;
   extractionRun: {
     error: string | null;
@@ -225,7 +227,15 @@ function workspaceHighlights(data: {
   extractions: HighlightExtraction[];
 }): { extractions: HighlightExtraction[]; run: HighlightsRun } | null {
   if (!data.extractionRun) {
-    return null;
+    // Pre-S5 sources: analysis exists but the automatic extraction chain
+    // never fired for them. Surface the panel in its "missing" state so
+    // the first run is one click, not a console session.
+    return data.analysis?.status === "ready"
+      ? {
+          extractions: [],
+          run: { error: null, stale: false, status: "missing" },
+        }
+      : null;
   }
   return {
     extractions: data.extractions,
@@ -479,6 +489,12 @@ export default async function SourceDetailPage(
     notFound();
   }
 
+  // Ask/search ride the retrieval index; history is small and recent.
+  const qaHistory =
+    data.index?.status === "ready"
+      ? await listRecentQuestions(organizationId, data.id, 8)
+      : null;
+
   const artifactKey = (kind: string) =>
     data.artifacts.find((artifact) => artifact.kind === kind)?.storageKey ??
     null;
@@ -530,6 +546,7 @@ export default async function SourceDetailPage(
           hlsUrl={`/api/media/${hlsKey}`}
           peaksUrl={waveformKey ? `/api/media/${waveformKey}` : null}
           posterUrl={posterKey ? `/api/media/${posterKey}` : null}
+          qa={qaHistory === null ? null : { history: qaHistory }}
           sourceId={data.id}
           transcript={workspaceTranscript(data)}
         />

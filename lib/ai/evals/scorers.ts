@@ -160,3 +160,49 @@ export function scoreExtractions(
   }
   return { issues, score };
 }
+
+// Q&A golden score (S5): per fixture question, full credit when the
+// answerability verdict matches AND (for answerable ones) some verified
+// citation overlaps the gold range; the verdict alone earns half. Both
+// halves of the exit test — honest misses and playable evidence — are in
+// the same number.
+export interface QaOutcome {
+  citations: { endMs: number; startMs: number }[];
+  expectedAnswerable: boolean;
+  goldEndMs?: number;
+  goldStartMs?: number;
+  gotAnswerable: boolean;
+  question: string;
+}
+
+export function scoreQa(outcomes: readonly QaOutcome[]): ScoreReport {
+  if (outcomes.length === 0) {
+    return { issues: ["no golden questions"], score: 0 };
+  }
+  const issues: string[] = [];
+  let total = 0;
+  for (const outcome of outcomes) {
+    if (outcome.gotAnswerable !== outcome.expectedAnswerable) {
+      issues.push(
+        `"${outcome.question}": expected answerable=${outcome.expectedAnswerable}`
+      );
+      continue;
+    }
+    if (!outcome.expectedAnswerable) {
+      total += 1;
+      continue;
+    }
+    const hits = outcome.citations.some(
+      (citation) =>
+        citation.startMs < (outcome.goldEndMs ?? 0) &&
+        citation.endMs > (outcome.goldStartMs ?? 0)
+    );
+    if (hits) {
+      total += 1;
+    } else {
+      total += 0.5;
+      issues.push(`"${outcome.question}": no citation overlaps the gold range`);
+    }
+  }
+  return { issues, score: total / outcomes.length };
+}

@@ -62,6 +62,12 @@ export const TASK_ROUTES = {
     maxOutputTokens: 8000,
     tier: "sonnet",
   },
+  // Interactive source Q&A over retrieved chunks: a small prompt, but the
+  // answer is user-facing prose with citations — sonnet quality.
+  "source-qa.answer": {
+    maxOutputTokens: 4000,
+    tier: "sonnet",
+  },
 } as const;
 export type AiTask = keyof typeof TASK_ROUTES;
 

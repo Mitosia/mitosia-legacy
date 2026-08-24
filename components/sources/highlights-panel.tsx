@@ -93,7 +93,13 @@ function secondaryLine(extraction: HighlightExtraction): string | null {
   return null;
 }
 
-export function RerunExtractionButton({ sourceId }: { sourceId: string }) {
+export function RerunExtractionButton({
+  label = "Run extraction again",
+  sourceId,
+}: {
+  label?: string;
+  sourceId: string;
+}) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState(
     rerunExtractionAction,
@@ -114,7 +120,7 @@ export function RerunExtractionButton({ sourceId }: { sourceId: string }) {
         type="submit"
         variant="outline"
       >
-        {pending ? "Starting…" : "Run extraction again"}
+        {pending ? "Starting…" : label}
       </Button>
       {state.error ? (
         <p className="text-destructive text-sm">{state.error}</p>
@@ -172,6 +178,23 @@ export function HighlightsPanel({
         : "all"
     );
   }, []);
+
+  if (run.status === "missing") {
+    return (
+      <Card data-testid="highlights-panel">
+        <CardHeader>
+          <CardTitle>Highlights</CardTitle>
+          <CardDescription>
+            Extract quotes, stories, claims, and Q&A from this recording — each
+            grounded to its exact moment.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <RerunExtractionButton label="Find highlights" sourceId={sourceId} />
+        </CardContent>
+      </Card>
+    );
+  }
 
   if (run.status === "pending" || run.status === "processing") {
     return (

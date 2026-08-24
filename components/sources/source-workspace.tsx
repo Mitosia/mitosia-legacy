@@ -2,6 +2,8 @@
 
 import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import type { QuestionHistoryItem } from "@/lib/intelligence/qa";
+import { AskPanel } from "./ask-panel";
 import {
   type HighlightExtraction,
   HighlightsPanel,
@@ -29,6 +31,8 @@ interface SourceWorkspaceProps {
   hlsUrl: string;
   peaksUrl: string | null;
   posterUrl: string | null;
+  // Non-null once the retrieval index is ready — gates the Ask panel
+  qa: { history: QuestionHistoryItem[] } | null;
   sourceId: string;
   transcript: {
     revision: number;
@@ -43,6 +47,7 @@ export function SourceWorkspace({
   hlsUrl,
   peaksUrl,
   posterUrl,
+  qa,
   sourceId,
   transcript,
 }: SourceWorkspaceProps) {
@@ -65,6 +70,9 @@ export function SourceWorkspace({
           speakerLabels={transcript?.speakerLabels ?? null}
           video={video}
         />
+      ) : null}
+      {qa ? (
+        <AskPanel history={qa.history} sourceId={sourceId} video={video} />
       ) : null}
       {analysis && transcript ? (
         <SpeakerSuggestionBanner
