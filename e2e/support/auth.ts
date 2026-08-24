@@ -23,11 +23,14 @@ export async function createAccountWithOrg(page: Page, label: string) {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Create account" }).click();
 
-  await page.waitForURL(ONBOARDING_URL, { timeout: 15_000 });
+  // 30s, not 15: on CI's 2-vCPU runner these first navigations absorb cold
+  // route compiles plus whatever the other worker is transcoding at the
+  // time. 15s flaked under parallel workers (PR #62's first run).
+  await page.waitForURL(ONBOARDING_URL, { timeout: 30_000 });
 
   await page.getByLabel("Organization name").fill(`Org ${unique}`);
   await page.getByRole("button", { name: "Create organization" }).click();
-  await page.waitForURL(DASHBOARD_URL, { timeout: 15_000 });
+  await page.waitForURL(DASHBOARD_URL, { timeout: 30_000 });
 
   await expect(page).toHaveURL(DASHBOARD_URL);
   return { email, org: `Org ${unique}` };

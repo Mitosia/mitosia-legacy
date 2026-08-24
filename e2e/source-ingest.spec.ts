@@ -19,7 +19,9 @@ const FIXTURE = join(FIXTURE_DIR, "tiny-source.mp4");
 const FIXTURE_SECONDS = 4;
 
 const PIPELINE_TIMEOUT_MS = 90_000;
-const UPLOAD_TIMEOUT_MS = 30_000;
+// 60s like the upload specs: with a parallel worker mid-transcode, even a
+// tiny multipart upload can queue behind saturated CPUs (PR #62).
+const UPLOAD_TIMEOUT_MS = 60_000;
 const UPLOAD_BUTTON = /Upload 1 file/;
 const SETTINGS_BUTTON = /settings/i;
 const UPLOAD_COMPLETE = /Complete/;
@@ -102,9 +104,10 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   // RefreshPoller re-render (server components swap the list mid-click),
   // so wait for the URL rather than trusting a single click's navigation.
   // Generous budget: on cold CI runners the source route compiles on first
-  // hit, and the click can already race a RefreshPoller re-render.
+  // hit, the click can race a RefreshPoller re-render, and a parallel
+  // worker may be mid-transcode.
   await page.getByRole("link", { name: "tiny-source" }).click();
-  await page.waitForURL(SOURCE_PAGE_URL, { timeout: 30_000 });
+  await page.waitForURL(SOURCE_PAGE_URL, { timeout: 60_000 });
   await expect(page.getByRole("heading", { name: "tiny-source" })).toBeVisible({
     timeout: 15_000,
   });

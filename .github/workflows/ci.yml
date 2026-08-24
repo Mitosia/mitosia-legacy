@@ -143,7 +143,7 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
-    # Measured at ~4 minutes (3 parallel workers). A run with no ceiling sat
+    # Measured at ~4 minutes (2 parallel workers). A run with no ceiling sat
     # on a stalled Playwright download for 3.5 hours before anyone noticed,
     # holding up a merge the whole time; GitHub's own default is 6 hours,
     # which is not a ceiling in any useful sense.
