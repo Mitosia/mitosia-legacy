@@ -205,7 +205,13 @@ jobs:
         run: pnpm e2e:prod
 
   e2e:
-    runs-on: ubuntu-latest
+    # Larger-runner switch: set the E2E_RUNNER repository VARIABLE to a
+    # GitHub-hosted larger-runner label and this job moves to it; Playwright
+    # workers scale with the vCPUs on their own (playwright.config.ts).
+    # Runbook, billing gotchas and rollback: docs/ci-larger-runner.md.
+    # Symptom of a wrong or inaccessible label: the job sits at "Waiting for
+    # a runner" forever — unset the variable to fall straight back.
+    runs-on: ${{ vars.E2E_RUNNER || 'ubuntu-latest' }}
     needs: changes
     # `!= 'false'`, not `== 'true'`: if the classifier fails, its output is
     # empty and this must still run (fail-open — see the changes job). The

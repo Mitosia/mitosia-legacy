@@ -2,6 +2,7 @@
 // own process; only the dev server would otherwise get them. Existing
 // environment variables win, so CI's job env is unaffected.
 import "dotenv/config";
+import os from "node:os";
 import { defineConfig, devices } from "@playwright/test";
 
 // E2E runs against the dev server on 3001 — the origin BETTER_AUTH_URL is
@@ -17,14 +18,14 @@ const BASE_URL = `http://localhost:${PORT}`;
 export default defineConfig({
   forbidOnly: !!process.env.CI,
   // Parallelism is per spec FILE (fullyParallel stays false), so each file's
-  // beforeAll fixture generation runs once, in one worker. CI runs 2 workers:
-  // every test provisions its own account + organization, so RLS org-scoping
-  // keeps concurrent writers invisible to each other, storage keys are
-  // org-prefixed, and Better Auth's rate limiter is off in dev mode. Two, not
-  // more — the standard GitHub runner has 2 vCPUs, and 3 workers piling
-  // ingest pipelines on it blew serial-tuned timeouts (PR #62's first run).
-  // Local runs stay serial — the shared dev DB also holds the developer's
-  // own data.
+  // beforeAll fixture generation runs once, in one worker. CI worker count
+  // scales with the runner (see `workers` below): every test provisions its
+  // own account + organization, so RLS org-scoping keeps concurrent writers
+  // invisible to each other, storage keys are org-prefixed, and Better
+  // Auth's rate limiter is off in dev mode. Never exceed the hardware — 3
+  // workers on the standard 2-vCPU runner piled ingest pipelines high
+  // enough to blow serial-tuned timeouts (PR #62's first run). Local runs
+  // stay serial — the shared dev DB also holds the developer's own data.
   fullyParallel: false,
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   // `github` annotates PR failures; `list` prints per-test durations so the
@@ -52,5 +53,12 @@ export default defineConfig({
     // launch, instead of all of them stampeding a cold compile at once.
     url: `${BASE_URL}/sign-up`,
   },
-  workers: process.env.CI ? 2 : 1,
+  // One less than the vCPU count — headroom for the dev server, MinIO and
+  // the in-process ffmpeg pipelines the tests trigger — floored at 2 (the
+  // standard 2-vCPU runner) and capped at 4 (11 tests in 8 files saturate
+  // there). Adapts on its own when the E2E_RUNNER variable moves CI to a
+  // larger runner (docs/ci-larger-runner.md).
+  workers: process.env.CI
+    ? Math.min(4, Math.max(2, os.availableParallelism() - 1))
+    : 1,
 });
