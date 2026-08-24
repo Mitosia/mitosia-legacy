@@ -46,7 +46,7 @@
     "@opentelemetry/sdk-trace-node": "^2.10.0",
     "@remotion/captions": "^4.0.515",
     "@tanstack/react-virtual": "^3.14.10",
-    "@trigger.dev/sdk": "^4.5.10",
+    "@trigger.dev/sdk": "^4.5.12",
     "@uppy/aws-s3": "^5.1.0",
     "@uppy/core": "^5.2.0",
     "@uppy/dashboard": "^5.1.1",
@@ -74,7 +74,7 @@
     "@opentelemetry/sdk-trace-base": "^2.10.0",
     "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
-    "@trigger.dev/build": "^4.5.10",
+    "@trigger.dev/build": "^4.5.12",
     "@types/node": "^25.9.5",
     "@types/pg": "^8.20.4",
     "@types/react": "^19",
@@ -90,7 +90,10 @@
   "packageManager": "pnpm@10.34.5",
   "pnpm": {
     "overrides": {
-      "esbuild@<0.25.0": ">=0.25.0"
+      "@opentelemetry/core@<2.8.0": "2.8.0",
+      "deepmerge-ts@<8.0.0": "8.0.0",
+      "esbuild@<0.25.0": ">=0.25.0",
+      "ws@>=8.0.0 <8.21.0": "~8.21.3"
     }
   }
 }
