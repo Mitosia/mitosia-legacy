@@ -217,6 +217,7 @@ function pageIsSettled(data: {
 }
 
 function workspaceHighlights(data: {
+  analysis: { status: string } | null;
   currentRevision: { revision: number } | null;
   extractionRun: {
     error: string | null;
@@ -226,7 +227,15 @@ function workspaceHighlights(data: {
   extractions: HighlightExtraction[];
 }): { extractions: HighlightExtraction[]; run: HighlightsRun } | null {
   if (!data.extractionRun) {
-    return null;
+    // Pre-S5 sources: analysis exists but the automatic extraction chain
+    // never fired for them. Surface the panel in its "missing" state so
+    // the first run is one click, not a console session.
+    return data.analysis?.status === "ready"
+      ? {
+          extractions: [],
+          run: { error: null, stale: false, status: "missing" },
+        }
+      : null;
   }
   return {
     extractions: data.extractions,

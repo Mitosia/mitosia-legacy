@@ -21,6 +21,7 @@ const PIPELINE_TIMEOUT_MS = 90_000;
 const UPLOAD_BUTTON = /Upload 1 file/;
 const UPLOAD_COMPLETE = /Complete/;
 const SOURCE_PAGE_URL = /\/sources\//;
+const FIND_HIGHLIGHTS = /Find highlights/;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -218,6 +219,24 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     [sourceId]
   );
   expect(Number(qaLedger.entries)).toBeGreaterThanOrEqual(3);
+
+  // Pre-S5 backfill affordance: a source with a ready analysis but no
+  // extraction run (the automatic chain only fires on fresh analyses)
+  // shows a one-click "Find highlights" CTA that creates the first run.
+  await queryRows("DELETE FROM source_extraction WHERE source_id = $1", [
+    sourceId,
+  ]);
+  await queryRows("DELETE FROM source_extraction_run WHERE source_id = $1", [
+    sourceId,
+  ]);
+  await page.reload();
+  const findButton = page.getByTestId("rerun-extraction");
+  await expect(findButton).toBeVisible({ timeout: 15_000 });
+  await expect(findButton).toHaveText(FIND_HIGHLIGHTS);
+  await findButton.click();
+  await expect(page.getByTestId("highlight-item").first()).toBeVisible({
+    timeout: 60_000,
+  });
 
   expect(errors, errors.join("\n")).toEqual([]);
 });

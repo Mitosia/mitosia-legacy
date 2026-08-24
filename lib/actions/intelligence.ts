@@ -38,18 +38,18 @@ export async function rerunExtractionAction(
       .limit(1);
     return row ?? null;
   });
-  if (!run) {
-    return { error: "This source has no extraction to re-run." };
-  }
-  if (run.status === "processing" || run.status === "pending") {
+  // A missing row is legitimate: pre-S5 sources never had the automatic
+  // chain fire (it only runs from a fresh analysis), and this button is
+  // exactly how they get their first run.
+  if (run && (run.status === "processing" || run.status === "pending")) {
     return { error: "Extraction is already running." };
   }
 
   await withOrgScope(organizationId, (tx) =>
     recordAudit(tx, {
-      action: "source_extraction.rerun",
+      action: run ? "source_extraction.rerun" : "source_extraction.started",
       actorUserId: userId,
-      entityId: run.id,
+      entityId: run?.id,
       entityType: "source_extraction_run",
       organizationId,
     })
