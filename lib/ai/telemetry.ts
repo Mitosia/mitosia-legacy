@@ -24,39 +24,68 @@ export async function initAiTelemetry(): Promise<void> {
     return;
   }
   initialized = true;
+
+  // Bundlers (Trigger's worker build included) wrap some of these packages
+  // in ESM/CJS interop where named exports land under `default` — a plain
+  // destructure then throws "X is not a constructor" (observed in the
+  // deployed worker, run logs 2026-08-24). Resolve both shapes.
+  const named = async <T>(specifier: () => Promise<object>, name: string) => {
+    const mod = (await specifier()) as Record<string, T> & {
+      default?: Record<string, T>;
+    };
+    const value = mod[name] ?? mod.default?.[name];
+    if (!value) {
+      throw new Error(`${name} not found in module exports`);
+    }
+    return value;
+  };
+
+  // Phase 1 — the AI SDK integration (registered FIRST and independently:
+  // it is what creates generation spans, and it stores on globalThis, so
+  // it must survive even if provider setup fails).
   try {
-    const [
-      { LangfuseSpanProcessor },
-      { NodeTracerProvider },
-      { registerTelemetry },
-      { LangfuseVercelAiSdkIntegration },
-    ] = await Promise.all([
-      import("@langfuse/otel"),
-      import("@opentelemetry/sdk-trace-node"),
-      import("ai"),
-      import("@langfuse/vercel-ai-sdk"),
-    ]);
+    const registerTelemetry = await named<(...integrations: unknown[]) => void>(
+      () => import("ai"),
+      "registerTelemetry"
+    );
+    const LangfuseVercelAiSdkIntegration = await named<new () => unknown>(
+      () => import("@langfuse/vercel-ai-sdk"),
+      "LangfuseVercelAiSdkIntegration"
+    );
+    registerTelemetry(new LangfuseVercelAiSdkIntegration());
+  } catch (error) {
+    console.error("[ai] telemetry integration registration failed:", error);
+  }
+
+  // Phase 2 — the span pipeline. The global OTel provider is unclaimed in
+  // BOTH runtimes (Trigger keeps its own provider private — verified:
+  // global is ProxyTracerProvider in workers), so this registration wins
+  // everywhere and the processor ships spans straight to Langfuse.
+  try {
+    const LangfuseSpanProcessor = await named<
+      new (
+        options: Record<string, unknown>
+      ) => {
+        forceFlush: () => Promise<void>;
+      }
+    >(() => import("@langfuse/otel"), "LangfuseSpanProcessor");
+    const NodeTracerProvider = await named<
+      new (
+        options: Record<string, unknown>
+      ) => { register: () => void }
+    >(() => import("@opentelemetry/sdk-trace-node"), "NodeTracerProvider");
     const processor = new LangfuseSpanProcessor({
       baseUrl: process.env.LANGFUSE_BASE_URL,
       publicKey: process.env.LANGFUSE_PUBLIC_KEY,
       secretKey: process.env.LANGFUSE_SECRET_KEY,
     });
     const provider = new NodeTracerProvider({ spanProcessors: [processor] });
-    // In the Next runtime this becomes the global provider. In Trigger
-    // workers the register() silently LOSES to Trigger's own provider —
-    // there, spans reach Langfuse via the OTLP exporter in
-    // trigger.config.ts telemetry.exporters instead.
     provider.register();
-    // AI SDK v7 emits NO spans by itself: telemetry is a register-once
-    // integration receiving lifecycle events. This is what actually
-    // creates the generation spans (model, tokens, i/o) on whichever
-    // provider is global.
-    registerTelemetry(new LangfuseVercelAiSdkIntegration());
     flush = () => processor.forceFlush();
   } catch (error) {
     // Tracing is diagnostic infrastructure; a failed init must never take
     // the app or a worker down with it.
-    console.error("[ai] telemetry init failed:", error);
+    console.error("[ai] telemetry span pipeline init failed:", error);
   }
 }
 

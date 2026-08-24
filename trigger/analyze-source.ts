@@ -1,5 +1,5 @@
 import { task } from "@trigger.dev/sdk";
-import { initAiTelemetry } from "@/lib/ai/telemetry";
+import { flushTelemetry, initAiTelemetry } from "@/lib/ai/telemetry";
 import { type AnalysisPayload, runAnalysis } from "@/lib/analysis/pipeline";
 import { tuneOutboundConnections } from "@/lib/net-tuning";
 
@@ -25,6 +25,12 @@ export const analyzeSourceTask = task({
     await initAiTelemetry();
   },
   run: async (payload: AnalysisPayload) => {
-    await runAnalysis(payload);
+    try {
+      await runAnalysis(payload);
+    } finally {
+      // The span processor batches; a worker that finishes and idles could
+      // otherwise drop the tail of the trace.
+      await flushTelemetry();
+    }
   },
 });
