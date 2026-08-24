@@ -17,6 +17,7 @@ import {
   sourceExtraction,
   sourceExtractionRun,
   sourceIndex,
+  sourceQuestion,
   transcript,
   transcriptChunk,
   transcriptRevision,
@@ -194,6 +195,16 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
       startMs: 0,
       text: `${organizationId} extraction`,
     });
+    await tx.insert(sourceQuestion).values({
+      answer: "seed answer",
+      answerable: true,
+      citations: [],
+      organizationId,
+      question: `${organizationId} question`,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      sourceId: sourceRow!.id,
+      status: "ready",
+    });
     await tx.insert(sourceIndex).values({
       organizationId,
       revision: 1,
@@ -278,6 +289,7 @@ const TENANT_TABLES = [
   { label: "transcript_chunk", table: transcriptChunk },
   { label: "source_extraction_run", table: sourceExtractionRun },
   { label: "source_extraction", table: sourceExtraction },
+  { label: "source_question", table: sourceQuestion },
   { label: "context_snapshot", table: contextSnapshot },
   { label: "source_analysis", table: sourceAnalysis },
   { label: "source_chapter", table: sourceChapter },

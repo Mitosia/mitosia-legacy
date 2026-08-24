@@ -360,5 +360,23 @@
         "text": "interview."
       }
     ]
-  }
+  },
+  "questions": [
+    {
+      "answerable": true,
+      "goldEndMs": 48600,
+      "goldStartMs": 38200,
+      "question": "Who runs growth at Lumen Robotics?"
+    },
+    {
+      "answerable": true,
+      "goldEndMs": 89200,
+      "goldStartMs": 68000,
+      "question": "What did they rebuild everything around to grow organic reach?"
+    },
+    {
+      "answerable": false,
+      "question": "What subscription price does Lumen Robotics charge?"
+    }
+  ]
 }

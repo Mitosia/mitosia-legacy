@@ -149,5 +149,75 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     { timeout: 10_000 }
   );
 
+  // ---- Ask & search (retrieval index + mock QA) ----
+  const askPanel = page.getByTestId("ask-panel");
+  await expect(askPanel).toBeVisible({ timeout: 60_000 });
+
+  // Search mode: a meaning-level query lands the right chunk and seeks.
+  await page.getByTestId("mode-search").click();
+  await page
+    .getByTestId("search-input")
+    .fill("carries timestamps and confidence");
+  await page.getByTestId("search-submit").click();
+  const firstResult = page.getByTestId("search-result").first();
+  await expect(firstResult).toBeVisible({ timeout: 20_000 });
+  await firstResult.click();
+
+  // Ask mode: an answerable question returns an answer with a citation
+  // chip whose click seeks (and tries to play) the cited span.
+  await page.getByTestId("mode-ask").click();
+  await page
+    .getByTestId("ask-input")
+    .fill("What does every word carry — timestamps or confidence?");
+  await page.getByTestId("ask-submit").click();
+  await expect(page.getByTestId("qa-answer")).toBeVisible({ timeout: 30_000 });
+  const citation = page.getByTestId("qa-citation").first();
+  await expect(citation).toBeVisible();
+  const citationStartMs = Number(await citation.getAttribute("data-start-ms"));
+  await citation.click();
+  await page.waitForFunction(
+    (expected) => {
+      const video = document.querySelector("video");
+      // The player was parked >2s deep by the highlight click above, so
+      // landing near the citation start is a real, observable seek.
+      return Boolean(video && Math.abs(video.currentTime - expected) < 1);
+    },
+    citationStartMs / 1000,
+    { timeout: 10_000 }
+  );
+
+  // Honesty: a question the recording does not cover renders an explicit
+  // miss, never an empty answer.
+  await page
+    .getByTestId("ask-input")
+    .fill("What subscription price does the purple elephant charge?");
+  await page.getByTestId("ask-submit").click();
+  await expect(page.getByTestId("qa-no-answer")).toBeVisible({
+    timeout: 30_000,
+  });
+
+  // Both questions persisted with their verdicts; the query embeddings and
+  // searches are on the ledger.
+  const questionRows = await queryRows<{
+    answerable: boolean | null;
+    status: string;
+  }>("SELECT answerable, status FROM source_question WHERE source_id = $1", [
+    sourceId,
+  ]);
+  expect(questionRows).toHaveLength(2);
+  expect(questionRows.every((question) => question.status === "ready")).toBe(
+    true
+  );
+  expect(new Set(questionRows.map((question) => question.answerable))).toEqual(
+    new Set([false, true])
+  );
+  const [qaLedger] = await queryRows<{ entries: string }>(
+    `SELECT COUNT(*) AS entries FROM usage_ledger
+      WHERE source_id = $1 AND entry_type = 'ai_tokens'
+        AND (correlation_id LIKE 'qa:%' OR correlation_id LIKE 'search:%')`,
+    [sourceId]
+  );
+  expect(Number(qaLedger.entries)).toBeGreaterThanOrEqual(3);
+
   expect(errors, errors.join("\n")).toEqual([]);
 });

@@ -5,14 +5,20 @@ import {
   transcriptToPromptText,
 } from "@/lib/ai/capabilities/source-analysis";
 import { runSourceExtraction } from "@/lib/ai/capabilities/source-extraction";
+import { runSourceQa, verifyCitations } from "@/lib/ai/capabilities/source-qa";
 import type { SourceContextPack } from "@/lib/ai/context";
+import { createMockEmbeddingProvider } from "@/lib/ai/embeddings/mock";
+import { getEmbeddingProvider } from "@/lib/ai/embeddings/provider";
 import { judgeSummary } from "@/lib/ai/evals/judge";
 import {
+  type QaOutcome,
   scoreChapters,
   scoreExtractions,
+  scoreQa,
   scoreSpeakerSuggestions,
   scoreSummary,
 } from "@/lib/ai/evals/scorers";
+import { buildChunks } from "@/lib/intelligence/chunks";
 import { groundExtractions } from "@/lib/intelligence/grounding";
 import type { TranscriptData } from "@/lib/transcription/types";
 
@@ -28,22 +34,103 @@ import type { TranscriptData } from "@/lib/transcription/types";
 // once the Langfuse account exists — the runner's report shape is already
 // per-item scores over named fixtures.
 
-const THRESHOLDS = {
+const THRESHOLDS: Record<string, number> = {
   chapters: 0.7,
   // Grounding rate over the model's claimed-verbatim spans — the S5
   // provenance bar. Below 0.8 the extraction prompt is regressing on the
   // one property the product depends on.
   extraction: 0.8,
+  // Answerability verdicts + citation-overlap on the golden questions.
+  qa: 0.7,
   speakers: 0.6,
   summary: 0.4,
-} as const;
+};
 const JUDGE_THRESHOLD = 0.7;
 
 interface Fixture {
   durationMs: number;
   name: string;
   pack: SourceContextPack;
+  questions?: {
+    answerable: boolean;
+    goldEndMs?: number;
+    goldStartMs?: number;
+    question: string;
+  }[];
   transcript: TranscriptData;
+}
+
+// In-memory retrieval for the Q&A goldens — the runner has no database, so
+// chunking + embedding + cosine run right here, with the same chunker the
+// index pipeline uses. Falls back to the mock embedder when no key is set
+// (still a real test of retrieval + verification plumbing).
+function cosine(a: number[], b: number[]): number {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+  for (const [i, value] of a.entries()) {
+    dot += value * (b[i] ?? 0);
+    normA += value * value;
+    normB += (b[i] ?? 0) * (b[i] ?? 0);
+  }
+  const denominator = Math.sqrt(normA) * Math.sqrt(normB);
+  return denominator === 0 ? 0 : dot / denominator;
+}
+
+const QA_RETRIEVAL_LIMIT = 5;
+
+async function evaluateQuestions(fixture: Fixture): Promise<QaOutcome[]> {
+  const questions = fixture.questions ?? [];
+  if (questions.length === 0) {
+    return [];
+  }
+  const provider = getEmbeddingProvider() ?? createMockEmbeddingProvider();
+  const chunks = buildChunks(fixture.transcript);
+  const documentVectors = await provider.embed(
+    chunks.map((chunk) => chunk.text),
+    "document"
+  );
+
+  const outcomes: QaOutcome[] = [];
+  for (const golden of questions) {
+    // biome-ignore lint/performance/noAwaitInLoops: sequential keeps rate limits calm
+    const queryVectors = await provider.embed([golden.question], "query");
+    const [queryVector] = queryVectors.vectors;
+    const ranked = chunks
+      .map((chunk, index) => ({
+        chunk,
+        score: queryVector
+          ? cosine(queryVector, documentVectors.vectors[index] ?? [])
+          : 0,
+      }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, QA_RETRIEVAL_LIMIT)
+      .map(({ chunk }) => ({
+        endMs: chunk.endMs,
+        idx: chunk.idx,
+        startMs: chunk.startMs,
+        text: chunk.text,
+      }));
+
+    const result = await runSourceQa({
+      chapters: [],
+      chunks: ranked,
+      question: golden.question,
+      summary: null,
+      title: fixture.pack.source.title,
+    });
+    outcomes.push({
+      citations: result.output.answerable
+        ? verifyCitations(result.output.citations, ranked)
+        : [],
+      expectedAnswerable: golden.answerable,
+      goldEndMs: golden.goldEndMs,
+      goldStartMs: golden.goldStartMs,
+      gotAnswerable: result.output.answerable,
+      question: golden.question,
+    });
+  }
+  return outcomes;
 }
 
 function printScore(
@@ -92,12 +179,17 @@ async function evaluateFixture(
     fixture.durationMs
   );
 
-  const scores = {
+  const qaOutcomes = await evaluateQuestions(fixture);
+
+  const scores: Record<string, ReturnType<typeof scoreSummary>> = {
     chapters: scoreChapters(result.chapters, fixture.durationMs),
     extraction: scoreExtractions(groundedRows, fixture.durationMs),
     speakers: scoreSpeakerSuggestions(result.editorial.speakers, speakerIds),
     summary: scoreSummary(result.editorial.summary),
   };
+  if (qaOutcomes.length > 0) {
+    scores.qa = scoreQa(qaOutcomes);
+  }
 
   console.log(`── ${fixture.name}`);
   let failed = 0;

@@ -13,7 +13,7 @@ import {
   vector,
 } from "drizzle-orm/pg-core";
 import { contextSnapshot } from "./analysis";
-import { organization } from "./auth";
+import { organization, user } from "./auth";
 import { source } from "./media";
 
 // S5 source-intelligence tables (retrieval half). Tenant-owned:
@@ -224,6 +224,52 @@ export const sourceExtractionRelations = relations(
     }),
   })
 );
+
+// ---- Source Q&A (S5) -----------------------------------------------------
+//
+// One row per question asked of a source: the answer, its verified
+// citations, and usage — history UX, the ledger correlation, and a growing
+// pool of real eval cases. Citations are [{startMs, endMs, quote}] and are
+// deterministically clamped to retrieved-chunk ranges before persisting —
+// the model cannot cite what retrieval didn't show it.
+
+export const sourceQuestion = pgTable(
+  "source_question",
+  {
+    answer: text("answer"),
+    // false = the model said the source doesn't cover it (an honest miss,
+    // rendered as such — never an empty answer)
+    answerable: boolean("answerable"),
+    citations: jsonb("citations"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    createdBy: text("created_by").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    error: text("error"),
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    // {model, provider, inputTokens, outputTokens, embedTokens, costUsd}
+    metadata: jsonb("metadata"),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    question: text("question").notNull(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => source.id, { onDelete: "cascade" }),
+    status: text("status", { enum: ["ready", "failed"] }).notNull(),
+  },
+  (table) => [
+    index("source_question_org_idx").on(table.organizationId),
+    index("source_question_source_idx").on(table.sourceId, table.createdAt),
+  ]
+);
+
+export const sourceQuestionRelations = relations(sourceQuestion, ({ one }) => ({
+  source: one(source, {
+    fields: [sourceQuestion.sourceId],
+    references: [source.id],
+  }),
+}));
 
 export const sourceIndexRelations = relations(sourceIndex, ({ one }) => ({
   source: one(source, {
