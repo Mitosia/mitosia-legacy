@@ -4,13 +4,16 @@ import {
   runSourceAnalysis,
   transcriptToPromptText,
 } from "@/lib/ai/capabilities/source-analysis";
+import { runSourceExtraction } from "@/lib/ai/capabilities/source-extraction";
 import type { SourceContextPack } from "@/lib/ai/context";
 import { judgeSummary } from "@/lib/ai/evals/judge";
 import {
   scoreChapters,
+  scoreExtractions,
   scoreSpeakerSuggestions,
   scoreSummary,
 } from "@/lib/ai/evals/scorers";
+import { groundExtractions } from "@/lib/intelligence/grounding";
 import type { TranscriptData } from "@/lib/transcription/types";
 
 // Golden-eval runner for the source-analysis capability: every fixture in
@@ -25,7 +28,15 @@ import type { TranscriptData } from "@/lib/transcription/types";
 // once the Langfuse account exists — the runner's report shape is already
 // per-item scores over named fixtures.
 
-const THRESHOLDS = { chapters: 0.7, speakers: 0.6, summary: 0.4 } as const;
+const THRESHOLDS = {
+  chapters: 0.7,
+  // Grounding rate over the model's claimed-verbatim spans — the S5
+  // provenance bar. Below 0.8 the extraction prompt is regressing on the
+  // one property the product depends on.
+  extraction: 0.8,
+  speakers: 0.6,
+  summary: 0.4,
+} as const;
 const JUDGE_THRESHOLD = 0.7;
 
 interface Fixture {
@@ -67,8 +78,23 @@ async function evaluateFixture(
         .filter((s): s is string => s !== null)
     ),
   ];
+  // Extraction runs on the same fixture; grounding uses the production
+  // aligner so the eval and the pipeline can never disagree.
+  const extraction = await runSourceExtraction({
+    analysis: null,
+    contextPack: { ...fixture.pack, kind: "source-extraction" },
+    durationMs: fixture.durationMs,
+    transcript: fixture.transcript,
+  });
+  const groundedRows = groundExtractions(
+    extraction.items,
+    fixture.transcript.words,
+    fixture.durationMs
+  );
+
   const scores = {
     chapters: scoreChapters(result.chapters, fixture.durationMs),
+    extraction: scoreExtractions(groundedRows, fixture.durationMs),
     speakers: scoreSpeakerSuggestions(result.editorial.speakers, speakerIds),
     summary: scoreSummary(result.editorial.summary),
   };
@@ -96,7 +122,7 @@ async function evaluateFixture(
     }
   }
 
-  const spentUsd = result.usage.reduce(
+  const spentUsd = [...result.usage, ...extraction.usage].reduce(
     (total, usage) => total + (usage.costUsd ?? 0),
     0
   );

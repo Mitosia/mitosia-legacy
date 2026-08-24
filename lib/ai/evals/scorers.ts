@@ -110,3 +110,53 @@ export function scoreSummary(summary: string): ScoreReport {
   }
   return { issues, score: issues.length === 0 ? 1 : 0.5 / issues.length };
 }
+
+// Extraction grounding score (S5): the share of extracted items whose
+// claimed-verbatim text actually aligns to the transcript word timeline —
+// measured with the SAME aligner that gates production rows, so the eval
+// measures exactly what ships. Fabricated spans and mangled quotes are the
+// failure mode this exists to catch.
+export function scoreExtractions(
+  rows: readonly {
+    endMs: number;
+    grounded: boolean;
+    kind: string;
+    startMs: number;
+  }[],
+  durationMs: number
+): ScoreReport {
+  const issues: string[] = [];
+  if (rows.length === 0) {
+    return { issues: ["no extractions produced"], score: 0 };
+  }
+
+  const grounded = rows.filter((row) => row.grounded);
+  const groundingRate = grounded.length / rows.length;
+  if (groundingRate < 1) {
+    issues.push(
+      `${rows.length - grounded.length}/${rows.length} items failed verbatim grounding`
+    );
+  }
+
+  let rangesValid = true;
+  for (const row of grounded) {
+    if (row.endMs <= row.startMs || row.endMs > durationMs) {
+      rangesValid = false;
+      issues.push(`${row.kind} range ${row.startMs}-${row.endMs} is invalid`);
+    }
+  }
+
+  const kinds = new Set(rows.map((row) => row.kind));
+  if (kinds.size < 2) {
+    issues.push(`only ${[...kinds].join(", ") || "nothing"} extracted`);
+  }
+
+  let score = groundingRate;
+  if (!rangesValid) {
+    score *= 0.5;
+  }
+  if (kinds.size < 2) {
+    score *= 0.8;
+  }
+  return { issues, score };
+}

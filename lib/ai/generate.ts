@@ -61,11 +61,42 @@ export interface StructuredResult<T> {
   usage: StructuredUsage;
 }
 
+export interface GenerateStructuredOptions {
+  // A shared prefix (context + transcript) cached across sibling calls via
+  // an Anthropic cache breakpoint. Callers making several passes over the
+  // same long document put the document here and only the per-pass
+  // instructions in `prompt` — and must keep `system`, the schema, and this
+  // prefix IDENTICAL across the group, because tools/output-format and
+  // system precede messages in the cache key. Caches are per-model: prime
+  // with one awaited call, then run the rest of that model's group in
+  // parallel. Ignored by non-Anthropic candidates.
+  cachedPrefix?: string;
+}
+
+function buildMessages(cachedPrefix: string, prompt: string) {
+  return [
+    {
+      content: [
+        {
+          providerOptions: {
+            anthropic: { cacheControl: { type: "ephemeral" as const } },
+          },
+          text: cachedPrefix,
+          type: "text" as const,
+        },
+        { text: prompt, type: "text" as const },
+      ],
+      role: "user" as const,
+    },
+  ];
+}
+
 export async function generateStructured<T>(
   task: AiTask,
   system: string,
   prompt: string,
-  schema: z.ZodType<T>
+  schema: z.ZodType<T>,
+  options?: GenerateStructuredOptions
 ): Promise<StructuredResult<T>> {
   const route = routeForTask(task);
   const candidates = await getModelCandidates(task);
@@ -87,9 +118,16 @@ export async function generateStructured<T>(
         maxOutputTokens: route.maxOutputTokens,
         // biome-ignore lint/suspicious/noExplicitAny: MastraModelConfig is wider than the AI SDK model union; candidates only ever hold AI SDK model instances
         model: candidate.model as any,
-        prompt,
         schema,
         system,
+        // Adaptive-thinking effort from the task route (ignored by
+        // non-Anthropic candidates — providerOptions are per-provider).
+        ...(route.effort
+          ? { providerOptions: { anthropic: { effort: route.effort } } }
+          : {}),
+        ...(options?.cachedPrefix
+          ? { messages: buildMessages(options.cachedPrefix, prompt) }
+          : { prompt }),
       });
       const inputTokens = result.usage.inputTokens ?? 0;
       const outputTokens = result.usage.outputTokens ?? 0;

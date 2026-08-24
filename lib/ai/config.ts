@@ -41,6 +41,27 @@ export const TASK_ROUTES = {
     maxOutputTokens: 16_000,
     tier: "sonnet",
   },
+  // Extraction passes (S5): three sonnet passes share one cached transcript
+  // prefix + one schema (see lib/ai/capabilities/source-extraction.ts); the
+  // qa pass rides haiku — mechanical span-spotting, not editorial judgment.
+  // Output budgets sized for schema caps on dense 2.5h sources.
+  "source-extraction.claims": {
+    maxOutputTokens: 16_000,
+    tier: "sonnet",
+  },
+  "source-extraction.qa": {
+    effort: "low",
+    maxOutputTokens: 12_000,
+    tier: "haiku",
+  },
+  "source-extraction.quotes": {
+    maxOutputTokens: 12_000,
+    tier: "sonnet",
+  },
+  "source-extraction.stories": {
+    maxOutputTokens: 8000,
+    tier: "sonnet",
+  },
 } as const;
 export type AiTask = keyof typeof TASK_ROUTES;
 

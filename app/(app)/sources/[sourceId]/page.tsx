@@ -1,7 +1,11 @@
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { z } from "zod";
+import type {
+  HighlightExtraction,
+  HighlightsRun,
+} from "@/components/sources/highlights-panel";
 import { RefreshPoller } from "@/components/sources/refresh-poller";
 import { RetryIngestButton } from "@/components/sources/retry-ingest-button";
 import type { SourceMapAnalysis } from "@/components/sources/source-map";
@@ -22,6 +26,8 @@ import {
   sourceAnalysis,
   sourceArtifact,
   sourceChapter,
+  sourceExtraction,
+  sourceExtractionRun,
   sourceIndex,
   transcript,
   transcriptRevision,
@@ -29,6 +35,10 @@ import {
 import { withOrgScope } from "@/lib/db/tenant";
 import { formatBytes, formatDuration } from "@/lib/format";
 import { ingestStepLabel, SOURCE_STATUS_LABELS } from "@/lib/ingest-labels";
+import {
+  isStalledExtraction,
+  scheduleExtractionReap,
+} from "@/lib/intelligence/extract-reaper";
 import { scheduleSourceIndexBackfill } from "@/lib/intelligence/index-enqueue";
 import {
   isStalledSourceIndex,
@@ -191,6 +201,7 @@ function jobSettled(row: { status: string } | null): boolean {
 
 function pageIsSettled(data: {
   analysis: { status: string } | null;
+  extractionRun: { status: string } | null;
   index: { status: string } | null;
   status: string;
   transcript: { status: string } | null;
@@ -199,8 +210,34 @@ function pageIsSettled(data: {
     (data.status === "ready" || data.status === "failed") &&
     jobSettled(data.transcript) &&
     jobSettled(data.analysis) &&
-    jobSettled(data.index)
+    jobSettled(data.index) &&
+    jobSettled(data.extractionRun)
   );
+}
+
+function workspaceHighlights(data: {
+  currentRevision: { revision: number } | null;
+  extractionRun: {
+    error: string | null;
+    revision: number | null;
+    status: string;
+  } | null;
+  extractions: HighlightExtraction[];
+}): { extractions: HighlightExtraction[]; run: HighlightsRun } | null {
+  if (!data.extractionRun) {
+    return null;
+  }
+  return {
+    extractions: data.extractions,
+    run: {
+      error: data.extractionRun.error,
+      stale:
+        data.extractionRun.status === "ready" &&
+        data.currentRevision !== null &&
+        (data.extractionRun.revision ?? 0) < data.currentRevision.revision,
+      status: data.extractionRun.status,
+    },
+  };
 }
 
 function workspaceAnalysis(data: {
@@ -240,6 +277,7 @@ function scheduleSourceMaintenance(
   data: {
     analysis: { stalled: boolean } | null;
     currentRevision: { revision: number } | null;
+    extractionRun: { stalled: boolean } | null;
     id: string;
     index: { revision: number | null; stalled: boolean; status: string } | null;
     transcript: { stalled: boolean } | null;
@@ -253,6 +291,9 @@ function scheduleSourceMaintenance(
   }
   if (data.index?.stalled) {
     scheduleSourceIndexReap(organizationId);
+  }
+  if (data.extractionRun?.stalled) {
+    scheduleExtractionReap(organizationId);
   }
   if (
     data.currentRevision &&
@@ -355,6 +396,43 @@ export default async function SourceDetailPage(
       .where(eq(sourceIndex.sourceId, sourceRow.id))
       .limit(1);
 
+    const [extractionRunRow] = await tx
+      .select({
+        error: sourceExtractionRun.error,
+        revision: sourceExtractionRun.revision,
+        stalled: sql<boolean>`(${isStalledExtraction})`,
+        status: sourceExtractionRun.status,
+      })
+      .from(sourceExtractionRun)
+      .where(eq(sourceExtractionRun.sourceId, sourceRow.id))
+      .limit(1);
+
+    // Only grounded rows reach the UI — the aligner's gate is the whole
+    // point of the provenance model.
+    const extractions =
+      extractionRunRow?.status === "ready"
+        ? ((await tx
+            .select({
+              classification: sourceExtraction.classification,
+              confidence: sourceExtraction.confidence,
+              endMs: sourceExtraction.endMs,
+              id: sourceExtraction.id,
+              kind: sourceExtraction.kind,
+              payload: sourceExtraction.payload,
+              speaker: sourceExtraction.speaker,
+              startMs: sourceExtraction.startMs,
+              text: sourceExtraction.text,
+            })
+            .from(sourceExtraction)
+            .where(
+              and(
+                eq(sourceExtraction.sourceId, sourceRow.id),
+                eq(sourceExtraction.grounded, true)
+              )
+            )
+            .orderBy(sourceExtraction.startMs)) as HighlightExtraction[])
+        : [];
+
     const chapters =
       analysisRow?.status === "ready"
         ? await tx
@@ -390,6 +468,8 @@ export default async function SourceDetailPage(
       artifacts,
       chapters,
       currentRevision,
+      extractionRun: extractionRunRow ?? null,
+      extractions,
       index: indexRow ?? null,
       transcript: transcriptRow ?? null,
     };
@@ -446,6 +526,7 @@ export default async function SourceDetailPage(
       {data.status === "ready" && hlsKey ? (
         <SourceWorkspace
           analysis={workspaceAnalysis(data)}
+          highlights={workspaceHighlights(data)}
           hlsUrl={`/api/media/${hlsKey}`}
           peaksUrl={waveformKey ? `/api/media/${waveformKey}` : null}
           posterUrl={posterKey ? `/api/media/${posterKey}` : null}
