@@ -303,3 +303,63 @@ jobs:
           name: playwright-test-results
           path: test-results/
           retention-days: 7
+
+  # Deploys the trigger/ tasks to Trigger.dev cloud on every merge to main,
+  # after CI is green. The app deploys itself through Dokploy's webhook, but
+  # the worker image only updates through an explicit `trigger.dev deploy` —
+  # previously a manual step, which meant the deployed worker could drift
+  # arbitrarily far behind main.
+  #
+  # Opt-in switch: the TRIGGER_PROJECT_REF repository VARIABLE. Until it
+  # exists this job is skipped (vars are readable in job-level `if`; secrets
+  # are not). Setting the variable without also adding the
+  # TRIGGER_ACCESS_TOKEN repository secret (a tr_pat_… personal access token
+  # from the Trigger.dev dashboard) is a misconfiguration and fails loudly
+  # rather than skipping. Setup steps: docs/media-infra-setup.md.
+  #
+  # The server env (STORAGE_*, DATABASE_URL, BETTER_AUTH_SECRET,
+  # DEEPGRAM_API_KEY, …) must already be set in the Trigger environment:
+  # deploy *indexes* tasks by importing them, and lib/env.ts parses the whole
+  # schema at import, so a missing var aborts the deploy — not the first run.
+  #
+  # Note the workflow-level concurrency group cancels an in-flight deploy
+  # when another merge lands; Trigger.dev deploys promote atomically
+  # server-side, so a cancelled upload just never promotes.
+  deploy-trigger:
+    runs-on: ubuntu-latest
+    needs: [checks, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TRIGGER_PROJECT_REF != ''
+    # Remote image build on Trigger's side; measured deploys are a few
+    # minutes. Hang backstop, not a budget.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The CLI bundles trigger.config.ts and the task modules with esbuild,
+      # resolving imports from node_modules — deps must be installed.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The CLI version is derived from @trigger.dev/sdk in package.json:
+      # CLI/SDK drift breaks deploys (S3 lesson, docs/media-infra-setup.md),
+      # and deriving it here means a dependency bump moves both together.
+      # Never @latest.
+      - name: Deploy trigger tasks
+        env:
+          TRIGGER_ACCESS_TOKEN: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
+          TRIGGER_PROJECT_REF: ${{ vars.TRIGGER_PROJECT_REF }}
+        run: |
+          if [ -z "$TRIGGER_ACCESS_TOKEN" ]; then
+            echo "::error::TRIGGER_PROJECT_REF variable is set but the TRIGGER_ACCESS_TOKEN secret is missing — add a tr_pat_… token from the Trigger.dev dashboard as a repo secret."
+            exit 1
+          fi
+          CLI_VERSION=$(node -p "require('./package.json').dependencies['@trigger.dev/sdk'].replace(/^[~^]/, '')")
+          echo "Deploying with trigger.dev@${CLI_VERSION} (pinned to @trigger.dev/sdk)"
+          npx "trigger.dev@${CLI_VERSION}" deploy

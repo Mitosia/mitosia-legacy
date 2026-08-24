@@ -129,15 +129,30 @@ from the in-process fallback to `tasks.trigger("ingest-source", …)`.
 
 ### Deploying the task
 
+Automatic (preferred): the `deploy-trigger` job in `.github/workflows/ci.yml`
+deploys the tasks on every merge to `main`, after `checks` and `e2e` pass.
+It is **skipped until two repository settings exist** (Settings → Secrets and
+variables → Actions):
+
+1. Variable `TRIGGER_PROJECT_REF` = the project ref (`proj_…`) — this is the
+   opt-in switch; the job stays skipped while it is unset.
+2. Secret `TRIGGER_ACCESS_TOKEN` = a personal access token (`tr_pat_…`) from
+   the Trigger.dev dashboard (account → Personal Access Tokens). Setting the
+   variable without the secret fails the job loudly — that half-state is a
+   misconfiguration, not an opt-out.
+
+The job derives the CLI version from `@trigger.dev/sdk` in `package.json`,
+so a dependency bump moves CLI and SDK together.
+
+Manual (fallback, and until the switch is set):
+
 ```bash
 # CLI version pinned to match @trigger.dev/sdk in package.json.
 TRIGGER_PROJECT_REF=proj_… npx trigger.dev@4.5.12 deploy
 ```
 
 `trigger.config.ts` already includes the **ffmpeg build extension**, so the
-cloud image has ffmpeg/ffprobe. Later, add a deploy step to the GitHub
-Actions workflow (needs a `TRIGGER_ACCESS_TOKEN` personal access token as a
-repo secret) so tasks deploy on merge alongside the app.
+cloud image has ffmpeg/ffprobe.
 
 > **Pin its ffmpeg before you enable this.** `ffmpeg()` with no options
 > installs Debian's apt build (5.1.x) — three minors behind the 8.1.x that
