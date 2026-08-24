@@ -28,8 +28,12 @@ env:
 jobs:
   checks:
     runs-on: ubuntu-latest
-    # Measured at ~1 minute; this is a hang backstop, not a budget.
-    timeout-minutes: 10
+    # Measured at ~3 minutes; this is a hang backstop, not a budget.
+    timeout-minutes: 15
+    env:
+      # Owner connection for migrations and role creation. The prod-parity
+      # server below must NOT connect with it — see its step env.
+      MIGRATE_DATABASE_URL: postgres://ci:ci@localhost:5432/ci
     services:
       postgres:
         image: postgres:18
@@ -66,16 +70,84 @@ jobs:
       - name: Cross-tenant isolation tests
         run: pnpm test
 
+      # Turbopack writes a filesystem build cache to .next/cache by default
+      # (Next 16.3+), but it only helps if something restores it — before
+      # this cache existed, every build here ran cold and wrote a cache
+      # nothing ever read. The restore-key falls back to the newest cache
+      # for this lockfile; Turbopack invalidates its contents by content, so
+      # a stale hit is a warm start, never a wrong build.
+      - name: Cache Next.js build cache
+        uses: actions/cache@v6
+        with:
+          path: .next/cache
+          key: nextjs-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ hashFiles('**/*.ts', '**/*.tsx', '!node_modules/**', '!.next/**') }}
+          restore-keys: |
+            nextjs-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+
       - name: Build
         run: pnpm build
 
+      # ——— Production-parity e2e (playwright.prod.config.ts) ———
+      # Runs here rather than in the e2e job: it needs a `pnpm build` anyway
+      # (which this job already does), and the e2e job is the pipeline's
+      # critical path — this job finishes minutes earlier. `next dev` cannot
+      # surface hydration mismatches or standalone-output problems, and a
+      # mismatch shipped behind exactly that gap (PR #19). The hydration
+      # suite never touches uploads, so no MinIO or ffmpeg here — just
+      # Postgres, migrations, and the RLS-subject app role.
+
+      - name: Resolve Playwright version
+        id: playwright
+        run: |
+          echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browser
+        id: playwright-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      # One unconditional step, not a cache-hit/miss pair — see the e2e job
+      # for why the split version was a mistake.
+      - name: Install Playwright browser and system dependencies
+        timeout-minutes: 10
+        run: pnpm exec playwright install --with-deps chromium
+
+      # The RLS suite above wipes and re-migrates this database in its
+      # beforeAll, so this is normally a no-op — it exists so the prod suite
+      # does not silently depend on the unit suite having run first.
+      - name: Apply migrations
+        run: pnpm db:migrate
+
+      # Non-superuser app role, mirroring docker/dev-init/01-app-role.sql —
+      # the server under test must be subject to RLS (PR #16's lesson, same
+      # as the e2e job). Runs after the RLS suite's schema wipe, which drops
+      # default-privilege entries along with the schema.
+      - name: Create app role
+        run: |
+          psql "$MIGRATE_DATABASE_URL" <<'SQL'
+          CREATE ROLE ci_app LOGIN PASSWORD 'ci_app';
+          GRANT CONNECT ON DATABASE ci TO ci_app;
+          GRANT USAGE ON SCHEMA public TO ci_app;
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ci_app;
+          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ci_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE ci IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO ci_app;
+          ALTER DEFAULT PRIVILEGES FOR ROLE ci IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO ci_app;
+          SQL
+
+      - name: Run production-build end-to-end tests
+        env:
+          DATABASE_URL: postgres://ci_app:ci_app@localhost:5432/ci
+        run: pnpm e2e:prod
+
   e2e:
     runs-on: ubuntu-latest
-    # Measured at 5-7 minutes. A run with no ceiling sat on a stalled
-    # Playwright download for 3.5 hours before anyone noticed, holding up a
-    # merge the whole time; GitHub's own default is 6 hours, which is not a
-    # ceiling in any useful sense.
-    timeout-minutes: 25
+    # Measured at ~4 minutes (2 parallel workers). A run with no ceiling sat
+    # on a stalled Playwright download for 3.5 hours before anyone noticed,
+    # holding up a merge the whole time; GitHub's own default is 6 hours,
+    # which is not a ceiling in any useful sense.
+    timeout-minutes: 20
     services:
       postgres:
         image: postgres:18
@@ -142,6 +214,17 @@ jobs:
         timeout-minutes: 10
         run: pnpm exec playwright install --with-deps chromium
 
+      # The specs' beforeAll blocks generate these with ffmpeg — two are 10s
+      # 720p encodes at 20 Mbps CBR, slow on a 2-vCPU runner. The encode
+      # parameters live in the spec files themselves, so keying on them
+      # over-invalidates (any spec edit regenerates) but can never serve a
+      # stale fixture.
+      - name: Cache e2e media fixtures
+        uses: actions/cache@v6
+        with:
+          path: e2e/.fixtures
+          key: e2e-fixtures-${{ runner.os }}-${{ hashFiles('e2e/**/*.spec.ts') }}
+
       # The ingest e2e generates its fixture and runs the real pipeline, so
       # CI's ffmpeg has to be the one the image ships (Alpine 3.24 → 8.1.x).
       # Ubuntu's apt ffmpeg is 6.1.1, two majors behind: ffmpeg-8-only
@@ -205,20 +288,6 @@ jobs:
 
       - name: Run end-to-end tests
         run: pnpm e2e
-
-      # Production parity: `next dev` cannot surface hydration mismatches or
-      # standalone-output problems, and a mismatch shipped behind exactly
-      # that gap (PR #19). Reuses this job's database, MinIO and migrations.
-      # tsconfig.json includes .next/dev/types/**, so `next build` type-checks
-      # whatever the dev server last wrote there — and the e2e run above ends
-      # by killing that server, which can leave validator.ts half-written and
-      # fail this build with syntax errors in generated code. A deploy builds
-      # from a clean tree; so does this.
-      - name: Build standalone server
-        run: rm -rf .next/dev && pnpm build
-
-      - name: Run production-build end-to-end tests
-        run: pnpm e2e:prod
 
       # Traces (recorded on first retry) are the only way to debug a
       # headless-only playback failure.

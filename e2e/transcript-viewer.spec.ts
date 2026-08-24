@@ -60,9 +60,11 @@ test("the transcript panel seeks, searches, and highlights", async ({
 
   await page.locator(".uppy-Dashboard-input").first().setInputFiles(FIXTURE);
   await page.getByRole("button", { name: UPLOAD_BUTTON }).click();
+  // 60s like the upload specs: a parallel worker mid-transcode can starve
+  // even a tiny multipart upload (PR #62).
   await expect(page.locator(".uppy-StatusBar-statusPrimary")).toHaveText(
     UPLOAD_COMPLETE,
-    { timeout: 30_000 }
+    { timeout: 60_000 }
   );
 
   const row = page.locator("[data-source-status]");
@@ -71,7 +73,7 @@ test("the transcript panel seeks, searches, and highlights", async ({
   });
 
   await page.getByRole("link", { name: "viewer-source" }).click();
-  await page.waitForURL(SOURCE_PAGE_URL, { timeout: 30_000 });
+  await page.waitForURL(SOURCE_PAGE_URL, { timeout: 60_000 });
   const sourceId = new URL(page.url()).pathname.split("/").pop() ?? "";
 
   // The mock transcription settles moments after ready; the poller swaps

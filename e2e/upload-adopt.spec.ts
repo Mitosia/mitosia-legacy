@@ -62,6 +62,11 @@ test.beforeAll(() => {
     `sine=frequency=440:duration=${FIXTURE_SECONDS}`,
     "-c:v",
     "libx264",
+    // ultrafast: CBR pins the size regardless of preset, nothing reads the
+    // visual quality, and the default preset is what makes generating this
+    // fixture slow on CI's 2-vCPU runner.
+    "-preset",
+    "ultrafast",
     "-pix_fmt",
     "yuv420p",
     "-b:v",
