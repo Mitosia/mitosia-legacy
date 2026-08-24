@@ -41,8 +41,15 @@ const extractionItemSchema = z
   .extend({ title: z.string().max(120).nullable() })
   .extend({ confidence: z.number().min(0).max(1) });
 
+// The array bound is part of the output-budget math, not just tidiness:
+// the grammar cannot stop the model over-emitting up to this bound, so
+// worst case ≈ bound × ~520 tokens/item + adaptive thinking must fit the
+// largest pass budget (32k for claims). 48 items ≈ 25k + thinking — the
+// staging claims pass at .max(80) emitted past a 24k budget and truncated
+// mid-JSON ("could not parse the response", 2026-08-24). Per-pass caps
+// live in the instructions; this is the hard ceiling they trim under.
 export const extractionOutputSchema = z.object({
-  extractions: z.array(extractionItemSchema).max(80),
+  extractions: z.array(extractionItemSchema).max(48),
 });
 
 export type RawExtraction = z.infer<typeof extractionItemSchema>;
@@ -91,9 +98,9 @@ const PASSES: PassSpec[] = [
     task: "source-extraction.stories",
   },
   {
-    instructions: `Extract notable claims: factual or strongly-held assertions a content team could build on (numbers, predictions, contrarian positions, recommendations). kind="claim" for every item. text = the transcript span containing the claim VERBATIM. statement = the assertion as one standalone sentence. title = null. At most 60, ranked by significance.`,
+    instructions: `Extract notable claims: factual or strongly-held assertions a content team could build on (numbers, predictions, contrarian positions, recommendations). kind="claim" for every item. text = the ONE sentence containing the claim VERBATIM (under 50 words — never a whole passage). statement = the assertion as one standalone sentence. title = null. At most 40, ranked by significance.`,
     kind: "claim",
-    maxItems: 60,
+    maxItems: 40,
     task: "source-extraction.claims",
   },
   {
