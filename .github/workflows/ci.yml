@@ -81,8 +81,13 @@ jobs:
         with:
           path: .next/cache
           key: nextjs-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ hashFiles('**/*.ts', '**/*.tsx', '!node_modules/**', '!.next/**') }}
+          # The bare fallback matters: with only the lockfile-prefixed one, a
+          # dependency bump cold-started the build (58s vs 13s warm in PR
+          # #62's runs). Turbopack invalidates cache contents by its own
+          # hashing, so a stale restore is a warm start, never a wrong build.
           restore-keys: |
             nextjs-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            nextjs-${{ runner.os }}-
 
       - name: Build
         run: pnpm build
