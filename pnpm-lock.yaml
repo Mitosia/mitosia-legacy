@@ -44,6 +44,9 @@ importers:
       '@langfuse/tracing':
         specifier: ^5.10.1
         version: 5.10.1(@opentelemetry/api@1.9.1)
+      '@langfuse/vercel-ai-sdk':
+        specifier: ^5.10.1
+        version: 5.10.1(@opentelemetry/api@1.9.1)(ai@7.0.77(zod@4.4.3))(zod@4.4.3)
       '@mastra/core':
         specifier: 1.61.0
         version: 1.61.0(@grpc/grpc-js@1.14.4)(ai@7.0.77(zod@4.4.3))(express@5.2.1)(zod@4.4.3)
@@ -67,7 +70,7 @@ importers:
         version: 3.14.10(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       '@trigger.dev/sdk':
         specifier: ^4.5.10
-        version: 4.5.10(ai@7.0.77(zod@4.4.3))(react@19.2.8)(zod@4.4.3)
+        version: 4.5.10(@ai-sdk/otel@1.0.77(zod@4.4.3))(ai@7.0.77(zod@4.4.3))(react@19.2.8)(zod@4.4.3)
       '@uppy/aws-s3':
         specifier: ^5.1.0
         version: 5.1.0(@uppy/core@5.2.0)
@@ -224,6 +227,10 @@ packages:
     engines: {node: '>=22'}
     peerDependencies:
       zod: ^3.25.76 || ^4.1.8
+
+  '@ai-sdk/otel@1.0.77':
+    resolution: {integrity: sha512-x+IQen/PAZO7CfcpzWmQC++Ke8hgwtZKWYcMHSAjGte22ahi/laPLwgUJ+PaAJTbVY91iiRHM1R4TmrSmKCn7Q==}
+    engines: {node: '>=22'}
 
   '@ai-sdk/provider-utils@3.0.30':
     resolution: {integrity: sha512-NCJ9JKow5ENAgEZxzvEvF20thwDiH+hutvzmrUDbloRX0azpJHNst8+7pZIVryYhLM9wgpT5/ShTSjPTFhkxEQ==}
@@ -1252,6 +1259,13 @@ packages:
     engines: {node: '>=20'}
     peerDependencies:
       '@opentelemetry/api': ^1.9.0
+
+  '@langfuse/vercel-ai-sdk@5.10.1':
+    resolution: {integrity: sha512-F+y5sLpeOEEO0uCLcZUHS5qvt0vF07SCnOu4oD7c1N5y9NwMADx0dbNh4804HGnEqqDDQAABtP9p9w+HHE6REQ==}
+    engines: {node: '>=22'}
+    peerDependencies:
+      '@opentelemetry/api': ^1.9.0
+      ai: '>=7.0.0 <8'
 
   '@lukeed/csprng@1.1.0':
     resolution: {integrity: sha512-Z7C/xXCiGWsg0KuKsHTKJxbWhpI3Vs5GwLfOean7MGyVFGqdRgBbAjOCh6u4bbjPc/8MJ2pZmK/0DLdCbivLDA==}
@@ -4851,6 +4865,14 @@ snapshots:
       '@vercel/oidc': 3.2.0
       zod: 4.4.3
 
+  '@ai-sdk/otel@1.0.77(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/provider': 4.0.7
+      '@opentelemetry/api': 1.9.1
+      ai: 7.0.77(zod@4.4.3)
+    transitivePeerDependencies:
+      - zod
+
   '@ai-sdk/provider-utils@3.0.30(zod@4.4.3)':
     dependencies:
       '@ai-sdk/provider': 2.0.3
@@ -5806,6 +5828,15 @@ snapshots:
       '@langfuse/core': 5.10.1(@opentelemetry/api@1.9.1)
       '@opentelemetry/api': 1.9.1
 
+  '@langfuse/vercel-ai-sdk@5.10.1(@opentelemetry/api@1.9.1)(ai@7.0.77(zod@4.4.3))(zod@4.4.3)':
+    dependencies:
+      '@ai-sdk/otel': 1.0.77(zod@4.4.3)
+      '@langfuse/core': 5.10.1(@opentelemetry/api@1.9.1)
+      '@opentelemetry/api': 1.9.1
+      ai: 7.0.77(zod@4.4.3)
+    transitivePeerDependencies:
+      - zod
+
   '@lukeed/csprng@1.1.0': {}
 
   '@lukeed/uuid@2.0.1':
@@ -6577,7 +6608,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@trigger.dev/sdk@4.5.10(ai@7.0.77(zod@4.4.3))(react@19.2.8)(zod@4.4.3)':
+  '@trigger.dev/sdk@4.5.10(@ai-sdk/otel@1.0.77(zod@4.4.3))(ai@7.0.77(zod@4.4.3))(react@19.2.8)(zod@4.4.3)':
     dependencies:
       '@opentelemetry/api': 1.9.1
       '@opentelemetry/semantic-conventions': 1.41.1
@@ -6592,6 +6623,7 @@ snapshots:
       ws: 8.21.3
       zod: 4.4.3
     optionalDependencies:
+      '@ai-sdk/otel': 1.0.77(zod@4.4.3)
       ai: 7.0.77(zod@4.4.3)
       react: 19.2.8
     transitivePeerDependencies:

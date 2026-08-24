@@ -37,6 +37,7 @@
     "@langfuse/client": "^5.10.1",
     "@langfuse/otel": "^5.10.1",
     "@langfuse/tracing": "^5.10.1",
+    "@langfuse/vercel-ai-sdk": "^5.10.1",
     "@mastra/core": "1.61.0",
     "@mastra/langfuse": "^1.5.0",
     "@openrouter/ai-sdk-provider": "^3.0.0",

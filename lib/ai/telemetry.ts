@@ -25,18 +25,33 @@ export async function initAiTelemetry(): Promise<void> {
   }
   initialized = true;
   try {
-    const [{ LangfuseSpanProcessor }, { NodeTracerProvider }] =
-      await Promise.all([
-        import("@langfuse/otel"),
-        import("@opentelemetry/sdk-trace-node"),
-      ]);
+    const [
+      { LangfuseSpanProcessor },
+      { NodeTracerProvider },
+      { registerTelemetry },
+      { LangfuseVercelAiSdkIntegration },
+    ] = await Promise.all([
+      import("@langfuse/otel"),
+      import("@opentelemetry/sdk-trace-node"),
+      import("ai"),
+      import("@langfuse/vercel-ai-sdk"),
+    ]);
     const processor = new LangfuseSpanProcessor({
       baseUrl: process.env.LANGFUSE_BASE_URL,
       publicKey: process.env.LANGFUSE_PUBLIC_KEY,
       secretKey: process.env.LANGFUSE_SECRET_KEY,
     });
     const provider = new NodeTracerProvider({ spanProcessors: [processor] });
+    // In the Next runtime this becomes the global provider. In Trigger
+    // workers the register() silently LOSES to Trigger's own provider —
+    // there, spans reach Langfuse via the OTLP exporter in
+    // trigger.config.ts telemetry.exporters instead.
     provider.register();
+    // AI SDK v7 emits NO spans by itself: telemetry is a register-once
+    // integration receiving lifecycle events. This is what actually
+    // creates the generation spans (model, tokens, i/o) on whichever
+    // provider is global.
+    registerTelemetry(new LangfuseVercelAiSdkIntegration());
     flush = () => processor.forceFlush();
   } catch (error) {
     // Tracing is diagnostic infrastructure; a failed init must never take
