@@ -1,4 +1,4 @@
-import { generateObject } from "ai";
+import { generateObject, NoObjectGeneratedError } from "ai";
 import type { z } from "zod";
 import {
   type AiTask,
@@ -150,7 +150,17 @@ export async function generateStructured<T>(
         },
       };
     } catch (error) {
-      lastError = error;
+      // A budget-exhausted response is a sizing bug, not a provider flake —
+      // name it so the failure row points at the fix (staging 2026-08-24:
+      // a truncated claims pass surfaced only as "could not parse").
+      lastError =
+        NoObjectGeneratedError.isInstance(error) &&
+        error.finishReason === "length"
+          ? new Error(
+              `${task} exhausted its output budget (maxOutputTokens=${route.maxOutputTokens}, thinking counts against it)`,
+              { cause: error }
+            )
+          : error;
       console.error(`[ai] ${task} failed on ${candidate.provider}:`, error);
     }
   }
