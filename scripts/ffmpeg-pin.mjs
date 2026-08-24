@@ -12,10 +12,15 @@
 // Bumping ffmpeg means changing both, plus the Alpine tag in the Dockerfile,
 // in one PR — see the ffmpeg version rule in AGENTS.md.
 
-export const FFMPEG_RELEASE = "autobuild-2026-08-10-13-17";
-export const FFMPEG_BUILD = "ffmpeg-n8.1.2-34-g9b6c8969e0-linux64-gpl-8.1";
+// CAUTION: BtbN autobuild releases are NOT immutable — dated releases are
+// pruned after ~2 weeks (the 2026-08-10 pin 404'd on 2026-08-24 and broke
+// every CI e2e run). Until the asset is mirrored somewhere we control,
+// this pin needs a refresh whenever CI starts 404ing: pick the newest
+// autobuild's linux64-gpl-8.1 asset, download it, and paste its sha256.
+export const FFMPEG_RELEASE = "autobuild-2026-08-24-13-10";
+export const FFMPEG_BUILD = "ffmpeg-n8.1.2-44-g7c533d0f86-linux64-gpl-8.1";
 export const FFMPEG_SHA256 =
-  "7b0c2ad593860d8bb157e346777ac7d741b5bf25b456382051138aaa8256f92d";
+  "0ff8df62cb995a46c064b86f7992603ec38e60cd6992b05b43fd09e30bdc28b9";
 
 export const FFMPEG_URL = `https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_RELEASE}/${FFMPEG_BUILD}.tar.xz`;
 
