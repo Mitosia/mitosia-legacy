@@ -1,11 +1,17 @@
 import { readFileSync } from "node:fs";
+import { copyFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { BuildExtension } from "@trigger.dev/build";
 import { defineConfig } from "@trigger.dev/sdk";
-import { ffmpegInstallCommand } from "./scripts/ffmpeg-pin.mjs";
+import {
+  ensureFfmpegArchive,
+  FFMPEG_ASSET,
+  FFMPEG_CONTEXT_DIR,
+  ffmpegImageInstruction,
+} from "./scripts/ffmpeg-pin.mjs";
 
 // Trigger workers register their OWN global OTel provider before task code
 // runs, so lib/ai/telemetry.ts's provider.register() silently loses there
@@ -71,13 +77,28 @@ function ffmpegVersionCheckCommand(): string {
 //
 // Installs the same checksummed asset CI does, then runs the shared version
 // check so a drifted pin fails the deploy instead of the first upload.
+//
+// The archive cannot be downloaded inside the image build: the pin lives on
+// this private repo's own release (BtbN prunes its dated releases — see
+// scripts/ffmpeg-pin.mjs), and Trigger's remote builders hold no GitHub
+// credentials. So config-eval — running on the deploying machine, which
+// does — downloads and sha256-verifies the archive, drops it into the
+// bundle output (which IS the image build context; a COPY path against the
+// repo checkout would not exist there, as the comment above learned), and
+// the RUN bind-mounts it from the context. The layer re-verifies the
+// checksum in-image, so a corrupted context fails the deploy, not the
+// first upload.
 function pinnedFfmpeg(): BuildExtension {
   return {
     name: "pinned-ffmpeg",
-    onBuildComplete(context) {
+    async onBuildComplete(context, manifest) {
       if (context.target === "dev") {
         return;
       }
+      const archive = ensureFfmpegArchive();
+      const contextDir = join(manifest.outputPath, FFMPEG_CONTEXT_DIR);
+      await mkdir(contextDir, { recursive: true });
+      await copyFile(archive, join(contextDir, FFMPEG_ASSET));
       context.addLayer({
         deploy: {
           env: {
@@ -89,7 +110,7 @@ function pinnedFfmpeg(): BuildExtension {
         id: "ffmpeg",
         image: {
           instructions: [
-            `RUN ${ffmpegInstallCommand()}`,
+            ffmpegImageInstruction(),
             `RUN ${ffmpegVersionCheckCommand()}`,
           ],
         },

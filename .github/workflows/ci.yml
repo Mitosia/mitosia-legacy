@@ -304,21 +304,26 @@ jobs:
       # Ubuntu's apt ffmpeg is 6.1.1, two majors behind: ffmpeg-8-only
       # options are a HARD failure there (an unknown option aborts ffmpeg, so
       # every ingest breaks — PR #23), and the ffmpeg 8 behaviour lib/media/
-      # is written around cannot be exercised at all. Pinned to an immutable
-      # BtbN release asset; bump alongside the Dockerfile's Alpine pin.
+      # is written around cannot be exercised at all. The checksummed static
+      # build downloads from this repo's own ffmpeg-static/* release — a
+      # mirror, because BtbN prunes its dated releases and 404'd the previous
+      # pin (2026-08-24). Bump alongside the Dockerfile's Alpine pin.
       #
       # The asset coordinates live in scripts/ffmpeg-pin.mjs, not here: the
       # Trigger.dev deploy image installs the same build (Debian's apt ffmpeg
       # is 5.1.x), and a checksum copied into two files is a checksum that
       # eventually disagrees with itself.
       - name: Install ffmpeg
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           eval "$(node -e 'import("./scripts/ffmpeg-pin.mjs").then((pin) => {
             process.stdout.write(
-              `FFMPEG_URL=${pin.FFMPEG_URL}\nFFMPEG_BUILD=${pin.FFMPEG_BUILD}\nFFMPEG_SHA256=${pin.FFMPEG_SHA256}\n`
+              `FFMPEG_MIRROR_REPO=${pin.FFMPEG_MIRROR_REPO}\nFFMPEG_MIRROR_TAG=${pin.FFMPEG_MIRROR_TAG}\nFFMPEG_ASSET=${pin.FFMPEG_ASSET}\nFFMPEG_BUILD=${pin.FFMPEG_BUILD}\nFFMPEG_SHA256=${pin.FFMPEG_SHA256}\n`
             );
           })')"
-          curl -fsSL -o /tmp/ffmpeg.tar.xz "${FFMPEG_URL}"
+          gh release download "${FFMPEG_MIRROR_TAG}" --repo "${FFMPEG_MIRROR_REPO}" \
+            --pattern "${FFMPEG_ASSET}" --output /tmp/ffmpeg.tar.xz
           echo "${FFMPEG_SHA256}  /tmp/ffmpeg.tar.xz" | sha256sum -c -
           sudo tar -xJf /tmp/ffmpeg.tar.xz -C /usr/local/bin --strip-components=2 \
             "${FFMPEG_BUILD}/bin/ffmpeg" "${FFMPEG_BUILD}/bin/ffprobe"
@@ -424,6 +429,11 @@ jobs:
         env:
           TRIGGER_ACCESS_TOKEN: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
           TRIGGER_PROJECT_REF: ${{ vars.TRIGGER_PROJECT_REF }}
+          # Config-eval downloads the pinned ffmpeg from this repo's own
+          # ffmpeg-static/* release into the image build context — Trigger's
+          # remote builders cannot reach a private-repo release themselves
+          # (scripts/ffmpeg-pin.mjs).
+          GH_TOKEN: ${{ github.token }}
         run: |
           if [ -z "$TRIGGER_ACCESS_TOKEN" ]; then
             echo "::error::TRIGGER_PROJECT_REF variable is set but the TRIGGER_ACCESS_TOKEN secret is missing — add a tr_pat_… token from the Trigger.dev dashboard as a repo secret."

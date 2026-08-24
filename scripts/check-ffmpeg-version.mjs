@@ -9,11 +9,13 @@
 // Kept dependency-free and in plain .mjs on purpose: it runs inside the
 // Docker runner stage, which has node but no node_modules and no bundler.
 //
-// Bumping the version is a three-line change in one PR (see AGENTS.md):
+// Bumping the version is one PR with three moves (see AGENTS.md):
 //   1. EXPECTED_MINOR here
 //   2. the Alpine pin in the Dockerfile's runner stage (that is what picks
 //      the deployed binary — Alpine ships one ffmpeg minor per release)
-//   3. the pinned static build in .github/workflows/ci.yml
+//   3. the mirrored static build: run scripts/mirror-ffmpeg.mjs against the
+//      new BtbN build and paste the block it prints into
+//      scripts/ffmpeg-pin.mjs
 // Land those together or this check fails the side that lagged.
 
 import { execFileSync } from "node:child_process";
@@ -21,7 +23,8 @@ import { execFileSync } from "node:child_process";
 const EXPECTED_MINOR = "8.1";
 
 // Version lines vary by build. Alpine/Homebrew: "ffmpeg version 8.1.2 …".
-// The BtbN static builds CI uses: "ffmpeg version n8.1.2-34-g9b6c8969e0-…".
+// The BtbN-built static builds CI uses (mirrored per scripts/ffmpeg-pin.mjs)
+// report the branch git-describe: "ffmpeg version n8.1.2-44-g7c533d0f86-…".
 // Git master builds report "N-126039-g…" with no version at all, and are
 // rejected — an untagged build is not a version we can pin against.
 const VERSION_LINE = /^\w+ version n?(\d+)\.(\d+)/;
@@ -77,7 +80,7 @@ if (problems.length > 0) {
       "",
       "  macOS:  brew install ffmpeg   (brew tracks the latest release)",
       "  Debian/Ubuntu: distro packages lag badly — use a static build,",
-      "  the same one .github/workflows/ci.yml pins.",
+      "  the same one scripts/ffmpeg-pin.mjs pins.",
       "",
       "If ffmpeg has genuinely moved on, bump all three pins together —",
       "see the ffmpeg version rule in AGENTS.md.",
