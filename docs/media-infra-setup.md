@@ -118,8 +118,10 @@ Do **not** expose the VPS Postgres port publicly.
 
 ```bash
 # .env: TRIGGER_PROJECT_REF=proj_…  and  TRIGGER_SECRET_KEY=tr_dev_…
-npx trigger.dev@latest login
-npx trigger.dev@latest dev   # runs trigger/ tasks locally, orchestrated by the cloud
+# Pin the CLI to the @trigger.dev/sdk version in package.json (4.5.12 today) —
+# CLI/SDK drift breaks deploys in confusing ways; never use @latest.
+npx trigger.dev@4.5.12 login
+npx trigger.dev@4.5.12 dev   # runs trigger/ tasks locally, orchestrated by the cloud
 ```
 
 With `TRIGGER_SECRET_KEY` set, `enqueueIngest()` automatically switches
@@ -128,7 +130,8 @@ from the in-process fallback to `tasks.trigger("ingest-source", …)`.
 ### Deploying the task
 
 ```bash
-TRIGGER_PROJECT_REF=proj_… npx trigger.dev@latest deploy
+# CLI version pinned to match @trigger.dev/sdk in package.json.
+TRIGGER_PROJECT_REF=proj_… npx trigger.dev@4.5.12 deploy
 ```
 
 `trigger.config.ts` already includes the **ffmpeg build extension**, so the
