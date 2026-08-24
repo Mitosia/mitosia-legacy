@@ -1,9 +1,35 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
+import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { BuildExtension } from "@trigger.dev/build";
 import { defineConfig } from "@trigger.dev/sdk";
 import { ffmpegInstallCommand } from "./scripts/ffmpeg-pin.mjs";
+
+// Trigger workers register their OWN global OTel provider before task code
+// runs, so lib/ai/telemetry.ts's provider.register() silently loses there
+// and AI SDK spans vanish (observed: zero Langfuse traces from the first
+// real analysis runs). The supported path is Trigger's telemetry.exporters:
+// spans from Trigger's provider — including the AI SDK generation spans —
+// export to Langfuse's OTLP endpoint with Basic auth. Guarded on the keys
+// so keyless environments deploy an unchanged config.
+function langfuseExporters(): SpanExporter[] {
+  const publicKey = process.env.LANGFUSE_PUBLIC_KEY;
+  const secretKey = process.env.LANGFUSE_SECRET_KEY;
+  if (!(publicKey && secretKey)) {
+    return [];
+  }
+  const baseUrl = process.env.LANGFUSE_BASE_URL ?? "https://cloud.langfuse.com";
+  return [
+    new OTLPTraceExporter({
+      headers: {
+        Authorization: `Basic ${Buffer.from(`${publicKey}:${secretKey}`).toString("base64")}`,
+      },
+      url: `${baseUrl}/api/public/otel/v1/traces`,
+    }),
+  ];
+}
 
 // The version check has to run *inside* the deploy image, but it cannot be
 // COPYed in: the image build context is Trigger's own bundle output, not this
@@ -95,5 +121,8 @@ export default defineConfig({
       randomize: true,
     },
     enabledInDev: true,
+  },
+  telemetry: {
+    exporters: langfuseExporters(),
   },
 });
