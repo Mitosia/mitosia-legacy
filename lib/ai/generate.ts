@@ -21,6 +21,32 @@ import { getModelCandidates } from "./provider";
 // Telemetry: per-call experimental_telemetry lights up the OTel spans the
 // LangfuseSpanProcessor (lib/ai/telemetry.ts) is registered for.
 
+// One-shot diagnostic: whether AI SDK telemetry integrations are actually
+// registered when the first generation runs, and which OTel provider is
+// global. Cheap, and it turns "why are there no spans" from a deploy-cycle
+// mystery into one line in the run log.
+let telemetryStateLogged = false;
+function logTelemetryStateOnce(): void {
+  if (telemetryStateLogged) {
+    return;
+  }
+  telemetryStateLogged = true;
+  const integrations =
+    (globalThis as { AI_SDK_TELEMETRY_INTEGRATIONS?: unknown[] })
+      .AI_SDK_TELEMETRY_INTEGRATIONS ?? [];
+  import("@opentelemetry/api")
+    .then(({ trace }) => {
+      console.info(
+        `[ai] telemetry state: integrations=${integrations.length} provider=${trace.getTracerProvider().constructor.name}`
+      );
+    })
+    .catch(() => {
+      console.info(
+        `[ai] telemetry state: integrations=${integrations.length} provider=unknown`
+      );
+    });
+}
+
 export interface StructuredUsage {
   costUsd: number | null;
   inputTokens: number;
@@ -46,6 +72,8 @@ export async function generateStructured<T>(
   if (candidates.length === 0) {
     throw new Error("No AI provider configured");
   }
+
+  logTelemetryStateOnce();
 
   let lastError: unknown;
   for (const candidate of candidates) {
