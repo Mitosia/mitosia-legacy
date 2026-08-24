@@ -59,6 +59,14 @@ const KIND_LABELS: Record<HighlightKind, string> = {
   quote: "Quote",
   story: "Story",
 };
+// Chips need real plurals — "Story" + "s" shipped as "Storys" (and "Q&A"
+// would have become "Q&As").
+const KIND_PLURALS: Record<HighlightKind, string> = {
+  claim: "Claims",
+  qa: "Q&A",
+  quote: "Quotes",
+  story: "Stories",
+};
 const KIND_ORDER: HighlightKind[] = ["quote", "story", "claim", "qa"];
 
 function stamp(ms: number): string {
@@ -265,7 +273,7 @@ export function HighlightsPanel({
                   key={kind}
                   value={kind}
                 >
-                  {KIND_LABELS[kind]}s ({counts.get(kind)})
+                  {KIND_PLURALS[kind]} ({counts.get(kind)})
                 </ToggleGroupItem>
               )
             )}
