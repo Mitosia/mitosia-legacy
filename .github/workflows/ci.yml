@@ -26,6 +26,64 @@ env:
   STORAGE_FORCE_PATH_STYLE: "true"
 
 jobs:
+  # Classifies the diff so docs-only changes skip the e2e job: half of the
+  # merges to main touch nothing but docs/ and *.md (measured 19 of 39 on
+  # 2026-08-24), and each was paying the full ~4.5-minute e2e run for it.
+  # A required check skipped via `if:` satisfies branch protection, so
+  # docs-only PRs merge on `checks` alone.
+  #
+  # Fail-open by construction: any uncertainty — force-push, zero SHA,
+  # git error, or this job failing outright — must RUN e2e, never skip it.
+  # That is why the diff commands swallow errors into an empty list (empty
+  # classifies as code) and why the e2e `if:` tests `!= 'false'` rather
+  # than `== 'true'`: if this job dies, its output is empty and e2e still
+  # runs. Skipping e2e on a code change is the failure mode that lets a
+  # regression merge; ~15 s of classifier on every run is the premium.
+  #
+  # Knock-on, and deliberate: a docs-only merge to main also skips
+  # deploy-trigger (its `needs` includes e2e, and a skipped need skips the
+  # dependent). Correct, because .md files reach neither the app image nor
+  # the Trigger bundle — a deploy would rebuild an identical worker.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history: the classifier diffs against the PR base (or the
+          # pre-push head), which a depth-1 clone does not contain.
+          fetch-depth: 0
+
+      - name: Classify the diff
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          files=""
+          if [ "$EVENT" = "pull_request" ]; then
+            # HEAD is the PR merge commit; three-dot against the base is
+            # exactly the PR's file set.
+            files=$(git diff --name-only "origin/${BASE_REF}...HEAD" 2>/dev/null || true)
+          elif [ "$EVENT" = "push" ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+            files=$(git diff --name-only "$BEFORE" HEAD 2>/dev/null || true)
+          fi
+          if [ -z "$files" ]; then
+            echo "Could not classify the diff — running the full pipeline."
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "$files"
+          if echo "$files" | grep -qvE '^docs/|\.md$'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Docs-only diff — the e2e job (and any deploy) will be skipped."
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
   checks:
     runs-on: ubuntu-latest
     # Measured at ~3 minutes; this is a hang backstop, not a budget.
@@ -113,11 +171,11 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
 
-      # One unconditional step, not a cache-hit/miss pair — see the e2e job
-      # for why the split version was a mistake.
-      - name: Install Playwright browser and system dependencies
+      # One unconditional step, no `--with-deps` — see the e2e job for the
+      # apt-hang history and why the runner image already has the libraries.
+      - name: Install Playwright browser
         timeout-minutes: 10
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install chromium
 
       # The RLS suite above wipes and re-migrates this database in its
       # beforeAll, so this is normally a no-op — it exists so the prod suite
@@ -148,6 +206,13 @@ jobs:
 
   e2e:
     runs-on: ubuntu-latest
+    needs: changes
+    # `!= 'false'`, not `== 'true'`: if the classifier fails, its output is
+    # empty and this must still run (fail-open — see the changes job). The
+    # `!cancelled()` is what lets this job run at all after a failed need;
+    # without it a dead classifier would silently skip e2e, and a skipped
+    # required check MERGES.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # Measured at ~4 minutes (2 parallel workers). A run with no ceiling sat
     # on a stalled Playwright download for 3.5 hours before anyone noticed,
     # holding up a merge the whole time; GitHub's own default is 6 hours,
@@ -208,16 +273,18 @@ jobs:
 
       # One unconditional step, not a cache-hit/miss pair. `playwright install`
       # is a 0.8s no-op when the binary is already present, so the cache still
-      # saves the ~150s download — while the apt half runs exactly as it did
-      # before the cache existed.
+      # saves the ~150s download.
       #
-      # The split version put `install-deps` on the cache-hit path and it hung
-      # for the full 10-minute timeout on its first run, apt stalled partway
-      # through. apt was always part of `--with-deps` and never a problem;
-      # moving it onto its own conditional branch is what made it one.
-      - name: Install Playwright browser and system dependencies
+      # No `--with-deps`: the apt half ran on every job (~15s) and is the
+      # part that once hung — first for 3.5 hours with no job timeout, later
+      # for a full 10-minute step timeout when a split install put it on the
+      # cache-hit path. ubuntu-latest ships Chrome, so every shared library
+      # headless chromium needs is already on the image. If a future runner
+      # image drops one, the failure is loud (the browser fails to launch on
+      # the first test) — reinstate --with-deps then.
+      - name: Install Playwright browser
         timeout-minutes: 10
-        run: pnpm exec playwright install --with-deps chromium
+        run: pnpm exec playwright install chromium
 
       # The specs' beforeAll blocks generate these with ffmpeg — two are 10s
       # 720p encodes at 20 Mbps CBR, slow on a 2-vCPU runner. The encode
