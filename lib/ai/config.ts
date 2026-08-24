@@ -11,9 +11,16 @@ export const MODEL_TIERS = {
 } as const;
 export type ModelTier = keyof typeof MODEL_TIERS;
 
+// Which tiers accept the `effort` parameter. claude-haiku-4-5 REJECTS it
+// with "This model does not support the effort parameter" — a hard API
+// error, learned on staging 2026-08-24 when the first wired-effort call
+// failed every extraction. generateStructured gates on this, and the
+// config test asserts no route declares effort on an unsupported tier.
+export const EFFORT_TIERS: ReadonlySet<ModelTier> = new Set(["sonnet", "opus"]);
+
 export interface TaskRoute {
-  // Reasoning effort for the task (Anthropic adaptive thinking). Omit for
-  // provider default ("high"); "low" for mechanical extraction passes.
+  // Reasoning effort (Anthropic adaptive thinking) — only meaningful on
+  // EFFORT_TIERS; omit for the provider default ("high").
   effort?: "low" | "medium" | "high";
   maxOutputTokens: number;
   tier: ModelTier;
@@ -28,8 +35,8 @@ export const TASK_ROUTES = {
     tier: "sonnet",
   },
   // Chapters/topics over a full transcript: broad, structured, cheap.
+  // No effort: haiku rejects the parameter (see EFFORT_TIERS).
   "source-analysis.chapters": {
-    effort: "low",
     maxOutputTokens: 8000,
     tier: "haiku",
   },
@@ -49,8 +56,8 @@ export const TASK_ROUTES = {
     maxOutputTokens: 16_000,
     tier: "sonnet",
   },
+  // No effort: haiku rejects the parameter (see EFFORT_TIERS).
   "source-extraction.qa": {
-    effort: "low",
     maxOutputTokens: 12_000,
     tier: "haiku",
   },
