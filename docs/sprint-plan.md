@@ -191,6 +191,7 @@
 - White-label portal: logo, colors, custom domain (Cloudflare for SaaS)
 - Client roles; simplified review with approve / request changes; source-evidence view
 - Approved-asset library and delivery downloads; intake/request form v1
+- Source-import connectors behind one interface: direct file URL + Google Drive / Dropbox / Zoom cloud recordings, and Vimeo via its owner-authenticated download API — fetched into R2 under the org prefix, through the same ClamAV scan and ingest pipeline as uploads. **No YouTube extraction** (no official download API; yt-dlp violates ToS and datacenter IPs get bot-blocked — decision 2026-08-24, AGENTS.md); the support answer is "download from YouTube Studio and upload"
 - Internal-only versus client-visible comment scoping enforced
 
 **Exit:** A real client contact reviews and approves a batch on their phone under the agency's domain, never seeing internal data.
