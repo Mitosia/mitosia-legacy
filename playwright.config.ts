@@ -16,10 +16,17 @@ const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
   forbidOnly: !!process.env.CI,
-  // Serial: shared local dev DB; parallel workers would interleave writes.
+  // Parallelism is per spec FILE (fullyParallel stays false), so each file's
+  // beforeAll fixture generation runs once, in one worker. CI runs 3 workers:
+  // every test provisions its own account + organization, so RLS org-scoping
+  // keeps concurrent writers invisible to each other, storage keys are
+  // org-prefixed, and Better Auth's rate limiter is off in dev mode. Local
+  // runs stay serial — the shared dev DB also holds the developer's own data.
   fullyParallel: false,
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  reporter: process.env.CI ? "github" : "list",
+  // `github` annotates PR failures; `list` prints per-test durations so the
+  // CI log shows where the time goes.
+  reporter: process.env.CI ? [["github"], ["list"]] : "list",
   retries: process.env.CI ? 1 : 0,
   testDir: "./e2e",
   use: {
@@ -39,5 +46,5 @@ export default defineConfig({
     timeout: 120_000,
     url: BASE_URL,
   },
-  workers: 1,
+  workers: process.env.CI ? 3 : 1,
 });
