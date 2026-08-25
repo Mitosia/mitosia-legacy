@@ -26,6 +26,7 @@ const INDEX_FAILURE = /Voyage embeddings failed \(429\)/;
 const ONE_ACCEPTED = /1 accepted/;
 const ONE_ACCEPTED_ONE_REJECTED = /1 accepted · 1 rejected/;
 const RERUN_REFUSAL = /review decisions/;
+const REVIEW_TRIM_END = /Reviewer: trim end/;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -196,6 +197,26 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   expect(Number(leadInRow.start_ms)).toBe(0);
   expect(Number(leadInRow.raw_start_ms)).toBeGreaterThan(0);
 
+  // Reviewer agent (S6 §9): mock mode always reviews, so every surviving
+  // candidate carries a cold verdict and the mock's deterministic flag
+  // (last survivor, trim_end) is provable — columns and badge both.
+  const reviewRows = await queryRows<{
+    rank: string;
+    review_fix: string | null;
+    review_scores: unknown;
+  }>(
+    "SELECT rank, review_fix, review_scores FROM moment_candidate WHERE source_id = $1 AND suppressed = false ORDER BY rank",
+    [sourceId]
+  );
+  expect(
+    reviewRows.every((candidate) => candidate.review_scores !== null)
+  ).toBe(true);
+  const flaggedRows = reviewRows.filter(
+    (candidate) => candidate.review_fix !== "none"
+  );
+  expect(flaggedRows).toHaveLength(1);
+  expect(flaggedRows[0]?.review_fix).toBe("trim_end");
+
   // Every filter chip is interactive UI — open each one (project rule).
   const allItems = page.getByTestId("highlight-item");
   const total = await allItems.count();
@@ -233,6 +254,10 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     .poll(() => momentItems.count(), { timeout: 30_000 })
     .toBeGreaterThanOrEqual(3);
   await expect(page.getByTestId("moment-sensitive")).toHaveCount(1);
+  await expect(page.getByTestId("moment-review-flag")).toHaveCount(1);
+  await expect(page.getByTestId("moment-review-flag")).toHaveText(
+    REVIEW_TRIM_END
+  );
 
   // Play-from-in-point seeks to the exact in-point; a card click then
   // applies the 3s pre-roll (clamped to 0 on this tiny fixture) — the two

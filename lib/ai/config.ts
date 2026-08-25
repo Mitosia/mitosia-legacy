@@ -44,6 +44,16 @@ export const TASK_ROUTES = {
     maxOutputTokens: 24_000,
     tier: "sonnet",
   },
+  // Cold-context reviewer verdict (S6 §9): one SMALL call per candidate
+  // clip — input is only the clip's own span + title (a few k tokens, no
+  // cached prefix), output is four 0-2 rubric scores + a short note.
+  // Sonnet at medium effort: editorial judgment on a small artifact;
+  // budget = tiny payload (~150 tokens) + thinking headroom.
+  "moment-review.verdict": {
+    effort: "medium",
+    maxOutputTokens: 2000,
+    tier: "sonnet",
+  },
   // Chapters/topics over a full transcript: broad, structured, cheap.
   // No effort: haiku rejects the parameter (see EFFORT_TIERS).
   "source-analysis.chapters": {

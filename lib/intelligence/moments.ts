@@ -246,6 +246,20 @@ export function captureLeadIn(
   return { endMs: range.endMs, startMs: first.startMs };
 }
 
+// Display-form text of exactly one range — what a viewer of that clip
+// hears, and therefore the ENTIRE context the cold reviewer receives.
+export function spanText(
+  words: readonly TranscriptWord[],
+  range: MsRange
+): string {
+  return words
+    .filter(
+      (word) => word.startMs >= range.startMs && word.startMs < range.endMs
+    )
+    .map((word) => word.text)
+    .join(" ");
+}
+
 // Times where a speaker turn begins — lead-in starts land here, so they
 // belong to the valid boundary grid alongside sentence starts.
 export function speakerTurnStartTimes(

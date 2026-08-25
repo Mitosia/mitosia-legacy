@@ -22,6 +22,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { isFlaggedVerdict } from "@/lib/ai/capabilities/moment-review";
 import { isEmbeddingConfigured } from "@/lib/ai/embeddings/provider";
 import { isStalledAnalysis, scheduleAnalysisReap } from "@/lib/analysis/reaper";
 import {
@@ -495,6 +496,9 @@ export default async function SourceDetailPage(
               id: momentCandidate.id,
               rank: momentCandidate.rank,
               rejectReason: momentCandidate.rejectReason,
+              reviewFix: momentCandidate.reviewFix,
+              reviewNotes: momentCandidate.reviewNotes,
+              reviewScores: momentCandidate.reviewScores,
               scores: momentCandidate.scores,
               seedIds: momentCandidate.seedIds,
               sensitive: momentCandidate.sensitive,
@@ -514,8 +518,19 @@ export default async function SourceDetailPage(
             .orderBy(momentCandidate.rank)
         : [];
     const candidates: MomentCandidateView[] = candidateRows.map(
-      ({ seedIds, ...row }) => ({
+      ({ reviewScores, seedIds, ...row }) => ({
         ...row,
+        reviewFlagged:
+          reviewScores !== null &&
+          isFlaggedVerdict({
+            suggestedFix: row.reviewFix ?? "none",
+            ...(reviewScores as {
+              opensCold: number;
+              resolves: number;
+              standsAlone: number;
+              titleTruthful: number;
+            }),
+          }),
         scores: row.scores as MomentCandidateView["scores"],
         seedCount: Array.isArray(seedIds) ? seedIds.length : 0,
       })

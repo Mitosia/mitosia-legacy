@@ -60,6 +60,11 @@ export interface MomentCandidateView {
   id: string;
   rank: number;
   rejectReason: string | null;
+  // Cold-context reviewer verdict (null = not reviewed). Flagged rows
+  // surface the agent's one suggested fix to the human reviewer.
+  reviewFix: string | null;
+  reviewFlagged: boolean;
+  reviewNotes: string | null;
   scores: {
     comprehensibility: number;
     hook: number;
@@ -102,6 +107,14 @@ const REJECT_REASON_ORDER = [
   "duplicate",
   "other",
 ];
+
+const REVIEW_FIX_LABELS: Record<string, string> = {
+  drop: "Reviewer: consider dropping",
+  extend_start: "Reviewer: extend start",
+  none: "Reviewer: check",
+  retitle: "Reviewer: retitle",
+  trim_end: "Reviewer: trim end",
+};
 
 const STATUS_LABELS: Record<MomentStatus, string> = {
   accepted: "Accepted",
@@ -478,6 +491,12 @@ function MomentCard({ candidate, onPlay, onPlayFrom, words }: MomentCardProps) {
               Sensitive
             </Badge>
           ) : null}
+          {candidate.reviewFlagged ? (
+            <Badge data-testid="moment-review-flag" variant="outline">
+              {REVIEW_FIX_LABELS[candidate.reviewFix ?? "none"] ??
+                "Reviewer: check"}
+            </Badge>
+          ) : null}
         </span>
         <span className="text-muted-foreground text-sm">{candidate.hook}</span>
         <span className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs tabular-nums">
@@ -503,6 +522,14 @@ function MomentCard({ candidate, onPlay, onPlayFrom, words }: MomentCardProps) {
         <span className="line-clamp-2 text-muted-foreground text-xs">
           {candidate.summary}
         </span>
+        {candidate.reviewFlagged && candidate.reviewNotes ? (
+          <span
+            className="line-clamp-2 text-muted-foreground text-xs italic"
+            data-testid="moment-review-notes"
+          >
+            {candidate.reviewNotes}
+          </span>
+        ) : null}
       </button>
       <NudgeControls
         candidate={candidate}
