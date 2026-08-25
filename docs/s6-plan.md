@@ -1,6 +1,6 @@
 # S6 Implementation Plan — Moment Discovery (Gate M1)
 
-**Status:** Ready to implement. Written 2026-08-25 against main @ `5e5cf0a`, for an implementing agent starting in a **fresh session with none of the S5 session's context**. Everything you need is in this document, the files it names, AGENTS.md, and the project memory index.
+**Status:** IMPLEMENTED 2026-08-25 — the three-PR train is built and open (PR-A #81 schema/pipeline/chain, PR-B #82 review UI/actions/metrics, PR-C quality/cost). All unit/e2e/eval gates green locally; `effort: "medium"` landed on the sonnet extraction passes (eval parity; claims-on-haiku tested and rejected); the citation-relevance judge rides the qa eval. **Gate M1 (§12) is NOT yet run** — it needs the train merged + deployed and a fresh podcast from Rajesh; record the outcome here when it happens. Originally written 2026-08-25 against main @ `5e5cf0a` for a fresh implementing agent.
 **Authored by:** the S5 session (planning + build + staging exit all verified 2026-08-24/25).
 **Sprint-plan source:** docs/sprint-plan.md § S6 — re-derived below against what actually exists; where this document and the sprint plan disagree, this document wins (the sprint plan predates all S5 code).
 
