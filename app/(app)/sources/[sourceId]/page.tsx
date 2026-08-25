@@ -398,6 +398,7 @@ export default async function SourceDetailPage(
 
     const [indexRow] = await tx
       .select({
+        error: sourceIndex.error,
         revision: sourceIndex.revision,
         stalled: sql<boolean>`(${isStalledSourceIndex})`,
         status: sourceIndex.status,
@@ -544,6 +545,7 @@ export default async function SourceDetailPage(
           analysis={workspaceAnalysis(data)}
           highlights={workspaceHighlights(data)}
           hlsUrl={`/api/media/${hlsKey}`}
+          index={data.index}
           peaksUrl={waveformKey ? `/api/media/${waveformKey}` : null}
           posterUrl={posterKey ? `/api/media/${posterKey}` : null}
           qa={qaHistory === null ? null : { history: qaHistory }}
