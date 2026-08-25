@@ -1,6 +1,7 @@
 # Episode → Clips: the editorial thought process, and the harness that implements it
 
 **Status:** Design. Written 2026-08-26 from Rajesh's question on the Brett Lee source ("how would you break this video into clips for easy upload, and so viewers aren't forced to watch an hour?") — capturing the *thought process* first and the *system* second, so the system stays an implementation of the editorial method rather than a pile of features. Worked example throughout: the TRS Brett Lee interview (58:19), already fully processed on staging (24 chapters, 39 grounded highlights, 18 moment candidates).
+**Priority decision (Rajesh, 2026-08-26):** extraction quality comes FIRST — clip selection and boundaries must feel like the work of a real human editor/director before anything downstream (render polish, format variants, upload) gets attention. §7's platform question is thereby deferred; §8 defines the bar and the loop that gets there.
 **Consumes:** everything S2–S6 built. **Feeds:** S8 (edit spec), S9 (render), S10 (reframe), S17 (distribution).
 
 ---
@@ -134,6 +135,18 @@ One observed input-quality issue this design must not inherit: the current chapt
 
 ## 7. Open questions for Rajesh
 
-1. **Primary platform for segment clips** — YouTube clips-channel style (16:9, 2–8 min) is what this design assumes; confirm, or reorder if Reels/Shorts matter more (that pulls S10 forward instead).
+1. **Primary platform for segment clips** — ~~confirm 16:9 clips-channel style~~ **Deferred (2026-08-26): extraction quality first; format decisions after §8's bar is met.**
 2. **Is a download bundle acceptable "easy upload" for v1**, with platform APIs later? (Design assumes yes.)
 3. **Handles and normalization defaults** — 200ms audio handles, no loudness normalization in v1: fine, or is R128 normalization table-stakes for your uploads?
+
+## 8. The bar, and the loop that reaches it
+
+"Feels like a real editor did it" decomposes into five testable properties, each with an owner in the harness:
+
+1. **In-points open on the setup.** The clip's first seconds make a cold viewer oriented — the question, the setup line, the topic turn. Owner: `captureLeadIn` + the prompt's start-at-the-setup instruction (landed 2026-08-26 after the first M1 finding). Measured by: in-point boundary deltas + `wrong_boundaries` rejects.
+2. **Out-points land on the payoff.** The clip ends when the thought resolves — never mid-sentence, never after the pivot into the next topic has begun. The predicted symmetric artifact of finding #1 is *overrun*: a span that swallows the first seconds of the NEXT question. The designed twin fix — lead-out trim: when a span ends inside a new other-speaker turn that continues past it, pull the out-point back to the end of the moment speaker's last turn — is deliberately NOT built yet: it ships when a review round shows the artifact, keeping every gauntlet rule evidence-backed.
+3. **Selection has no misses and no filler.** Every marquee arc of the episode is present; nothing weak padded in. Misses are currently invisible to the metrics (a reviewer can only reject what was proposed) — the review UI needs a cheap "what's missing?" affordance: the chapter list with un-covered stretches marked, so a miss becomes a recordable finding rather than a vague feeling.
+4. **Self-containment.** A stranger understands each clip with zero outside context. Measured today by acceptance + `out_of_context` rejects; the citation-relevance-judge pattern extends to a boundary-naturalness judge in the eval once real fixtures accumulate.
+5. **The packaging tells the truth.** Title/hook name the payoff and match what plays. Measured by title-edit rate once segment clips exist.
+
+**The loop** is the M1 mechanism, run as many rounds as it takes: Rajesh reviews on a real source → each concrete finding becomes a deterministic rule (preferred) or a prompt change, locked in by unit tests + the golden eval so it can never regress silently → discovery re-runs → next round. Round 1 produced lead-in capture. The lever list, in the order evidence is likely to demand them: lead-out trim (§8.2), the uniform-chapter-starts fix (§5 — chapters feed both surfaces), a **discovery-on-opus experiment** (the model-tiering table has always said editorial judgment rides Opus; run it as an A/B on the same source once the deterministic gauntlet stops being the binding constraint — model quality is the last lever, not the first), and per-dimension score recalibration from accumulated accept/reject data. The metrics readout (`pnpm moments:metrics`) is the gate for each round; the bar is met when a fresh source's top ten needs no boundary work and survives review at the M1 threshold without coaching.
