@@ -101,7 +101,10 @@ Rules:
 const INSTRUCTIONS = `Propose the standalone clip-worthy moments in this recording: self-contained spans a viewer would stop scrolling for — a sharp story, a surprising claim, a vivid answer, a crystallizing exchange.
 
 For each candidate emit:
-- startMs/endMs: the full moment's span (aim for 20-90 seconds).
+- startMs/endMs: the full moment's span (aim for 20-90 seconds). When the
+  moment is an answer, reaction, or story told in response to the other
+  speaker, START at the question or setup line that provokes it — a clip
+  that opens mid-answer is not standalone.
 - anchorText: a short VERBATIM phrase from inside the moment (its most
   distinctive words).
 - title: specific, not generic.

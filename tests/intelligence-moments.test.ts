@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMomentRows,
+  captureLeadIn,
   compositeScore,
   dedupeCandidates,
   MOMENT_COMPOSITE_WEIGHTS,
@@ -20,7 +21,7 @@ import type { TranscriptWord } from "../lib/transcription/types";
 // load-bearing — same stakes as the chunker tests.
 
 function makeWords(
-  sentences: { gapMs?: number; words: string[] }[]
+  sentences: { gapMs?: number; speaker?: string | null; words: string[] }[]
 ): TranscriptWord[] {
   const out: TranscriptWord[] = [];
   let cursor = 0;
@@ -30,7 +31,7 @@ function makeWords(
       out.push({
         confidence: 0.95,
         endMs: cursor + 250,
-        speaker: "0",
+        speaker: sentence.speaker === undefined ? "0" : sentence.speaker,
         startMs: cursor,
         text,
       });
@@ -219,6 +220,78 @@ describe("dedupeCandidates", () => {
       [{ embedding: [1, 0, 0], endMs: 10_000, startMs: 0 }]
     );
     expect(verdicts.every((verdict) => !verdict.suppressed)).toBe(true);
+  });
+});
+
+describe("captureLeadIn", () => {
+  // Interview shape: a short question by speaker 1, then the answer by
+  // speaker 0 — the Brett Lee case (the model anchors on the answer and
+  // the span opens mid-exchange).
+  const interview = makeWords([
+    { speaker: "0", words: ["Earlier", "context", "ends", "here."] },
+    { speaker: "1", words: ["What", "was", "your", "plan?"] },
+    { speaker: "0", words: ["Well", "I", "bowled", "fast."] },
+  ]);
+  const answerStart = interview[8].startMs;
+  const questionStart = interview[4].startMs;
+
+  it("grows an answer-opening span back over the short setup question", () => {
+    const captured = captureLeadIn(
+      { endMs: interview[11].endMs, startMs: answerStart },
+      interview
+    );
+    expect(captured.startMs).toBe(questionStart);
+  });
+
+  it("leaves mid-monologue starts to sentence snapping", () => {
+    // Preceding words are the SAME speaker — no conversational setup.
+    const monologue = makeWords([
+      { speaker: "0", words: ["First", "thought", "ends."] },
+      { speaker: "0", words: ["Second", "thought", "ends."] },
+    ]);
+    const start = monologue[3].startMs;
+    expect(
+      captureLeadIn({ endMs: monologue[5].endMs, startMs: start }, monologue)
+        .startMs
+    ).toBe(start);
+  });
+
+  it("ignores a long preceding turn — that is the other speaker's own moment", () => {
+    const longTurn = makeWords([
+      {
+        speaker: "1",
+        words: Array.from({ length: 80 }, (_, i) => `q${i}`),
+      },
+      { speaker: "0", words: ["The", "answer", "here."] },
+    ]);
+    const start = longTurn[80].startMs;
+    expect(
+      captureLeadIn({ endMs: longTurn[82].endMs, startMs: start }, longTurn)
+        .startMs
+    ).toBe(start);
+  });
+
+  it("ignores a setup separated by a long silence", () => {
+    const gapped = makeWords([
+      { speaker: "1", words: ["A", "question?"] },
+      { gapMs: 5000, speaker: "0", words: ["An", "answer."] },
+    ]);
+    const start = gapped[2].startMs;
+    expect(
+      captureLeadIn({ endMs: gapped[3].endMs, startMs: start }, gapped).startMs
+    ).toBe(start);
+  });
+
+  it("does nothing when speakers are unknown", () => {
+    const unlabeled = makeWords([
+      { speaker: null, words: ["Setup", "line?"] },
+      { speaker: "0", words: ["The", "answer."] },
+    ]);
+    const start = unlabeled[2].startMs;
+    expect(
+      captureLeadIn({ endMs: unlabeled[3].endMs, startMs: start }, unlabeled)
+        .startMs
+    ).toBe(start);
   });
 });
 

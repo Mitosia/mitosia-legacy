@@ -193,6 +193,73 @@ export function snapToSentences(
   return { endMs, startMs };
 }
 
+// Lead-in capture (the Brett Lee finding, staging 2026-08-25): a moment
+// that opens with one speaker answering owes its meaning to the short
+// other-speaker turn right before it — the interviewer's question or
+// setup. The model anchors on the answer (that's where the anchor text
+// lives) and sentence-snapping cannot reason about conversation structure,
+// so the span started mid-exchange and the clip opened without its
+// context. Deterministic rule: when the immediately preceding turn is by a
+// DIFFERENT speaker, short enough to be a prompt, and close enough to be
+// part of the exchange, the span grows to include it.
+export const LEAD_IN_MAX_TURN_MS = 20_000;
+export const LEAD_IN_MAX_GAP_MS = 3000;
+
+export function captureLeadIn(
+  range: MsRange,
+  words: readonly TranscriptWord[]
+): MsRange {
+  const openerIndex = words.findIndex((word) => word.startMs >= range.startMs);
+  if (openerIndex <= 0) {
+    return range;
+  }
+  const opener = words[openerIndex];
+  const previous = words[openerIndex - 1];
+  if (!(opener && previous)) {
+    return range;
+  }
+  // Same speaker before the opener = mid-monologue start (snapping's job),
+  // and unknown speakers give the rule nothing to reason with.
+  if (
+    opener.speaker === null ||
+    previous.speaker === null ||
+    previous.speaker === opener.speaker
+  ) {
+    return range;
+  }
+  if (opener.startMs - previous.endMs > LEAD_IN_MAX_GAP_MS) {
+    return range;
+  }
+  // Walk back to where the preceding speaker's turn began.
+  let turnStart = openerIndex - 1;
+  while (turnStart > 0 && words[turnStart - 1]?.speaker === previous.speaker) {
+    turnStart -= 1;
+  }
+  const first = words[turnStart];
+  if (!first) {
+    return range;
+  }
+  // A long preceding turn is the other speaker's own moment, not a setup.
+  if (previous.endMs - first.startMs > LEAD_IN_MAX_TURN_MS) {
+    return range;
+  }
+  return { endMs: range.endMs, startMs: first.startMs };
+}
+
+// Times where a speaker turn begins — lead-in starts land here, so they
+// belong to the valid boundary grid alongside sentence starts.
+export function speakerTurnStartTimes(
+  words: readonly TranscriptWord[]
+): number[] {
+  const times: number[] = [];
+  for (const [index, word] of words.entries()) {
+    if (index === 0 || words[index - 1]?.speaker !== word.speaker) {
+      times.push(word.startMs);
+    }
+  }
+  return times;
+}
+
 export interface AnchorGrounding {
   endMs: number;
   grounded: boolean;
@@ -491,8 +558,8 @@ export function buildMomentRows(
   const processed = items.map((item) => {
     const rawStartMs = Math.max(0, Math.min(item.startMs, durationMs));
     const rawEndMs = Math.max(rawStartMs, Math.min(item.endMs, durationMs));
-    const snapped = snapToSentences(
-      { endMs: rawEndMs, startMs: rawStartMs },
+    const snapped = captureLeadIn(
+      snapToSentences({ endMs: rawEndMs, startMs: rawStartMs }, words),
       words
     );
     const anchor = groundMomentAnchor(item.anchorText, snapped, tokens);
