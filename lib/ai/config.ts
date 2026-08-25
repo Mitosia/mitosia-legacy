@@ -34,6 +34,16 @@ export const TASK_ROUTES = {
     maxOutputTokens: 2000,
     tier: "sonnet",
   },
+  // Moment discovery (S6): ONE pass proposing clip-worthy candidates over
+  // the cached transcript prefix — editorial judgment, sonnet. Budget math
+  // (the S5 rule — thinking counts against maxOutputTokens): schema bound
+  // 24 items × ~350 tokens/item (span + title/hook/summary/anchor +
+  // scores) ≈ 8.5k payload + generous adaptive-thinking headroom ≈ well
+  // under 24k, so the pass cannot truncate.
+  "moment-discovery.candidates": {
+    maxOutputTokens: 24_000,
+    tier: "sonnet",
+  },
   // Chapters/topics over a full transcript: broad, structured, cheap.
   // No effort: haiku rejects the parameter (see EFFORT_TIERS).
   "source-analysis.chapters": {

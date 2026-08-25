@@ -71,6 +71,13 @@
       "when": 1787572118628,
       "tag": "0009_s5-source-qa",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1787671832764,
+      "tag": "0010_s6-moment-discovery",
+      "breakpoints": true
     }
   ]
 }

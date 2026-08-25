@@ -122,6 +122,63 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
       ?.classification
   ).toBe("paraphrase");
 
+  // S6: extraction success chains moment discovery (mocked). The run must
+  // land ready with grounded, sentence-snapped candidates inside the media,
+  // the mock's deliberate near-duplicate visibly suppressed by dedupe, and
+  // the high-risk item flagged sensitive — the whole deterministic gauntlet
+  // proven from the database.
+  await expect
+    .poll(
+      async () => {
+        const [discovery] = await queryRows<{ status: string }>(
+          "SELECT status FROM moment_discovery_run WHERE source_id = $1",
+          [sourceId]
+        );
+        return discovery?.status ?? "missing";
+      },
+      { timeout: 60_000 }
+    )
+    .toBe("ready");
+  const candidateRows = await queryRows<{
+    dedupe_group: number | null;
+    end_ms: string;
+    grounded: boolean;
+    rank: string;
+    sensitive: boolean;
+    start_ms: string;
+    suppressed: boolean;
+  }>(
+    "SELECT grounded, sensitive, suppressed, dedupe_group, rank, start_ms, end_ms FROM moment_candidate WHERE source_id = $1 ORDER BY rank",
+    [sourceId]
+  );
+  expect(candidateRows.length).toBeGreaterThanOrEqual(4);
+  for (const candidate of candidateRows) {
+    expect(candidate.grounded).toBe(true);
+    expect(Number(candidate.end_ms)).toBeGreaterThan(
+      Number(candidate.start_ms)
+    );
+    expect(Number(candidate.end_ms)).toBeLessThanOrEqual(
+      FIXTURE_SECONDS * 1000
+    );
+  }
+  expect(candidateRows.map((candidate) => Number(candidate.rank))).toEqual(
+    candidateRows.map((_, index) => index)
+  );
+  const survivors = candidateRows.filter((candidate) => !candidate.suppressed);
+  const suppressed = candidateRows.filter((candidate) => candidate.suppressed);
+  expect(survivors.length).toBeGreaterThanOrEqual(3);
+  expect(suppressed).toHaveLength(1);
+  // The loser shares its dedupe group with a kept candidate.
+  expect(suppressed[0]?.dedupe_group).not.toBeNull();
+  expect(
+    survivors.some(
+      (candidate) => candidate.dedupe_group === suppressed[0]?.dedupe_group
+    )
+  ).toBe(true);
+  expect(candidateRows.filter((candidate) => candidate.sensitive)).toHaveLength(
+    1
+  );
+
   // Every filter chip is interactive UI — open each one (project rule).
   const allItems = page.getByTestId("highlight-item");
   const total = await allItems.count();

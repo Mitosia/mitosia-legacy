@@ -1,5 +1,6 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { runMomentDiscovery } from "@/lib/ai/capabilities/moment-discovery";
 import {
   runSourceAnalysis,
   transcriptToPromptText,
@@ -14,12 +15,14 @@ import {
   type QaOutcome,
   scoreChapters,
   scoreExtractions,
+  scoreMoments,
   scoreQa,
   scoreSpeakerSuggestions,
   scoreSummary,
 } from "@/lib/ai/evals/scorers";
 import { buildChunks } from "@/lib/intelligence/chunks";
 import { groundExtractions } from "@/lib/intelligence/grounding";
+import { buildMomentRows } from "@/lib/intelligence/moments";
 import type { TranscriptData } from "@/lib/transcription/types";
 
 // Golden-eval runner for the source-analysis capability: every fixture in
@@ -40,6 +43,10 @@ const THRESHOLDS: Record<string, number> = {
   // provenance bar. Below 0.8 the extraction prompt is regressing on the
   // one property the product depends on.
   extraction: 0.8,
+  // Discovery candidates: grounded-anchor rate with structure penalties
+  // (sentence-grid bounds, dedupe, clip-range durations). Off-grid bounds
+  // or a dedupe miss halves the score, so 0.8 only passes clean runs.
+  moments: 0.8,
   // Answerability verdicts + citation-overlap on the golden questions.
   qa: 0.7,
   speakers: 0.6,
@@ -179,11 +186,34 @@ async function evaluateFixture(
     fixture.durationMs
   );
 
+  // Discovery runs the real capability + the production post-processing
+  // (snap/ground/dedupe/rank), so the eval measures exactly what ships.
+  // No seeds/chunks: the runner has no database — range-IoU dedupe still
+  // runs, the cosine pass is skipped, matching a source with no index.
+  const discovery = await runMomentDiscovery({
+    analysis: null,
+    contextPack: { ...fixture.pack, kind: "moment-discovery" },
+    durationMs: fixture.durationMs,
+    seeds: [],
+    transcript: fixture.transcript,
+  });
+  const momentRows = buildMomentRows(
+    discovery.items,
+    fixture.transcript.words,
+    fixture.durationMs,
+    []
+  );
+
   const qaOutcomes = await evaluateQuestions(fixture);
 
   const scores: Record<string, ReturnType<typeof scoreSummary>> = {
     chapters: scoreChapters(result.chapters, fixture.durationMs),
     extraction: scoreExtractions(groundedRows, fixture.durationMs),
+    moments: scoreMoments(
+      momentRows,
+      fixture.durationMs,
+      fixture.transcript.words
+    ),
     speakers: scoreSpeakerSuggestions(result.editorial.speakers, speakerIds),
     summary: scoreSummary(result.editorial.summary),
   };
@@ -214,10 +244,11 @@ async function evaluateFixture(
     }
   }
 
-  const spentUsd = [...result.usage, ...extraction.usage].reduce(
-    (total, usage) => total + (usage.costUsd ?? 0),
-    0
-  );
+  const spentUsd = [
+    ...result.usage,
+    ...extraction.usage,
+    ...discovery.usage,
+  ].reduce((total, usage) => total + (usage.costUsd ?? 0), 0);
   if (spentUsd > 0) {
     console.log(`   cost: $${spentUsd.toFixed(4)}`);
   }

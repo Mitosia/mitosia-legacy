@@ -225,6 +225,161 @@ export const sourceExtractionRelations = relations(
   })
 );
 
+// ---- Moment discovery (S6) -----------------------------------------------
+//
+// moment_discovery_run is the lifecycle row (one per source, the
+// source_extraction_run clone); moment_candidate holds the clip-worthy
+// moments the discovery pass proposed — every candidate anchored to a
+// verbatim transcript phrase the grounding aligner verified inside its
+// SNAPPED (sentence-aligned) range. Ungrounded rows persist with
+// grounded=false for run stats but never surface. Candidate ids are stable
+// within a run — S8 edit specs will reference them — but re-runs
+// delete-and-replace, which is why the rerun action refuses when human
+// decisions exist (the decisions ARE the M1 record).
+
+// Human review verdicts (D5): first-class columns, never client state —
+// acceptance rate and boundary-adjustment magnitude are each one SQL query.
+const CANDIDATE_STATUSES = [
+  "proposed",
+  "shortlisted",
+  "accepted",
+  "rejected",
+] as const;
+export type MomentCandidateStatus = (typeof CANDIDATE_STATUSES)[number];
+
+// TypeScript-level enum only (no DB constraint) — extends without migration.
+const REJECT_REASONS = [
+  "not_interesting",
+  "wrong_boundaries",
+  "out_of_context",
+  "sensitive",
+  "duplicate",
+  "other",
+] as const;
+export type MomentRejectReason = (typeof REJECT_REASONS)[number];
+
+export const momentDiscoveryRun = pgTable(
+  "moment_discovery_run",
+  {
+    attempts: integer("attempts").default(0).notNull(),
+    contextSnapshotId: uuid("context_snapshot_id").references(
+      () => contextSnapshot.id,
+      { onDelete: "set null" }
+    ),
+    // {proposed, grounded, suppressed} — run-level facts for stats/UI
+    counts: jsonb("counts"),
+    error: text("error"),
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    // {"moment-discovery.candidates": {model, provider}}
+    models: jsonb("models"),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    // Transcript revision discovered from; a newer current revision =
+    // stale candidates (re-run is a human action, like extraction)
+    revision: integer("revision"),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => source.id, { onDelete: "cascade" }),
+    status: text("status", { enum: INDEX_STATUSES })
+      .default("pending")
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    index("moment_discovery_run_org_idx").on(table.organizationId),
+    uniqueIndex("moment_discovery_run_source_idx").on(table.sourceId),
+  ]
+);
+
+export const momentCandidate = pgTable(
+  "moment_candidate",
+  {
+    // Human boundary edits; null until touched. |adjusted − snapped| is
+    // the M1 boundary-adjustment metric.
+    adjustedEndMs: integer("adjusted_end_ms"),
+    adjustedStartMs: integer("adjusted_start_ms"),
+    // Verbatim phrase from inside the moment, aligner-verified
+    anchorText: text("anchor_text").notNull(),
+    // See MOMENT_COMPOSITE_WEIGHTS (lib/intelligence/moments.ts) — risk is
+    // deliberately excluded (a flag, not a demerit)
+    composite: real("composite").notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    decidedAt: timestamp("decided_at"),
+    decidedBy: text("decided_by").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    // Shared by the kept candidate and its suppressed duplicates; null for
+    // candidates that never collided
+    dedupeGroup: integer("dedupe_group"),
+    endMs: integer("end_ms").notNull(),
+    grounded: boolean("grounded").notNull(),
+    groundingScore: real("grounding_score").notNull(),
+    // One sentence: why a viewer stops scrolling
+    hook: text("hook").notNull(),
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    // 0-based after dedupe+sort; display order (survivors first)
+    rank: integer("rank").notNull(),
+    // Model's original claim, pre-snap — instrumentation for how far
+    // snapping moved the boundaries
+    rawEndMs: integer("raw_end_ms").notNull(),
+    rawStartMs: integer("raw_start_ms").notNull(),
+    rejectNote: text("reject_note"),
+    rejectReason: text("reject_reason", { enum: REJECT_REASONS }),
+    revision: integer("revision").notNull(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => momentDiscoveryRun.id, { onDelete: "cascade" }),
+    // {comprehensibility, hook, insight, relevance, risk} each 0–1
+    scores: jsonb("scores").notNull(),
+    // source_extraction ids the model says it drew on (may be empty)
+    seedIds: jsonb("seed_ids").notNull(),
+    // risk ≥ 0.6 → badge in the UI, never auto-exclusion
+    sensitive: boolean("sensitive").notNull(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => source.id, { onDelete: "cascade" }),
+    // SNAPPED (sentence-aligned) bounds — what plays
+    startMs: integer("start_ms").notNull(),
+    status: text("status", { enum: CANDIDATE_STATUSES })
+      .default("proposed")
+      .notNull(),
+    summary: text("summary").notNull(),
+    // Lost its dedupe group; kept for instrumentation, hidden by default
+    suppressed: boolean("suppressed").notNull(),
+    title: text("title").notNull(),
+  },
+  (table) => [
+    index("moment_candidate_org_idx").on(table.organizationId),
+    index("moment_candidate_source_idx").on(table.sourceId, table.rank),
+    index("moment_candidate_run_idx").on(table.runId),
+  ]
+);
+
+export const momentDiscoveryRunRelations = relations(
+  momentDiscoveryRun,
+  ({ many, one }) => ({
+    candidates: many(momentCandidate),
+    source: one(source, {
+      fields: [momentDiscoveryRun.sourceId],
+      references: [source.id],
+    }),
+  })
+);
+
+export const momentCandidateRelations = relations(
+  momentCandidate,
+  ({ one }) => ({
+    run: one(momentDiscoveryRun, {
+      fields: [momentCandidate.runId],
+      references: [momentDiscoveryRun.id],
+    }),
+  })
+);
+
 // ---- Source Q&A (S5) -----------------------------------------------------
 //
 // One row per question asked of a source: the answer, its verified

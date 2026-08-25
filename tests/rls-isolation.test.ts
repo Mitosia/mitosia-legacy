@@ -9,6 +9,8 @@ import {
   campaign,
   client,
   contextSnapshot,
+  momentCandidate,
+  momentDiscoveryRun,
   project,
   source,
   sourceAnalysis,
@@ -195,6 +197,46 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
       startMs: 0,
       text: `${organizationId} extraction`,
     });
+    const [discoveryRunRow] = await tx
+      .insert(momentDiscoveryRun)
+      .values({
+        organizationId,
+        revision: 1,
+        // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+        sourceId: sourceRow!.id,
+        status: "ready",
+      })
+      .returning({ id: momentDiscoveryRun.id });
+    await tx.insert(momentCandidate).values({
+      anchorText: `${organizationId} anchor`,
+      composite: 0.8,
+      endMs: 1000,
+      grounded: true,
+      groundingScore: 1,
+      hook: "A seeded hook.",
+      organizationId,
+      rank: 0,
+      rawEndMs: 1000,
+      rawStartMs: 0,
+      revision: 1,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      runId: discoveryRunRow!.id,
+      scores: {
+        comprehensibility: 0.8,
+        hook: 0.8,
+        insight: 0.8,
+        relevance: 0.8,
+        risk: 0.1,
+      },
+      seedIds: [],
+      sensitive: false,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      sourceId: sourceRow!.id,
+      startMs: 0,
+      summary: "A seeded summary.",
+      suppressed: false,
+      title: `${organizationId} moment`,
+    });
     await tx.insert(sourceQuestion).values({
       answer: "seed answer",
       answerable: true,
@@ -289,6 +331,8 @@ const TENANT_TABLES = [
   { label: "transcript_chunk", table: transcriptChunk },
   { label: "source_extraction_run", table: sourceExtractionRun },
   { label: "source_extraction", table: sourceExtraction },
+  { label: "moment_discovery_run", table: momentDiscoveryRun },
+  { label: "moment_candidate", table: momentCandidate },
   { label: "source_question", table: sourceQuestion },
   { label: "context_snapshot", table: contextSnapshot },
   { label: "source_analysis", table: sourceAnalysis },
