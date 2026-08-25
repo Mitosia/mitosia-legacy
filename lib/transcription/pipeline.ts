@@ -95,10 +95,14 @@ function assertWithinDuration(data: TranscriptData): void {
   }
 }
 
+// finalAttempt=false (a Trigger retry is coming) parks the row back in
+// "pending" instead of flashing a terminal "failed" between attempts (see
+// lib/intelligence/extract-pipeline.ts, same contract).
 async function recordTranscriptFailure(
   payload: TranscriptionPayload,
   transcriptId: string,
-  error: unknown
+  error: unknown,
+  finalAttempt: boolean
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown transcription failure";
@@ -110,14 +114,15 @@ async function recordTranscriptFailure(
           0,
           TRANSCRIPT_ERROR_MAX_CHARS
         ),
-        status: "failed",
+        status: finalAttempt ? "failed" : "pending",
       })
       .where(eq(transcript.id, transcriptId))
   );
 }
 
 export async function runTranscription(
-  payload: TranscriptionPayload
+  payload: TranscriptionPayload,
+  options: { finalAttempt?: boolean } = {}
 ): Promise<void> {
   const claimed = await claimTranscript(payload);
   if (!claimed) {
@@ -299,7 +304,12 @@ export async function runTranscription(
       );
     }
   } catch (error) {
-    await recordTranscriptFailure(payload, claimed.transcriptId, error);
+    await recordTranscriptFailure(
+      payload,
+      claimed.transcriptId,
+      error,
+      options.finalAttempt ?? true
+    );
     throw error;
   }
 }

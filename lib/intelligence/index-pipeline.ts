@@ -69,10 +69,14 @@ async function claimIndex(
   });
 }
 
+// finalAttempt=false (a Trigger retry is coming) parks the row back in
+// "pending" instead of flashing a terminal "failed" between attempts (see
+// lib/intelligence/extract-pipeline.ts, same contract).
 async function recordIndexFailure(
   payload: SourceIndexPayload,
   indexId: string,
-  error: unknown
+  error: unknown,
+  finalAttempt: boolean
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown indexing failure";
@@ -81,14 +85,15 @@ async function recordIndexFailure(
       .update(sourceIndex)
       .set({
         error: sanitizeIngestError(message).slice(0, INDEX_ERROR_MAX_CHARS),
-        status: "failed",
+        status: finalAttempt ? "failed" : "pending",
       })
       .where(eq(sourceIndex.id, indexId))
   );
 }
 
 export async function runSourceIndex(
-  payload: SourceIndexPayload
+  payload: SourceIndexPayload,
+  options: { finalAttempt?: boolean } = {}
 ): Promise<void> {
   const claimed = await claimIndex(payload);
   if (!claimed) {
@@ -184,7 +189,12 @@ export async function runSourceIndex(
       }
     });
   } catch (error) {
-    await recordIndexFailure(payload, claimed.indexId, error);
+    await recordIndexFailure(
+      payload,
+      claimed.indexId,
+      error,
+      options.finalAttempt ?? true
+    );
     throw error;
   }
 }

@@ -92,10 +92,15 @@ async function claimRun(payload: DiscoveryPayload): Promise<ClaimedRun | null> {
   });
 }
 
+// finalAttempt=false (a Trigger retry is coming) parks the row back in
+// "pending" — claimable by the next attempt, rendered as still-working —
+// instead of flashing a terminal "failed" between attempts (see
+// extract-pipeline.ts, same contract).
 async function recordRunFailure(
   payload: DiscoveryPayload,
   runId: string,
-  error: unknown
+  error: unknown,
+  finalAttempt: boolean
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown discovery failure";
@@ -104,7 +109,7 @@ async function recordRunFailure(
       .update(momentDiscoveryRun)
       .set({
         error: sanitizeIngestError(message).slice(0, DISCOVER_ERROR_MAX_CHARS),
-        status: "failed",
+        status: finalAttempt ? "failed" : "pending",
       })
       .where(eq(momentDiscoveryRun.id, runId))
   );
@@ -242,7 +247,10 @@ async function loadDedupeChunks(
   });
 }
 
-export async function runDiscovery(payload: DiscoveryPayload): Promise<void> {
+export async function runDiscovery(
+  payload: DiscoveryPayload,
+  options: { finalAttempt?: boolean } = {}
+): Promise<void> {
   const claimed = await claimRun(payload);
   if (!claimed) {
     return;
@@ -364,7 +372,12 @@ export async function runDiscovery(payload: DiscoveryPayload): Promise<void> {
       }
     });
   } catch (error) {
-    await recordRunFailure(payload, claimed.runId, error);
+    await recordRunFailure(
+      payload,
+      claimed.runId,
+      error,
+      options.finalAttempt ?? true
+    );
     throw error;
   }
 }

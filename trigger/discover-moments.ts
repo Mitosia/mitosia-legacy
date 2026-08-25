@@ -5,6 +5,7 @@ import {
   runDiscovery,
 } from "@/lib/intelligence/discover-pipeline";
 import { tuneOutboundConnections } from "@/lib/net-tuning";
+import { isFinalAttempt } from "@/lib/trigger-attempts";
 
 // Module scope, before the first query — the standing rule for every file
 // under ./trigger (see trigger/ingest-source.ts).
@@ -19,9 +20,13 @@ export const discoverMomentsTask = task({
   init: async () => {
     await initAiTelemetry();
   },
-  run: async (payload: DiscoveryPayload) => {
+  run: async (payload: DiscoveryPayload, { ctx }) => {
+    // Non-final attempts park failures back in the queue state so the
+    // UI never shows a terminal error for a run Trigger is about to
+    // retry (lib/trigger-attempts.ts).
+    const finalAttempt = isFinalAttempt(ctx.attempt.number);
     try {
-      await runDiscovery(payload);
+      await runDiscovery(payload, { finalAttempt });
     } finally {
       await flushTelemetry();
     }
