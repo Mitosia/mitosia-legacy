@@ -7,3 +7,7 @@ export const INDEX_STALL_TTL_MINUTES = 10;
 // Extraction runs four structured-output calls (three sequential-ish over a
 // cached prefix); minutes of work like analysis — same window as its reaper.
 export const EXTRACTION_STALL_TTL_MINUTES = 20;
+
+// Discovery is ONE structured-output call over the same prefix plus pure
+// post-processing — comfortably inside the extraction envelope.
+export const DISCOVERY_STALL_TTL_MINUTES = 20;

@@ -2,6 +2,12 @@ import type {
   ChaptersOutput,
   EditorialOutput,
 } from "@/lib/ai/capabilities/source-analysis";
+import {
+  pauseBoundaries,
+  sentenceEndTimes,
+  sentenceStartTimes,
+} from "@/lib/intelligence/moments";
+import type { TranscriptWord } from "@/lib/transcription/types";
 
 // Deterministic scorers for the source-analysis golden evals: pure
 // functions, no model calls, so they run anywhere (unit tests, pnpm eval,
@@ -157,6 +163,148 @@ export function scoreExtractions(
   }
   if (kinds.size < 2) {
     score *= 0.8;
+  }
+  return { issues, score };
+}
+
+// Moment-discovery score (S6): grounded rate is the base — the same
+// provenance bar as extraction — with deterministic structure checks
+// layered on: snapped bounds must land on the sentence/pause grid, no
+// surviving pair may overlap past the dedupe threshold, durations should
+// sit in clip range, dimension scores must be in [0,1]. Penalties are
+// sized so a perfectly-grounded run with short moments (a short fixture)
+// still passes, while off-grid bounds or a dedupe miss fails outright.
+const MOMENT_MIN_DURATION_MS = 10_000;
+const MOMENT_MAX_DURATION_MS = 120_000;
+const MOMENT_DURATION_RATE = 0.8;
+const MOMENT_IOU_LIMIT = 0.5;
+
+interface ScoredMoment {
+  endMs: number;
+  grounded: boolean;
+  scores: {
+    comprehensibility: number;
+    hook: number;
+    insight: number;
+    relevance: number;
+    risk: number;
+  };
+  startMs: number;
+  suppressed: boolean;
+}
+
+function momentIou(a: ScoredMoment, b: ScoredMoment): number {
+  const overlap = Math.min(a.endMs, b.endMs) - Math.max(a.startMs, b.startMs);
+  if (overlap <= 0) {
+    return 0;
+  }
+  return (
+    overlap / (Math.max(a.endMs, b.endMs) - Math.min(a.startMs, b.startMs))
+  );
+}
+
+function checkMomentGrid(
+  survivors: readonly ScoredMoment[],
+  durationMs: number,
+  words: readonly TranscriptWord[],
+  issues: string[]
+): boolean {
+  const pauses = pauseBoundaries(words);
+  const validStarts = new Set([
+    ...sentenceStartTimes(words),
+    ...pauses.map((index) => words[index]?.startMs),
+  ]);
+  const validEnds = new Set([
+    ...sentenceEndTimes(words),
+    ...pauses.map((index) => words[index - 1]?.endMs),
+  ]);
+  let onGrid = true;
+  for (const row of survivors) {
+    if (!(validStarts.has(row.startMs) && validEnds.has(row.endMs))) {
+      onGrid = false;
+      issues.push(
+        `bounds ${row.startMs}-${row.endMs} are off the sentence grid`
+      );
+    }
+    if (row.endMs <= row.startMs || row.endMs > durationMs) {
+      onGrid = false;
+      issues.push(`range ${row.startMs}-${row.endMs} is invalid`);
+    }
+  }
+  return onGrid;
+}
+
+function checkMomentOverlaps(
+  survivors: readonly ScoredMoment[],
+  issues: string[]
+): boolean {
+  let deduped = true;
+  for (let a = 0; a < survivors.length; a += 1) {
+    for (let b = a + 1; b < survivors.length; b += 1) {
+      const left = survivors[a];
+      const right = survivors[b];
+      if (left && right && momentIou(left, right) > MOMENT_IOU_LIMIT) {
+        deduped = false;
+        issues.push("surviving candidates overlap past the dedupe threshold");
+      }
+    }
+  }
+  return deduped;
+}
+
+export function scoreMoments(
+  rows: readonly ScoredMoment[],
+  durationMs: number,
+  words: readonly TranscriptWord[]
+): ScoreReport {
+  if (rows.length === 0) {
+    return { issues: ["no candidates produced"], score: 0 };
+  }
+  const issues: string[] = [];
+  const groundedRate = rows.filter((row) => row.grounded).length / rows.length;
+  if (groundedRate < 1) {
+    issues.push(
+      `${rows.length - rows.filter((row) => row.grounded).length}/${rows.length} anchors failed grounding`
+    );
+  }
+  const survivors = rows.filter((row) => row.grounded && !row.suppressed);
+  const onGrid = checkMomentGrid(survivors, durationMs, words, issues);
+  const deduped = checkMomentOverlaps(survivors, issues);
+
+  const inClipRange = survivors.filter((row) => {
+    const duration = row.endMs - row.startMs;
+    return (
+      duration >= MOMENT_MIN_DURATION_MS && duration <= MOMENT_MAX_DURATION_MS
+    );
+  });
+  const durationOk =
+    survivors.length === 0 ||
+    inClipRange.length / survivors.length >= MOMENT_DURATION_RATE;
+  if (!durationOk) {
+    issues.push(
+      `only ${inClipRange.length}/${survivors.length} moments are 10-120s`
+    );
+  }
+
+  const scoresValid = rows.every((row) =>
+    Object.values(row.scores).every((value) => value >= 0 && value <= 1)
+  );
+  if (!scoresValid) {
+    issues.push("dimension scores fall outside 0-1");
+  }
+
+  let score = groundedRate;
+  if (!onGrid) {
+    score *= 0.5;
+  }
+  if (!deduped) {
+    score *= 0.5;
+  }
+  if (!durationOk) {
+    score *= 0.85;
+  }
+  if (!scoresValid) {
+    score *= 0.9;
   }
   return { issues, score };
 }

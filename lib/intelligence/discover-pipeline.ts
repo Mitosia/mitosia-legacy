@@ -1,8 +1,9 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import {
-  type ExtractionAnalysisContext,
-  runSourceExtraction,
-} from "@/lib/ai/capabilities/source-extraction";
+  type MomentAnalysisContext,
+  type MomentSeed,
+  runMomentDiscovery,
+} from "@/lib/ai/capabilities/moment-discovery";
 import {
   canonicalJson,
   hashContextPack,
@@ -13,34 +14,35 @@ import {
   campaign,
   client,
   contextSnapshot,
+  momentCandidate,
+  momentDiscoveryRun,
   organization,
   project,
   source,
   sourceAnalysis,
   sourceChapter,
   sourceExtraction,
-  sourceExtractionRun,
+  transcriptChunk,
 } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
-import { type GroundedExtraction, groundExtractions } from "./grounding";
+import { buildMomentRows, type DedupeChunk } from "./moments";
 
-// The S5 extraction workflow: claim → assemble context (summary/chapters
-// when analysis is ready) → run the four passes → ground every item against
-// the word timeline → persist rows + metering. Mirrors
-// lib/analysis/pipeline.ts: same claim contract, same failure recording,
+// The S6 discovery workflow, a structural clone of extract-pipeline.ts:
+// claim → assemble context + seed inventory → one capability call →
+// deterministic post-processing (snap/ground/dedupe/rank in moments.ts) →
+// persist rows + metering. Same claim contract, same failure recording,
 // runs under Trigger or the in-process dev fallback.
 //
-// Grounding is the gate (AGENTS §Source intelligence): rows that fail
-// alignment are stored with grounded=false for run stats but never surface
-// by default, and ranges of grounded rows are SNAPPED to word boundaries —
-// which is what makes every surfaced range playable and exact.
+// Grounding stays the gate (AGENTS §Source intelligence): candidates whose
+// anchor fails to align inside their snapped range persist with
+// grounded=false for run stats but never surface.
 
-const EXTRACT_ERROR_MAX_CHARS = 2000;
+const DISCOVER_ERROR_MAX_CHARS = 2000;
 
-export interface ExtractionPayload {
+export interface DiscoveryPayload {
   organizationId: string;
   sourceId: string;
 }
@@ -50,77 +52,86 @@ interface ClaimedRun {
   runId: string;
 }
 
-async function claimRun(
-  payload: ExtractionPayload
-): Promise<ClaimedRun | null> {
+async function claimRun(payload: DiscoveryPayload): Promise<ClaimedRun | null> {
   return await withOrgScope(payload.organizationId, async (tx) => {
     const [existing] = await tx
       .select({
-        attempts: sourceExtractionRun.attempts,
-        id: sourceExtractionRun.id,
-        status: sourceExtractionRun.status,
+        attempts: momentDiscoveryRun.attempts,
+        id: momentDiscoveryRun.id,
+        status: momentDiscoveryRun.status,
       })
-      .from(sourceExtractionRun)
-      .where(eq(sourceExtractionRun.sourceId, payload.sourceId))
+      .from(momentDiscoveryRun)
+      .where(eq(momentDiscoveryRun.sourceId, payload.sourceId))
       .limit(1);
 
     if (!existing) {
       const [created] = await tx
-        .insert(sourceExtractionRun)
+        .insert(momentDiscoveryRun)
         .values({
           attempts: 1,
           organizationId: payload.organizationId,
           sourceId: payload.sourceId,
           status: "processing",
         })
-        .onConflictDoNothing({ target: sourceExtractionRun.sourceId })
-        .returning({ id: sourceExtractionRun.id });
+        .onConflictDoNothing({ target: momentDiscoveryRun.sourceId })
+        .returning({ id: momentDiscoveryRun.id });
       return created ? { attempt: 1, runId: created.id } : null;
     }
     if (existing.status === "processing" || existing.status === "ready") {
       return null;
     }
     await tx
-      .update(sourceExtractionRun)
+      .update(momentDiscoveryRun)
       .set({
         attempts: existing.attempts + 1,
         error: null,
         status: "processing",
       })
-      .where(eq(sourceExtractionRun.id, existing.id));
+      .where(eq(momentDiscoveryRun.id, existing.id));
     return { attempt: existing.attempts + 1, runId: existing.id };
   });
 }
 
 async function recordRunFailure(
-  payload: ExtractionPayload,
+  payload: DiscoveryPayload,
   runId: string,
   error: unknown
 ): Promise<void> {
   const message =
-    error instanceof Error ? error.message : "Unknown extraction failure";
+    error instanceof Error ? error.message : "Unknown discovery failure";
   await withOrgScope(payload.organizationId, (tx) =>
     tx
-      .update(sourceExtractionRun)
+      .update(momentDiscoveryRun)
       .set({
-        error: sanitizeIngestError(message).slice(0, EXTRACT_ERROR_MAX_CHARS),
+        error: sanitizeIngestError(message).slice(0, DISCOVER_ERROR_MAX_CHARS),
         status: "failed",
       })
-      .where(eq(sourceExtractionRun.id, runId))
+      .where(eq(momentDiscoveryRun.id, runId))
   );
 }
 
-interface ExtractionContext {
-  analysis: ExtractionAnalysisContext | null;
+interface DiscoveryContext {
+  analysis: MomentAnalysisContext | null;
   durationSeconds: number;
   pack: SourceContextPack;
+  seeds: MomentSeed[];
+}
+
+const SEED_LABEL_MAX_CHARS = 100;
+
+function seedLabel(row: { payload: unknown; text: string }): string {
+  const payload = (row.payload ?? {}) as { title?: string };
+  const label = payload.title ?? row.text;
+  return label.length > SEED_LABEL_MAX_CHARS
+    ? `${label.slice(0, SEED_LABEL_MAX_CHARS)}…`
+    : label;
 }
 
 async function assembleContext(
-  payload: ExtractionPayload,
+  payload: DiscoveryPayload,
   language: string | null,
   speakerCount: number
-): Promise<ExtractionContext> {
+): Promise<DiscoveryContext> {
   return await withOrgScope(payload.organizationId, async (tx) => {
     const [row] = await tx
       .select({
@@ -141,12 +152,12 @@ async function assembleContext(
       .where(eq(source.id, payload.sourceId))
       .limit(1);
     if (!row?.durationSeconds) {
-      throw new Error("Source is not ready for extraction");
+      throw new Error("Source is not ready for moment discovery");
     }
 
-    // Analysis output enriches the prefix when present; extraction still
-    // runs without it (the job is chained after analysis, but a failed
-    // analysis must not block extraction forever).
+    // Analysis enriches the prefix when present; discovery still runs
+    // without it (chained after extraction, but a failed analysis must not
+    // block discovery forever).
     const [analysisRow] = await tx
       .select({
         id: sourceAnalysis.id,
@@ -156,7 +167,7 @@ async function assembleContext(
       .from(sourceAnalysis)
       .where(eq(sourceAnalysis.sourceId, payload.sourceId))
       .limit(1);
-    let analysis: ExtractionAnalysisContext | null = null;
+    let analysis: MomentAnalysisContext | null = null;
     if (analysisRow?.status === "ready") {
       const chapters = await tx
         .select({ startMs: sourceChapter.startMs, title: sourceChapter.title })
@@ -166,10 +177,37 @@ async function assembleContext(
       analysis = { chapters, summary: analysisRow.summary };
     }
 
+    // Seed inventory: grounded extractions only — the pass may cite their
+    // ids in seedIds but is not limited to them.
+    const seedRows = await tx
+      .select({
+        endMs: sourceExtraction.endMs,
+        id: sourceExtraction.id,
+        kind: sourceExtraction.kind,
+        payload: sourceExtraction.payload,
+        startMs: sourceExtraction.startMs,
+        text: sourceExtraction.text,
+      })
+      .from(sourceExtraction)
+      .where(
+        and(
+          eq(sourceExtraction.sourceId, payload.sourceId),
+          eq(sourceExtraction.grounded, true)
+        )
+      )
+      .orderBy(sourceExtraction.startMs);
+    const seeds: MomentSeed[] = seedRows.map((seed) => ({
+      endMs: seed.endMs,
+      id: seed.id,
+      kind: seed.kind,
+      label: seedLabel(seed),
+      startMs: seed.startMs,
+    }));
+
     const pack: SourceContextPack = {
       brand: row.brandName ? { name: row.brandName } : null,
       client: row.clientName ? { name: row.clientName } : null,
-      kind: "source-extraction",
+      kind: "moment-discovery",
       organization: { name: row.organizationName },
       project: row.projectName ? { name: row.projectName } : null,
       source: {
@@ -181,26 +219,30 @@ async function assembleContext(
       },
       version: 1,
     };
-    return { analysis, durationSeconds: row.durationSeconds, pack };
+    return { analysis, durationSeconds: row.durationSeconds, pack, seeds };
   });
 }
 
-function countByKind(
-  rows: readonly GroundedExtraction[]
-): Record<string, { grounded: number; total: number }> {
-  const counts: Record<string, { grounded: number; total: number }> = {};
-  for (const row of rows) {
-    const entry = counts[row.kind] ?? { grounded: 0, total: 0 };
-    entry.total += 1;
-    if (row.grounded) {
-      entry.grounded += 1;
-    }
-    counts[row.kind] = entry;
-  }
-  return counts;
+// Chunk vectors for the semantic dedupe pass. An index that isn't ready is
+// not a failure — range-IoU dedupe still runs without vectors.
+async function loadDedupeChunks(
+  payload: DiscoveryPayload
+): Promise<DedupeChunk[]> {
+  return await withOrgScope(payload.organizationId, async (tx) => {
+    const rows = await tx
+      .select({
+        embedding: transcriptChunk.embedding,
+        endMs: transcriptChunk.endMs,
+        startMs: transcriptChunk.startMs,
+      })
+      .from(transcriptChunk)
+      .where(eq(transcriptChunk.sourceId, payload.sourceId))
+      .orderBy(transcriptChunk.idx);
+    return rows;
+  });
 }
 
-export async function runExtraction(payload: ExtractionPayload): Promise<void> {
+export async function runDiscovery(payload: DiscoveryPayload): Promise<void> {
   const claimed = await claimRun(payload);
   if (!claimed) {
     return;
@@ -212,7 +254,7 @@ export async function runExtraction(payload: ExtractionPayload): Promise<void> {
       payload.sourceId
     );
     if (!transcript) {
-      throw new Error("Source has no ready transcript to extract from");
+      throw new Error("Source has no ready transcript to discover from");
     }
     const speakerCount = new Set(
       transcript.data.words.map((word) => word.speaker).filter(Boolean)
@@ -224,16 +266,28 @@ export async function runExtraction(payload: ExtractionPayload): Promise<void> {
     );
     const durationMs = Math.round(context.durationSeconds * 1000);
 
-    const result = await runSourceExtraction({
+    const result = await runMomentDiscovery({
       analysis: context.analysis,
       contextPack: context.pack,
       durationMs,
+      seeds: context.seeds,
       transcript: transcript.data,
     });
-    const rows = groundExtractions(
-      result.items,
+
+    // seedIds the model invented (not in the inventory it was shown) are
+    // dropped deterministically — citations must reference real rows.
+    const knownSeedIds = new Set(context.seeds.map((seed) => seed.id));
+    const items = result.items.map((item) => ({
+      ...item,
+      seedIds: item.seedIds.filter((id) => knownSeedIds.has(id)),
+    }));
+
+    const chunks = await loadDedupeChunks(payload);
+    const rows = buildMomentRows(
+      items,
       transcript.data.words,
-      durationMs
+      durationMs,
+      chunks
     );
 
     await withOrgScope(payload.organizationId, async (tx) => {
@@ -247,12 +301,15 @@ export async function runExtraction(payload: ExtractionPayload): Promise<void> {
         })
         .returning({ id: contextSnapshot.id });
 
-      // Re-runs replace: extractions belong to exactly one run per source.
+      // Re-runs replace: candidates belong to exactly one run per source.
+      // (The rerun ACTION refuses while human decisions exist — decided
+      // rows are the M1 record — so this delete only ever clears
+      // undecided proposals.)
       await tx
-        .delete(sourceExtraction)
-        .where(eq(sourceExtraction.sourceId, payload.sourceId));
+        .delete(momentCandidate)
+        .where(eq(momentCandidate.sourceId, payload.sourceId));
       if (rows.length > 0) {
-        await tx.insert(sourceExtraction).values(
+        await tx.insert(momentCandidate).values(
           rows.map((row) => ({
             ...row,
             organizationId: payload.organizationId,
@@ -264,10 +321,14 @@ export async function runExtraction(payload: ExtractionPayload): Promise<void> {
       }
 
       await tx
-        .update(sourceExtractionRun)
+        .update(momentDiscoveryRun)
         .set({
           contextSnapshotId: snapshot?.id ?? null,
-          counts: countByKind(rows),
+          counts: {
+            grounded: rows.filter((row) => row.grounded).length,
+            proposed: rows.length,
+            suppressed: rows.filter((row) => row.suppressed).length,
+          },
           error: null,
           models: Object.fromEntries(
             result.usage.map((usage) => [
@@ -278,13 +339,13 @@ export async function runExtraction(payload: ExtractionPayload): Promise<void> {
           revision: transcript.revision,
           status: "ready",
         })
-        .where(eq(sourceExtractionRun.id, claimed.runId));
+        .where(eq(momentDiscoveryRun.id, claimed.runId));
 
-      // Metering (cross-cutting rule 1): one ai_tokens entry per pass.
+      // Metering (cross-cutting rule 1): one ai_tokens entry per call.
       for (const usage of result.usage) {
-        // biome-ignore lint/performance/noAwaitInLoops: at most four entries, same tx
+        // biome-ignore lint/performance/noAwaitInLoops: at most one entry, same tx
         await recordUsage(tx, {
-          correlationId: `extract:${payload.sourceId}:${claimed.attempt}:${usage.task}`,
+          correlationId: `discover:${payload.sourceId}:${claimed.attempt}`,
           entryType: "ai_tokens",
           metadata: {
             costUsd: usage.costUsd,
@@ -302,20 +363,6 @@ export async function runExtraction(payload: ExtractionPayload): Promise<void> {
         });
       }
     });
-
-    // Moment discovery is the next follow-on job (the analysis→extraction
-    // pattern, one level down): enqueued once the extractions are committed
-    // so the discovery pass can cite them as seeds, errors contained — a
-    // failed enqueue must not fail a finished extraction.
-    try {
-      const { enqueueDiscovery } = await import("./discover-enqueue");
-      await enqueueDiscovery(payload);
-    } catch (error) {
-      console.error(
-        `[extract] discovery enqueue failed for ${payload.sourceId}:`,
-        error
-      );
-    }
   } catch (error) {
     await recordRunFailure(payload, claimed.runId, error);
     throw error;
