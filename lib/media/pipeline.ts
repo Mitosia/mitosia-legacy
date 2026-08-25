@@ -611,9 +611,14 @@ async function finalizeIngest(
   });
 }
 
+// finalAttempt=false (a Trigger retry is coming) parks the source back in
+// "uploaded" — the queue state claimSource picks up and the UI renders as
+// Queued — instead of flashing a terminal "failed" between attempts (see
+// lib/intelligence/extract-pipeline.ts, same contract).
 async function recordFailure(
   payload: IngestPayload,
-  error: unknown
+  error: unknown,
+  finalAttempt: boolean
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown ingest failure";
@@ -625,13 +630,16 @@ async function recordFailure(
           0,
           INGEST_ERROR_MAX_CHARS
         ),
-        status: "failed",
+        status: finalAttempt ? "failed" : "uploaded",
       })
       .where(eq(source.id, payload.sourceId))
   );
 }
 
-export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
+export async function runIngestPipeline(
+  payload: IngestPayload,
+  options: { finalAttempt?: boolean } = {}
+): Promise<void> {
   const started = await claimSource(payload);
   if (!started) {
     return;
@@ -708,7 +716,7 @@ export async function runIngestPipeline(payload: IngestPayload): Promise<void> {
       }
     }
   } catch (error) {
-    await recordFailure(payload, error);
+    await recordFailure(payload, error, options.finalAttempt ?? true);
     throw error;
   } finally {
     await rm(workDir, { force: true, recursive: true });
