@@ -12,6 +12,7 @@ import {
   sentenceStarts,
   sentenceStartTimes,
   snapToSentences,
+  spanText,
 } from "../lib/intelligence/moments";
 import type { TranscriptWord } from "../lib/transcription/types";
 
@@ -388,5 +389,19 @@ describe("buildMomentRows", () => {
 
     const again = buildMomentRows(items, THREE_SENTENCES, durationMs, []);
     expect(again).toEqual(rows);
+  });
+});
+
+describe("spanText", () => {
+  it("returns exactly the words a viewer of the range hears", () => {
+    const first = THREE_SENTENCES[3].startMs;
+    const second = THREE_SENTENCES[5].endMs;
+    expect(spanText(THREE_SENTENCES, { endMs: second, startMs: first })).toBe(
+      "Four five six."
+    );
+  });
+
+  it("is empty outside the timeline", () => {
+    expect(spanText(THREE_SENTENCES, { endMs: -1, startMs: -10 })).toBe("");
   });
 });

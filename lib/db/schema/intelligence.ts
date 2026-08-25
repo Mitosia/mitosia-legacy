@@ -247,6 +247,18 @@ const CANDIDATE_STATUSES = [
 ] as const;
 export type MomentCandidateStatus = (typeof CANDIDATE_STATUSES)[number];
 
+// Reviewer-agent fix vocabulary (S6 §9): constrained on purpose — an
+// unconstrained critic suggests operations the editor can't perform
+// (the EditDuet lesson, docs/clipping-landscape.md). Type-level only.
+const REVIEW_FIXES = [
+  "none",
+  "extend_start",
+  "trim_end",
+  "retitle",
+  "drop",
+] as const;
+export type MomentReviewFix = (typeof REVIEW_FIXES)[number];
+
 // TypeScript-level enum only (no DB constraint) — extends without migration.
 const REJECT_REASONS = [
   "not_interesting",
@@ -329,6 +341,14 @@ export const momentCandidate = pgTable(
     rawStartMs: integer("raw_start_ms").notNull(),
     rejectNote: text("reject_note"),
     rejectReason: text("reject_reason", { enum: REJECT_REASONS }),
+    // Cold-context reviewer verdict (S6 §9): the agent saw ONLY this
+    // clip's own span + title, never the episode. Null = not reviewed
+    // (reviewer off, or the pass failed — it never fails discovery).
+    reviewFix: text("review_fix", { enum: REVIEW_FIXES }),
+    reviewNotes: text("review_notes"),
+    // {opensCold, resolves, standsAlone, titleTruthful} each 0|1|2 —
+    // coarse on purpose (finer scales judge inconsistently; dossier §3)
+    reviewScores: jsonb("review_scores"),
     revision: integer("revision").notNull(),
     runId: uuid("run_id")
       .notNull()

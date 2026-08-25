@@ -5,10 +5,16 @@ import {
   runMomentDiscovery,
 } from "@/lib/ai/capabilities/moment-discovery";
 import {
+  isFlaggedVerdict,
+  type MomentReviewVerdict,
+  reviewMoments,
+} from "@/lib/ai/capabilities/moment-review";
+import {
   canonicalJson,
   hashContextPack,
   type SourceContextPack,
 } from "@/lib/ai/context";
+import type { StructuredUsage } from "@/lib/ai/generate";
 import {
   brand,
   campaign,
@@ -28,7 +34,13 @@ import { withOrgScope } from "@/lib/db/tenant";
 import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
-import { buildMomentRows, type DedupeChunk } from "./moments";
+import type { TranscriptWord } from "@/lib/transcription/types";
+import {
+  buildMomentRows,
+  type DedupeChunk,
+  type MomentRow,
+  spanText,
+} from "./moments";
 
 // The S6 discovery workflow, a structural clone of extract-pipeline.ts:
 // claim → assemble context + seed inventory → one capability call →
@@ -228,6 +240,93 @@ async function assembleContext(
   });
 }
 
+// The Reviewer agent (S6 §9): cold verdicts over the surviving rows,
+// attached before insert. Off unless MOMENT_REVIEWER=on (or mock mode,
+// so the CI chain always proves it). A reviewer failure never fails
+// discovery — verdicts are a quality layer over the human review, not a
+// gate; unreviewed rows simply keep null review columns.
+function reviewerEnabled(): boolean {
+  return (
+    process.env.MOMENT_REVIEWER === "on" ||
+    process.env.ANALYSIS_PROVIDER === "mock"
+  );
+}
+
+interface ReviewOutcome {
+  // All verdict calls aggregated into ONE usage entry for the ledger
+  usage: StructuredUsage | null;
+  verdicts: Map<number, MomentReviewVerdict>;
+}
+
+const EMPTY_REVIEW: ReviewOutcome = { usage: null, verdicts: new Map() };
+
+async function reviewSurvivors(
+  rows: readonly MomentRow[],
+  words: readonly TranscriptWord[]
+): Promise<ReviewOutcome> {
+  if (!reviewerEnabled()) {
+    return EMPTY_REVIEW;
+  }
+  try {
+    const reviewable = rows
+      .map((row, index) => ({ index, row }))
+      .filter(({ row }) => row.grounded && !row.suppressed);
+    if (reviewable.length === 0) {
+      return EMPTY_REVIEW;
+    }
+    const result = await reviewMoments(
+      reviewable.map(({ index, row }) => ({
+        hook: row.hook,
+        id: String(index),
+        spanText: spanText(words, row),
+        title: row.title,
+      }))
+    );
+    const verdicts = new Map<number, MomentReviewVerdict>();
+    for (const [key, verdict] of result.verdicts) {
+      verdicts.set(Number(key), verdict);
+    }
+    return { usage: sumUsage(result.usage), verdicts };
+  } catch (error) {
+    console.error("[discover] reviewer pass failed:", error);
+    return EMPTY_REVIEW;
+  }
+}
+
+function sumUsage(usages: readonly StructuredUsage[]): StructuredUsage | null {
+  const [first] = usages;
+  if (!first) {
+    return null;
+  }
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let costUsd: number | null = null;
+  for (const entry of usages) {
+    inputTokens += entry.inputTokens;
+    outputTokens += entry.outputTokens;
+    if (entry.costUsd !== null) {
+      costUsd = (costUsd ?? 0) + entry.costUsd;
+    }
+  }
+  return { ...first, costUsd, inputTokens, outputTokens };
+}
+
+function verdictColumns(verdict: MomentReviewVerdict | undefined) {
+  if (!verdict) {
+    return {};
+  }
+  return {
+    reviewFix: verdict.suggestedFix,
+    reviewNotes: verdict.notes,
+    reviewScores: {
+      opensCold: verdict.opensCold,
+      resolves: verdict.resolves,
+      standsAlone: verdict.standsAlone,
+      titleTruthful: verdict.titleTruthful,
+    },
+  };
+}
+
 // Chunk vectors for the semantic dedupe pass. An index that isn't ready is
 // not a failure — range-IoU dedupe still runs without vectors.
 async function loadDedupeChunks(
@@ -297,6 +396,7 @@ export async function runDiscovery(
       durationMs,
       chunks
     );
+    const review = await reviewSurvivors(rows, transcript.data.words);
 
     await withOrgScope(payload.organizationId, async (tx) => {
       const [snapshot] = await tx
@@ -318,8 +418,9 @@ export async function runDiscovery(
         .where(eq(momentCandidate.sourceId, payload.sourceId));
       if (rows.length > 0) {
         await tx.insert(momentCandidate).values(
-          rows.map((row) => ({
+          rows.map((row, index) => ({
             ...row,
+            ...verdictColumns(review.verdicts.get(index)),
             organizationId: payload.organizationId,
             revision: transcript.revision,
             runId: claimed.runId,
@@ -333,8 +434,11 @@ export async function runDiscovery(
         .set({
           contextSnapshotId: snapshot?.id ?? null,
           counts: {
+            flagged: [...review.verdicts.values()].filter(isFlaggedVerdict)
+              .length,
             grounded: rows.filter((row) => row.grounded).length,
             proposed: rows.length,
+            reviewed: review.verdicts.size,
             suppressed: rows.filter((row) => row.suppressed).length,
           },
           error: null,
@@ -348,6 +452,28 @@ export async function runDiscovery(
           status: "ready",
         })
         .where(eq(momentDiscoveryRun.id, claimed.runId));
+
+      // Reviewer spend: all verdict calls summed into one entry — the
+      // ledger meters the pass, Langfuse holds the per-call detail.
+      if (review.usage) {
+        await recordUsage(tx, {
+          correlationId: `discover:${payload.sourceId}:${claimed.attempt}:review`,
+          entryType: "ai_tokens",
+          metadata: {
+            calls: review.verdicts.size,
+            costUsd: review.usage.costUsd,
+            inputTokens: review.usage.inputTokens,
+            model: review.usage.model,
+            outputTokens: review.usage.outputTokens,
+            provider: review.usage.provider,
+            task: "moment-review.verdict",
+          },
+          organizationId: payload.organizationId,
+          quantity: review.usage.inputTokens + review.usage.outputTokens,
+          sourceId: payload.sourceId,
+          unit: "tokens",
+        });
+      }
 
       // Metering (cross-cutting rule 1): one ai_tokens entry per call.
       for (const usage of result.usage) {
