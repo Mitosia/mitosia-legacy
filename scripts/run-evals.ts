@@ -10,7 +10,7 @@ import { runSourceQa, verifyCitations } from "@/lib/ai/capabilities/source-qa";
 import type { SourceContextPack } from "@/lib/ai/context";
 import { createMockEmbeddingProvider } from "@/lib/ai/embeddings/mock";
 import { getEmbeddingProvider } from "@/lib/ai/embeddings/provider";
-import { judgeSummary } from "@/lib/ai/evals/judge";
+import { judgeCitationRelevance, judgeSummary } from "@/lib/ai/evals/judge";
 import {
   type QaOutcome,
   scoreChapters,
@@ -127,6 +127,7 @@ async function evaluateQuestions(fixture: Fixture): Promise<QaOutcome[]> {
       title: fixture.pack.source.title,
     });
     outcomes.push({
+      answer: result.output.answer,
       citations: result.output.answerable
         ? verifyCitations(result.output.citations, ranked)
         : [],
@@ -138,6 +139,40 @@ async function evaluateQuestions(fixture: Fixture): Promise<QaOutcome[]> {
     });
   }
   return outcomes;
+}
+
+// Citation-relevance judge (S6): the deterministic qa score proves
+// provenance and gold-range overlap; this grades whether each cited quote
+// is actually evidence for its question — the range-valid-but-irrelevant
+// rider observed at the S5 exit. Score = relevant citations / citations.
+async function judgeCitations(outcomes: readonly QaOutcome[]): Promise<number> {
+  const answered = outcomes.filter(
+    (outcome) => outcome.gotAnswerable && outcome.citations.length > 0
+  );
+  if (answered.length === 0) {
+    return 0;
+  }
+  let relevant = 0;
+  let total = 0;
+  const notes: string[] = [];
+  for (const outcome of answered) {
+    const quotes = outcome.citations.map((citation) => citation.quote ?? "");
+    // biome-ignore lint/performance/noAwaitInLoops: sequential keeps rate limits calm
+    const verdict = await judgeCitationRelevance(
+      outcome.question,
+      outcome.answer ?? "",
+      quotes
+    );
+    total += quotes.length;
+    relevant += verdict.relevant.filter(Boolean).length;
+    if (verdict.relevant.some((flag) => !flag)) {
+      notes.push(`"${outcome.question}": ${verdict.notes}`);
+    }
+  }
+  const score = total === 0 ? 1 : relevant / total;
+  return printScore("judge.citation-relevance", score, JUDGE_THRESHOLD, notes)
+    ? 0
+    : 1;
 }
 
 function printScore(
@@ -242,6 +277,7 @@ async function evaluateFixture(
     ) {
       failed += 1;
     }
+    failed += await judgeCitations(qaOutcomes);
   }
 
   const spentUsd = [

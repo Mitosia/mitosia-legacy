@@ -315,7 +315,10 @@ export function scoreMoments(
 // halves of the exit test — honest misses and playable evidence — are in
 // the same number.
 export interface QaOutcome {
-  citations: { endMs: number; startMs: number }[];
+  // Answer text and citation quotes ride along for the LLM
+  // citation-relevance judge; the deterministic score ignores them.
+  answer?: string;
+  citations: { endMs: number; quote?: string; startMs: number }[];
   expectedAnswerable: boolean;
   goldEndMs?: number;
   goldStartMs?: number;

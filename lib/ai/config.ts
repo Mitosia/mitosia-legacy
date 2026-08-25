@@ -69,7 +69,16 @@ export const TASK_ROUTES = {
   // lesson). Budgets are allowances, not spend — only real tokens bill.
   // Claims is the widest pass: the shared schema's 48-item bound × ~520
   // tokens/item + thinking ≈ 30k worst case, so 32k cannot truncate.
+  // effort: "medium" on all three sonnet passes (S6 cost checkpoint,
+  // 2026-08-25): thinking dominates extraction spend ($15/M output) and
+  // the golden eval holds full deterministic parity at medium — budgets
+  // stay sized for worst case, effort trims the real spend inside them.
+  // Claims-on-haiku was ALSO eval-tested: deterministic parity on the
+  // small fixture, but not adopted — staging showed haiku's verbatim
+  // grounding is content-dependent (fo547 qa grounded 0/…), and the
+  // committed fixture is too small to rule that out for the marquee pass.
   "source-extraction.claims": {
+    effort: "medium",
     maxOutputTokens: 32_000,
     tier: "sonnet",
   },
@@ -80,10 +89,12 @@ export const TASK_ROUTES = {
     tier: "haiku",
   },
   "source-extraction.quotes": {
+    effort: "medium",
     maxOutputTokens: 24_000,
     tier: "sonnet",
   },
   "source-extraction.stories": {
+    effort: "medium",
     maxOutputTokens: 24_000,
     tier: "sonnet",
   },
