@@ -4,10 +4,12 @@ import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import type { ActionState } from "@/lib/action-state";
+import { isEmbeddingConfigured } from "@/lib/ai/embeddings/provider";
 import { recordAudit } from "@/lib/audit";
-import { sourceExtractionRun } from "@/lib/db/schema";
+import { sourceExtractionRun, sourceIndex } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { enqueueExtractionRerun } from "@/lib/intelligence/extract-enqueue";
+import { enqueueSourceIndex } from "@/lib/intelligence/index-enqueue";
 import { type AskResult, askSource } from "@/lib/intelligence/qa";
 import { searchSourceChunks } from "@/lib/intelligence/retrieval";
 import { recordUsage } from "@/lib/ledger";
@@ -55,6 +57,54 @@ export async function rerunExtractionAction(
     })
   );
   await enqueueExtractionRerun({ organizationId, sourceId: parsedId.data });
+
+  revalidatePath(`/sources/${parsedId.data}`);
+  return { success: true };
+}
+
+// Failed indexes are never auto-re-enqueued — the page-render backfill
+// skips them by design (a permanent failure must not become a paid loop),
+// so this explicit human action is the recovery path. enqueueSourceIndex's
+// upsert flips failed → pending; a live "processing" claim is left alone.
+export async function retryIndexAction(
+  _state: ActionState,
+  formData: FormData
+): Promise<ActionState> {
+  const parsedId = z.uuid().safeParse(formData.get("sourceId"));
+  if (!parsedId.success) {
+    return { error: "Invalid source reference." };
+  }
+  const { organizationId, userId } = await requireOrg();
+
+  // enqueueSourceIndex silently no-ops when embeddings are unconfigured —
+  // right for automatic chains, but a clicked button must say why nothing
+  // will happen.
+  if (!isEmbeddingConfigured()) {
+    return { error: "No embedding provider is configured." };
+  }
+
+  const index = await withOrgScope(organizationId, async (tx) => {
+    const [row] = await tx
+      .select({ id: sourceIndex.id, status: sourceIndex.status })
+      .from(sourceIndex)
+      .where(eq(sourceIndex.sourceId, parsedId.data))
+      .limit(1);
+    return row ?? null;
+  });
+  if (index && (index.status === "pending" || index.status === "processing")) {
+    return { error: "Indexing is already running." };
+  }
+
+  await withOrgScope(organizationId, (tx) =>
+    recordAudit(tx, {
+      action: "source_index.retry",
+      actorUserId: userId,
+      entityId: index?.id,
+      entityType: "source_index",
+      organizationId,
+    })
+  );
+  await enqueueSourceIndex({ organizationId, sourceId: parsedId.data });
 
   revalidatePath(`/sources/${parsedId.data}`);
   return { success: true };

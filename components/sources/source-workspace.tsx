@@ -9,6 +9,7 @@ import {
   HighlightsPanel,
   type HighlightsRun,
 } from "./highlights-panel";
+import { type IndexStatus, IndexStatusCard } from "./index-status-card";
 import {
   SourceMap,
   type SourceMapAnalysis,
@@ -29,6 +30,9 @@ interface SourceWorkspaceProps {
     run: HighlightsRun;
   } | null;
   hlsUrl: string;
+  // The index lifecycle row, rendered in the Ask slot while qa is null so
+  // the panel's absence is explained (building) or recoverable (failed)
+  index: IndexStatus | null;
   peaksUrl: string | null;
   posterUrl: string | null;
   // Non-null once the retrieval index is ready — gates the Ask panel
@@ -45,6 +49,7 @@ export function SourceWorkspace({
   analysis,
   highlights,
   hlsUrl,
+  index,
   peaksUrl,
   posterUrl,
   qa,
@@ -73,6 +78,9 @@ export function SourceWorkspace({
       ) : null}
       {qa ? (
         <AskPanel history={qa.history} sourceId={sourceId} video={video} />
+      ) : null}
+      {!qa && index ? (
+        <IndexStatusCard index={index} sourceId={sourceId} />
       ) : null}
       {analysis && transcript ? (
         <SpeakerSuggestionBanner

@@ -22,6 +22,7 @@ const UPLOAD_BUTTON = /Upload 1 file/;
 const UPLOAD_COMPLETE = /Complete/;
 const SOURCE_PAGE_URL = /\/sources\//;
 const FIND_HIGHLIGHTS = /Find highlights/;
+const INDEX_FAILURE = /Voyage embeddings failed \(429\)/;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -237,6 +238,27 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   await expect(page.getByTestId("highlight-item").first()).toBeVisible({
     timeout: 60_000,
   });
+
+  // Failed-index recovery: a failed source_index must not leave a blank
+  // spot where Ask lives (the S5 staging gap — a Voyage 429 was only
+  // visible in the Trigger dashboard). The page-render backfill skips
+  // failed rows by design, so the card's retry button is the recovery path.
+  await queryRows(
+    "UPDATE source_index SET status = 'failed', error = 'Voyage embeddings failed (429): rate limited' WHERE source_id = $1",
+    [sourceId]
+  );
+  await page.reload();
+  const indexCard = page.getByTestId("index-status-card");
+  await expect(indexCard).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByTestId("index-error")).toHaveText(INDEX_FAILURE);
+  await expect(askPanel).toHaveCount(0);
+  await page.getByTestId("retry-index").click();
+  await expect(askPanel).toBeVisible({ timeout: 60_000 });
+  const [retriedIndex] = await queryRows<{ error: string | null }>(
+    "SELECT error FROM source_index WHERE source_id = $1 AND status = 'ready'",
+    [sourceId]
+  );
+  expect(retriedIndex.error).toBeNull();
 
   expect(errors, errors.join("\n")).toEqual([]);
 });
