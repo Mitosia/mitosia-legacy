@@ -6,6 +6,7 @@ import {
   pauseBoundaries,
   sentenceEndTimes,
   sentenceStartTimes,
+  speakerTurnStartTimes,
 } from "@/lib/intelligence/moments";
 import type { TranscriptWord } from "@/lib/transcription/types";
 
@@ -210,8 +211,12 @@ function checkMomentGrid(
   issues: string[]
 ): boolean {
   const pauses = pauseBoundaries(words);
+  // Speaker-turn starts are valid in-points too: lead-in capture opens a
+  // moment at the setup question, which begins where its speaker's turn
+  // does — not necessarily on a sentence boundary of the previous speaker.
   const validStarts = new Set([
     ...sentenceStartTimes(words),
+    ...speakerTurnStartTimes(words),
     ...pauses.map((index) => words[index]?.startMs),
   ]);
   const validEnds = new Set([

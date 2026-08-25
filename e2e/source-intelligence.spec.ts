@@ -182,6 +182,20 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     1
   );
 
+  // Lead-in capture: the sensitive candidate (rank 1) is the mock's
+  // second-paragraph moment — it opens with the OTHER speaker's short
+  // preceding turn folded in, so its span starts at 0 while the model's
+  // raw claim started at the answer.
+  const [leadInRow] = await queryRows<{
+    raw_start_ms: string;
+    start_ms: string;
+  }>(
+    "SELECT start_ms, raw_start_ms FROM moment_candidate WHERE source_id = $1 AND rank = 1",
+    [sourceId]
+  );
+  expect(Number(leadInRow.start_ms)).toBe(0);
+  expect(Number(leadInRow.raw_start_ms)).toBeGreaterThan(0);
+
   // Every filter chip is interactive UI — open each one (project rule).
   const allItems = page.getByTestId("highlight-item");
   const total = await allItems.count();
@@ -228,7 +242,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   const thirdStartMs = Number(
     await thirdCard.getByTestId("moment-card").getAttribute("data-start-ms")
   );
-  expect(thirdStartMs).toBeGreaterThan(2000);
+  expect(thirdStartMs).toBeGreaterThan(0);
   await page.waitForFunction(
     (expected) => {
       const video = document.querySelector("video");
@@ -250,9 +264,13 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   // Boundary nudge: the in-point walks to the previous sentence start,
   // the delta renders, and the adjusted bounds persist (D5 —
   // instrumentation columns, not client state).
-  const secondCard = momentItems.nth(1);
-  await secondCard.getByTestId("moment-nudge-in-prev").click();
-  await expect(secondCard.getByTestId("moment-nudge-delta")).toBeVisible();
+  // Rank 1 opens at 0 after lead-in capture, so its in-prev nudge is
+  // legitimately disabled — nudge the rank-2 card instead.
+  await expect(
+    momentItems.nth(1).getByTestId("moment-nudge-in-prev")
+  ).toBeDisabled();
+  await thirdCard.getByTestId("moment-nudge-in-prev").click();
+  await expect(thirdCard.getByTestId("moment-nudge-delta")).toBeVisible();
   await expect
     .poll(
       async () => {
@@ -260,7 +278,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
           adjusted_end_ms: string | null;
           adjusted_start_ms: string | null;
         }>(
-          "SELECT adjusted_start_ms, adjusted_end_ms FROM moment_candidate WHERE source_id = $1 AND rank = 1",
+          "SELECT adjusted_start_ms, adjusted_end_ms FROM moment_candidate WHERE source_id = $1 AND rank = 2",
           [sourceId]
         );
         return adjusted?.adjusted_start_ms;
@@ -274,7 +292,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     end_ms: string;
     start_ms: string;
   }>(
-    "SELECT start_ms, end_ms, adjusted_start_ms, adjusted_end_ms FROM moment_candidate WHERE source_id = $1 AND rank = 1",
+    "SELECT start_ms, end_ms, adjusted_start_ms, adjusted_end_ms FROM moment_candidate WHERE source_id = $1 AND rank = 2",
     [sourceId]
   );
   expect(Number(adjustedRow.adjusted_start_ms)).toBeLessThan(
