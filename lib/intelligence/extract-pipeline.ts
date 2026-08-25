@@ -92,10 +92,16 @@ async function claimRun(
   });
 }
 
+// finalAttempt=false (a Trigger retry is coming) parks the row back in
+// "pending" — the queue state the next attempt's claim picks up and the UI
+// renders as still-working, with the poller alive — instead of flashing a
+// terminal "failed" for a run that recovers seconds later. The error text
+// is kept as a breadcrumb; the next claim clears it.
 async function recordRunFailure(
   payload: ExtractionPayload,
   runId: string,
-  error: unknown
+  error: unknown,
+  finalAttempt: boolean
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown extraction failure";
@@ -104,7 +110,7 @@ async function recordRunFailure(
       .update(sourceExtractionRun)
       .set({
         error: sanitizeIngestError(message).slice(0, EXTRACT_ERROR_MAX_CHARS),
-        status: "failed",
+        status: finalAttempt ? "failed" : "pending",
       })
       .where(eq(sourceExtractionRun.id, runId))
   );
@@ -200,7 +206,17 @@ function countByKind(
   return counts;
 }
 
-export async function runExtraction(payload: ExtractionPayload): Promise<void> {
+export interface RunAttemptOptions {
+  // False when the caller (a Trigger task) knows another retry attempt is
+  // scheduled after a failure. The in-process dev fallback has no retries,
+  // so the default is final.
+  finalAttempt?: boolean;
+}
+
+export async function runExtraction(
+  payload: ExtractionPayload,
+  options: RunAttemptOptions = {}
+): Promise<void> {
   const claimed = await claimRun(payload);
   if (!claimed) {
     return;
@@ -317,7 +333,12 @@ export async function runExtraction(payload: ExtractionPayload): Promise<void> {
       );
     }
   } catch (error) {
-    await recordRunFailure(payload, claimed.runId, error);
+    await recordRunFailure(
+      payload,
+      claimed.runId,
+      error,
+      options.finalAttempt ?? true
+    );
     throw error;
   }
 }

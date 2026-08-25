@@ -4,6 +4,7 @@ import {
   runTranscription,
   type TranscriptionPayload,
 } from "@/lib/transcription/pipeline";
+import { isFinalAttempt } from "@/lib/trigger-attempts";
 
 // Every file under ./trigger opens its own database connection path and
 // Next.js's register() hook never runs here — see trigger/ingest-source.ts
@@ -18,7 +19,11 @@ export const transcribeSourceTask = task({
   // No machine override: the run is two API calls and a JSON write — the
   // provider does the heavy lifting on its own infrastructure. Ingest needs
   // large-2x for ffmpeg; this would waste it.
-  run: async (payload: TranscriptionPayload) => {
-    await runTranscription(payload);
+  run: async (payload: TranscriptionPayload, { ctx }) => {
+    // Non-final attempts park failures back in the queue state so the
+    // UI never shows a terminal error for a run Trigger is about to
+    // retry (lib/trigger-attempts.ts).
+    const finalAttempt = isFinalAttempt(ctx.attempt.number);
+    await runTranscription(payload, { finalAttempt });
   },
 });

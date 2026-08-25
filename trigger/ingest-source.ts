@@ -1,6 +1,7 @@
 import { task } from "@trigger.dev/sdk";
 import { type IngestPayload, runIngestPipeline } from "@/lib/media/pipeline";
 import { tuneOutboundConnections } from "@/lib/net-tuning";
+import { isFinalAttempt } from "@/lib/trigger-attempts";
 
 // Third entrypoint that opens a database connection, after instrumentation.ts
 // and scripts/migrate.ts — and the only one Next.js does not start, so its
@@ -32,7 +33,11 @@ export const ingestSourceTask = task({
   // the source duration on a 130s clip (vs 0.26x on the 8-vCPU VPS), which
   // would put a two-hour source near 2.4 hours.
   machine: "large-2x",
-  run: async (payload: IngestPayload) => {
-    await runIngestPipeline(payload);
+  run: async (payload: IngestPayload, { ctx }) => {
+    // Non-final attempts park failures back in the queue state so the
+    // UI never shows a terminal error for a run Trigger is about to
+    // retry (lib/trigger-attempts.ts).
+    const finalAttempt = isFinalAttempt(ctx.attempt.number);
+    await runIngestPipeline(payload, { finalAttempt });
   },
 });

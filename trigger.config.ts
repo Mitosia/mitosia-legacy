@@ -6,6 +6,7 @@ import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import type { SpanExporter } from "@opentelemetry/sdk-trace-base";
 import type { BuildExtension } from "@trigger.dev/build";
 import { defineConfig } from "@trigger.dev/sdk";
+import { TASK_MAX_ATTEMPTS } from "./lib/trigger-attempts";
 import {
   ensureFfmpegArchive,
   FFMPEG_ASSET,
@@ -136,7 +137,10 @@ export default defineConfig({
   retries: {
     default: {
       factor: 2,
-      maxAttempts: 3,
+      // Shared with the task wrappers (lib/trigger-attempts.ts): they
+      // treat the last attempt's failure as terminal and earlier ones as
+      // still-queued.
+      maxAttempts: TASK_MAX_ATTEMPTS,
       maxTimeoutInMs: 60_000,
       minTimeoutInMs: 5000,
       randomize: true,

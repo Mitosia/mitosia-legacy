@@ -92,6 +92,21 @@ function buildMessages(cachedPrefix: string, prompt: string) {
   ];
 }
 
+// A schema-mismatch response ("No object generated: response did not match
+// schema") is usually one-off model noise, not a broken prompt — observed
+// on staging 2026-08-25 when the extraction qa pass missed the schema on
+// attempt 1 and passed cleanly on retry. One bounded same-candidate retry
+// absorbs it at the call site (warm prompt cache, cheap) instead of failing
+// the whole task run. Budget exhaustion (finishReason "length") is
+// deliberately NOT retried: that is a route-sizing bug and must stay loud.
+const SCHEMA_MISS_RETRIES = 1;
+
+function isRetryableSchemaMiss(error: unknown): boolean {
+  return (
+    NoObjectGeneratedError.isInstance(error) && error.finishReason !== "length"
+  );
+}
+
 export async function generateStructured<T>(
   task: AiTask,
   system: string,
@@ -108,7 +123,19 @@ export async function generateStructured<T>(
   logTelemetryStateOnce();
 
   let lastError: unknown;
-  for (const candidate of candidates) {
+  const attempts = candidates.flatMap((candidate) =>
+    Array.from({ length: SCHEMA_MISS_RETRIES + 1 }, (_, retry) => ({
+      candidate,
+      retry,
+    }))
+  );
+  for (const { candidate, retry } of attempts) {
+    // Retry slots only run when the previous failure on this candidate was
+    // a retryable schema miss; anything else falls through to the next
+    // candidate immediately.
+    if (retry > 0 && !isRetryableSchemaMiss(lastError)) {
+      continue;
+    }
     try {
       // biome-ignore lint/performance/noAwaitInLoops: candidates are tried strictly in order
       const result = await generateObject({

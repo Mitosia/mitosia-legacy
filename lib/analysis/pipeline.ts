@@ -83,10 +83,14 @@ async function claimAnalysis(
   });
 }
 
+// finalAttempt=false (a Trigger retry is coming) parks the row back in
+// "pending" instead of flashing a terminal "failed" between attempts (see
+// lib/intelligence/extract-pipeline.ts, same contract).
 async function recordAnalysisFailure(
   payload: AnalysisPayload,
   analysisId: string,
-  error: unknown
+  error: unknown,
+  finalAttempt: boolean
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown analysis failure";
@@ -95,7 +99,7 @@ async function recordAnalysisFailure(
       .update(sourceAnalysis)
       .set({
         error: sanitizeIngestError(message).slice(0, ANALYSIS_ERROR_MAX_CHARS),
-        status: "failed",
+        status: finalAttempt ? "failed" : "pending",
       })
       .where(eq(sourceAnalysis.id, analysisId))
   );
@@ -236,7 +240,10 @@ async function persistAnalysis(
   });
 }
 
-export async function runAnalysis(payload: AnalysisPayload): Promise<void> {
+export async function runAnalysis(
+  payload: AnalysisPayload,
+  options: { finalAttempt?: boolean } = {}
+): Promise<void> {
   const claimed = await claimAnalysis(payload);
   if (!claimed) {
     return;
@@ -290,7 +297,12 @@ export async function runAnalysis(payload: AnalysisPayload): Promise<void> {
       );
     }
   } catch (error) {
-    await recordAnalysisFailure(payload, claimed.analysisId, error);
+    await recordAnalysisFailure(
+      payload,
+      claimed.analysisId,
+      error,
+      options.finalAttempt ?? true
+    );
     throw error;
   }
 }

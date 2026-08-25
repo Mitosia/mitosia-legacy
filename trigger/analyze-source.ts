@@ -2,6 +2,7 @@ import { task } from "@trigger.dev/sdk";
 import { flushTelemetry, initAiTelemetry } from "@/lib/ai/telemetry";
 import { type AnalysisPayload, runAnalysis } from "@/lib/analysis/pipeline";
 import { tuneOutboundConnections } from "@/lib/net-tuning";
+import { isFinalAttempt } from "@/lib/trigger-attempts";
 
 // Module scope, before the first query — the standing rule for every file
 // under ./trigger (see trigger/ingest-source.ts). Telemetry follows the
@@ -24,9 +25,13 @@ export const analyzeSourceTask = task({
   init: async () => {
     await initAiTelemetry();
   },
-  run: async (payload: AnalysisPayload) => {
+  run: async (payload: AnalysisPayload, { ctx }) => {
+    // Non-final attempts park failures back in the queue state so the
+    // UI never shows a terminal error for a run Trigger is about to
+    // retry (lib/trigger-attempts.ts).
+    const finalAttempt = isFinalAttempt(ctx.attempt.number);
     try {
-      await runAnalysis(payload);
+      await runAnalysis(payload, { finalAttempt });
     } finally {
       // The span processor batches; a worker that finishes and idles could
       // otherwise drop the tail of the trace.
