@@ -6,6 +6,10 @@ import type {
   HighlightExtraction,
   HighlightsRun,
 } from "@/components/sources/highlights-panel";
+import type {
+  MomentCandidateView,
+  MomentsRun,
+} from "@/components/sources/moments-panel";
 import { RefreshPoller } from "@/components/sources/refresh-poller";
 import { RetryIngestButton } from "@/components/sources/retry-ingest-button";
 import type { SourceMapAnalysis } from "@/components/sources/source-map";
@@ -21,6 +25,8 @@ import {
 import { isEmbeddingConfigured } from "@/lib/ai/embeddings/provider";
 import { isStalledAnalysis, scheduleAnalysisReap } from "@/lib/analysis/reaper";
 import {
+  momentCandidate,
+  momentDiscoveryRun,
   project,
   source,
   sourceAnalysis,
@@ -35,6 +41,10 @@ import {
 import { withOrgScope } from "@/lib/db/tenant";
 import { formatBytes, formatDuration } from "@/lib/format";
 import { ingestStepLabel, SOURCE_STATUS_LABELS } from "@/lib/ingest-labels";
+import {
+  isStalledDiscovery,
+  scheduleDiscoveryReap,
+} from "@/lib/intelligence/discover-reaper";
 import {
   isStalledExtraction,
   scheduleExtractionReap,
@@ -202,6 +212,7 @@ function jobSettled(row: { status: string } | null): boolean {
 
 function pageIsSettled(data: {
   analysis: { status: string } | null;
+  discoveryRun: { status: string } | null;
   extractionRun: { status: string } | null;
   index: { status: string } | null;
   status: string;
@@ -212,7 +223,8 @@ function pageIsSettled(data: {
     jobSettled(data.transcript) &&
     jobSettled(data.analysis) &&
     jobSettled(data.index) &&
-    jobSettled(data.extractionRun)
+    jobSettled(data.extractionRun) &&
+    jobSettled(data.discoveryRun)
   );
 }
 
@@ -246,6 +258,41 @@ function workspaceHighlights(data: {
         data.currentRevision !== null &&
         (data.extractionRun.revision ?? 0) < data.currentRevision.revision,
       status: data.extractionRun.status,
+    },
+  };
+}
+
+// The discovery panel mirrors the highlights shape: a missing run with a
+// ready extraction gets the one-click "Find moments" state (also how the
+// pre-S6 staging sources get their first run); otherwise the lifecycle row
+// drives pending/failed/ready.
+function workspaceMoments(data: {
+  candidates: MomentCandidateView[];
+  currentRevision: { revision: number } | null;
+  discoveryRun: {
+    error: string | null;
+    revision: number | null;
+    status: string;
+  } | null;
+  extractionRun: { status: string } | null;
+}): { candidates: MomentCandidateView[]; run: MomentsRun } | null {
+  if (!data.discoveryRun) {
+    return data.extractionRun?.status === "ready"
+      ? {
+          candidates: [],
+          run: { error: null, stale: false, status: "missing" },
+        }
+      : null;
+  }
+  return {
+    candidates: data.candidates,
+    run: {
+      error: data.discoveryRun.error,
+      stale:
+        data.discoveryRun.status === "ready" &&
+        data.currentRevision !== null &&
+        (data.discoveryRun.revision ?? 0) < data.currentRevision.revision,
+      status: data.discoveryRun.status,
     },
   };
 }
@@ -287,6 +334,7 @@ function scheduleSourceMaintenance(
   data: {
     analysis: { stalled: boolean } | null;
     currentRevision: { revision: number } | null;
+    discoveryRun: { stalled: boolean } | null;
     extractionRun: { stalled: boolean } | null;
     id: string;
     index: { revision: number | null; stalled: boolean; status: string } | null;
@@ -304,6 +352,9 @@ function scheduleSourceMaintenance(
   }
   if (data.extractionRun?.stalled) {
     scheduleExtractionReap(organizationId);
+  }
+  if (data.discoveryRun?.stalled) {
+    scheduleDiscoveryReap(organizationId);
   }
   if (
     data.currentRevision &&
@@ -418,6 +469,58 @@ export default async function SourceDetailPage(
       .where(eq(sourceExtractionRun.sourceId, sourceRow.id))
       .limit(1);
 
+    const [discoveryRunRow] = await tx
+      .select({
+        error: momentDiscoveryRun.error,
+        revision: momentDiscoveryRun.revision,
+        stalled: sql<boolean>`(${isStalledDiscovery})`,
+        status: momentDiscoveryRun.status,
+      })
+      .from(momentDiscoveryRun)
+      .where(eq(momentDiscoveryRun.sourceId, sourceRow.id))
+      .limit(1);
+
+    // Grounded, unsuppressed candidates only: the aligner's gate plus the
+    // dedupe verdict — suppressed duplicates stay in the table for
+    // instrumentation but never render.
+    const candidateRows =
+      discoveryRunRow?.status === "ready"
+        ? await tx
+            .select({
+              adjustedEndMs: momentCandidate.adjustedEndMs,
+              adjustedStartMs: momentCandidate.adjustedStartMs,
+              composite: momentCandidate.composite,
+              endMs: momentCandidate.endMs,
+              hook: momentCandidate.hook,
+              id: momentCandidate.id,
+              rank: momentCandidate.rank,
+              rejectReason: momentCandidate.rejectReason,
+              scores: momentCandidate.scores,
+              seedIds: momentCandidate.seedIds,
+              sensitive: momentCandidate.sensitive,
+              startMs: momentCandidate.startMs,
+              status: momentCandidate.status,
+              summary: momentCandidate.summary,
+              title: momentCandidate.title,
+            })
+            .from(momentCandidate)
+            .where(
+              and(
+                eq(momentCandidate.sourceId, sourceRow.id),
+                eq(momentCandidate.grounded, true),
+                eq(momentCandidate.suppressed, false)
+              )
+            )
+            .orderBy(momentCandidate.rank)
+        : [];
+    const candidates: MomentCandidateView[] = candidateRows.map(
+      ({ seedIds, ...row }) => ({
+        ...row,
+        scores: row.scores as MomentCandidateView["scores"],
+        seedCount: Array.isArray(seedIds) ? seedIds.length : 0,
+      })
+    );
+
     // Only grounded rows reach the UI — the aligner's gate is the whole
     // point of the provenance model.
     const extractions =
@@ -477,8 +580,10 @@ export default async function SourceDetailPage(
       ...sourceRow,
       analysis: analysisRow ?? null,
       artifacts,
+      candidates,
       chapters,
       currentRevision,
+      discoveryRun: discoveryRunRow ?? null,
       extractionRun: extractionRunRow ?? null,
       extractions,
       index: indexRow ?? null,
@@ -546,6 +651,7 @@ export default async function SourceDetailPage(
           highlights={workspaceHighlights(data)}
           hlsUrl={`/api/media/${hlsKey}`}
           index={data.index}
+          moments={workspaceMoments(data)}
           peaksUrl={waveformKey ? `/api/media/${waveformKey}` : null}
           posterUrl={posterKey ? `/api/media/${posterKey}` : null}
           qa={qaHistory === null ? null : { history: qaHistory }}

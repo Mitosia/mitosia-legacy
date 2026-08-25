@@ -23,6 +23,9 @@ const UPLOAD_COMPLETE = /Complete/;
 const SOURCE_PAGE_URL = /\/sources\//;
 const FIND_HIGHLIGHTS = /Find highlights/;
 const INDEX_FAILURE = /Voyage embeddings failed \(429\)/;
+const ONE_ACCEPTED = /1 accepted/;
+const ONE_ACCEPTED_ONE_REJECTED = /1 accepted · 1 rejected/;
+const RERUN_REFUSAL = /review decisions/;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -199,6 +202,157 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   const startMs = Number(await target.getAttribute("data-start-ms"));
   expect(startMs).toBeGreaterThan(0);
   await target.click();
+  await page.waitForFunction(
+    (expected) => {
+      const video = document.querySelector("video");
+      return Boolean(video && Math.abs(video.currentTime - expected) < 0.5);
+    },
+    startMs / 1000,
+    { timeout: 10_000 }
+  );
+
+  // ---- Moments review UI (S6) ----
+  const momentsPanel = page.getByTestId("moments-panel");
+  await expect(momentsPanel).toBeVisible({ timeout: 60_000 });
+  const momentItems = page.getByTestId("moment-item");
+  await expect
+    .poll(() => momentItems.count(), { timeout: 30_000 })
+    .toBeGreaterThanOrEqual(3);
+  await expect(page.getByTestId("moment-sensitive")).toHaveCount(1);
+
+  // Play-from-in-point seeks to the exact in-point; a card click then
+  // applies the 3s pre-roll (clamped to 0 on this tiny fixture) — the two
+  // together prove both halves of the playback contract.
+  const thirdCard = momentItems.nth(2);
+  await thirdCard.getByTestId("moment-play-in").click();
+  const thirdStartMs = Number(
+    await thirdCard.getByTestId("moment-card").getAttribute("data-start-ms")
+  );
+  expect(thirdStartMs).toBeGreaterThan(2000);
+  await page.waitForFunction(
+    (expected) => {
+      const video = document.querySelector("video");
+      return Boolean(video && Math.abs(video.currentTime - expected) < 0.5);
+    },
+    thirdStartMs / 1000,
+    { timeout: 10_000 }
+  );
+  await thirdCard.getByTestId("moment-card").click();
+  await page.waitForFunction(
+    (expected) => {
+      const video = document.querySelector("video");
+      return Boolean(video && Math.abs(video.currentTime - expected) < 0.5);
+    },
+    Math.max(0, thirdStartMs - 3000) / 1000,
+    { timeout: 10_000 }
+  );
+
+  // Boundary nudge: the in-point walks to the previous sentence start,
+  // the delta renders, and the adjusted bounds persist (D5 —
+  // instrumentation columns, not client state).
+  const secondCard = momentItems.nth(1);
+  await secondCard.getByTestId("moment-nudge-in-prev").click();
+  await expect(secondCard.getByTestId("moment-nudge-delta")).toBeVisible();
+  await expect
+    .poll(
+      async () => {
+        const [adjusted] = await queryRows<{
+          adjusted_end_ms: string | null;
+          adjusted_start_ms: string | null;
+        }>(
+          "SELECT adjusted_start_ms, adjusted_end_ms FROM moment_candidate WHERE source_id = $1 AND rank = 1",
+          [sourceId]
+        );
+        return adjusted?.adjusted_start_ms;
+      },
+      { timeout: 15_000 }
+    )
+    .not.toBeNull();
+  const [adjustedRow] = await queryRows<{
+    adjusted_end_ms: string;
+    adjusted_start_ms: string;
+    end_ms: string;
+    start_ms: string;
+  }>(
+    "SELECT start_ms, end_ms, adjusted_start_ms, adjusted_end_ms FROM moment_candidate WHERE source_id = $1 AND rank = 1",
+    [sourceId]
+  );
+  expect(Number(adjustedRow.adjusted_start_ms)).toBeLessThan(
+    Number(adjustedRow.start_ms)
+  );
+  expect(Number(adjustedRow.adjusted_end_ms)).toBe(Number(adjustedRow.end_ms));
+  const [boundsAudit] = await queryRows<{ entries: string }>(
+    "SELECT COUNT(*) AS entries FROM audit_log WHERE action = 'moment.boundaries_adjusted'"
+  );
+  expect(Number(boundsAudit.entries)).toBeGreaterThanOrEqual(1);
+
+  // Accept the top candidate; the readout and the row both record it.
+  await momentItems.nth(0).getByTestId("moment-accept").click();
+  await expect(page.getByTestId("moments-readout")).toHaveText(ONE_ACCEPTED, {
+    timeout: 15_000,
+  });
+  const [acceptedRow] = await queryRows<{
+    decided_by: string | null;
+    status: string;
+  }>(
+    "SELECT status, decided_by FROM moment_candidate WHERE source_id = $1 AND rank = 0",
+    [sourceId]
+  );
+  expect(acceptedRow.status).toBe("accepted");
+  expect(acceptedRow.decided_by).not.toBeNull();
+
+  // Reject through the reason menu — interactive UI, so the menu must
+  // actually open (Base UI context crashes only fire on interaction).
+  await thirdCard.getByTestId("moment-reject").click();
+  const reasonItem = page
+    .getByTestId("moment-reject-reason")
+    .filter({ hasText: "Wrong boundaries" });
+  await expect(reasonItem).toBeVisible({ timeout: 10_000 });
+  await reasonItem.click();
+  await expect(page.getByTestId("moments-readout")).toHaveText(
+    ONE_ACCEPTED_ONE_REJECTED,
+    { timeout: 15_000 }
+  );
+  const [rejectedRow] = await queryRows<{
+    reject_reason: string | null;
+    status: string;
+  }>(
+    "SELECT status, reject_reason FROM moment_candidate WHERE source_id = $1 AND rank = 2",
+    [sourceId]
+  );
+  expect(rejectedRow.status).toBe("rejected");
+  expect(rejectedRow.reject_reason).toBe("wrong_boundaries");
+  const decisionAudits = await queryRows<{ action: string }>(
+    "SELECT action FROM audit_log WHERE action IN ('moment.accepted', 'moment.rejected')"
+  );
+  expect(new Set(decisionAudits.map((entry) => entry.action))).toEqual(
+    new Set(["moment.accepted", "moment.rejected"])
+  );
+
+  // The rejected row leaves the Top view and appears under the Rejected
+  // toggle.
+  await expect(momentItems).toHaveCount(2);
+  await page.getByTestId("moments-view-rejected").click();
+  await expect(momentItems).toHaveCount(1);
+  await page.getByTestId("moments-view-top").click();
+  await expect(momentItems).toHaveCount(2);
+
+  // Re-running discovery would delete-and-replace the reviewed rows, so
+  // with decisions on record it must refuse loudly.
+  await page.getByTestId("rerun-discovery").click();
+  await expect(page.getByTestId("rerun-discovery-error")).toHaveText(
+    RERUN_REFUSAL,
+    { timeout: 15_000 }
+  );
+  const [runAfterRefusal] = await queryRows<{ status: string }>(
+    "SELECT status FROM moment_discovery_run WHERE source_id = $1",
+    [sourceId]
+  );
+  expect(runAfterRefusal.status).toBe("ready");
+
+  // Park the player deep again — the Ask section below asserts its
+  // citation click performs a real, observable seek.
+  await allItems.last().click();
   await page.waitForFunction(
     (expected) => {
       const video = document.querySelector("video");
