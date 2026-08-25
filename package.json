@@ -21,6 +21,7 @@
     "eval": "esbuild scripts/run-evals.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --alias:@=. --outfile=scripts/.run-evals.cjs && node --env-file-if-exists=.env scripts/.run-evals.cjs",
     "fix": "ultracite fix",
     "lint": "ultracite check",
+    "moments:metrics": "esbuild scripts/moment-metrics.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --alias:@=. --outfile=scripts/.moment-metrics.cjs && node --env-file-if-exists=.env scripts/.moment-metrics.cjs",
     "start": "next start",
     "test": "vitest run",
     "typecheck": "next typegen && tsc --noEmit"

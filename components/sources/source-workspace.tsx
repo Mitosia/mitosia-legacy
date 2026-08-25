@@ -11,6 +11,11 @@ import {
 } from "./highlights-panel";
 import { type IndexStatus, IndexStatusCard } from "./index-status-card";
 import {
+  type MomentCandidateView,
+  MomentsPanel,
+  type MomentsRun,
+} from "./moments-panel";
+import {
   SourceMap,
   type SourceMapAnalysis,
   SpeakerSuggestionBanner,
@@ -33,6 +38,10 @@ interface SourceWorkspaceProps {
   // The index lifecycle row, rendered in the Ask slot while qa is null so
   // the panel's absence is explained (building) or recoverable (failed)
   index: IndexStatus | null;
+  moments: {
+    candidates: MomentCandidateView[];
+    run: MomentsRun;
+  } | null;
   peaksUrl: string | null;
   posterUrl: string | null;
   // Non-null once the retrieval index is ready — gates the Ask panel
@@ -50,6 +59,7 @@ export function SourceWorkspace({
   highlights,
   hlsUrl,
   index,
+  moments,
   peaksUrl,
   posterUrl,
   qa,
@@ -73,6 +83,15 @@ export function SourceWorkspace({
           run={highlights.run}
           sourceId={sourceId}
           speakerLabels={transcript?.speakerLabels ?? null}
+          video={video}
+        />
+      ) : null}
+      {moments ? (
+        <MomentsPanel
+          candidates={moments.candidates}
+          run={moments.run}
+          sourceId={sourceId}
+          transcriptUrl={transcript ? transcript.url : null}
           video={video}
         />
       ) : null}
