@@ -314,6 +314,73 @@ export function scoreMoments(
   return { issues, score };
 }
 
+// Segment-plan score (S6.5): the coverage lane's deterministic gate.
+// Base = grounded rate over keeps; hard penalties for a broken partition
+// (the coverage invariant is the product), missing drop reasons, or
+// non-chronological rows. No duration checks at all — the constraint
+// policy (2026-08-26): length is the content's call, outliers are
+// reviewer-facing flags, never scorer penalties.
+interface ScoredSegment {
+  dropReason: string | null;
+  endMs: number;
+  grounded: boolean;
+  kind: string;
+  startMs: number;
+}
+
+export function scoreSegments(
+  rows: readonly ScoredSegment[],
+  partitionOk: boolean
+): ScoreReport {
+  if (rows.length === 0) {
+    return { issues: ["no segments produced"], score: 0 };
+  }
+  const issues: string[] = [];
+  const keeps = rows.filter((row) => row.kind === "keep");
+  if (keeps.length === 0) {
+    return { issues: ["plan kept nothing"], score: 0 };
+  }
+  const groundedRate =
+    keeps.filter((row) => row.grounded).length / keeps.length;
+  if (groundedRate < 1) {
+    issues.push(
+      `${keeps.length - keeps.filter((row) => row.grounded).length}/${keeps.length} keeps failed anchor grounding`
+    );
+  }
+  if (!partitionOk) {
+    issues.push("rows do not tile the episode");
+  }
+  const unreasonedDrops = rows.filter(
+    (row) => row.kind === "drop" && row.dropReason === null
+  ).length;
+  if (unreasonedDrops > 0) {
+    issues.push(`${unreasonedDrops} drop(s) carry no reason`);
+  }
+  let chronological = true;
+  for (let index = 1; index < rows.length; index += 1) {
+    const previous = rows[index - 1];
+    const current = rows[index];
+    if (previous && current && current.startMs < previous.endMs) {
+      chronological = false;
+    }
+  }
+  if (!chronological) {
+    issues.push("rows overlap or are out of order");
+  }
+
+  let score = groundedRate;
+  if (!partitionOk) {
+    score *= 0.5;
+  }
+  if (!chronological) {
+    score *= 0.5;
+  }
+  if (unreasonedDrops > 0) {
+    score *= 0.9;
+  }
+  return { issues, score };
+}
+
 // Q&A golden score (S5): per fixture question, full credit when the
 // answerability verdict matches AND (for answerable ones) some verified
 // citation overlaps the gold range; the verdict alone earns half. Both

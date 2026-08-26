@@ -54,6 +54,16 @@ export const TASK_ROUTES = {
     maxOutputTokens: 2000,
     tier: "sonnet",
   },
+  // Segment plan (S6.5): ONE pass proposing the episode's full keep/drop
+  // partition over the cached prefix — the Editor half of the clip
+  // harness. Budget math: schema bound 64 rows × ~200 tokens/row ≈ 13k
+  // payload + adaptive-thinking headroom (a 2.5h episode legitimately
+  // yields a long plan) → 32k cannot truncate. Default effort — the
+  // coverage plan is core-bet editorial judgment.
+  "segment-plan.partition": {
+    maxOutputTokens: 32_000,
+    tier: "sonnet",
+  },
   // Chapters/topics over a full transcript: broad, structured, cheap.
   // No effort: haiku rejects the parameter (see EFFORT_TIERS).
   "source-analysis.chapters": {

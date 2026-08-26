@@ -16,6 +16,16 @@ import { generateStructured, type StructuredUsage } from "../generate";
 // The reviewer informs the human review — it never moves boundaries
 // itself, and a reviewer outage never fails discovery.
 
+// The one switch for the Reviewer agent across BOTH clip lanes (moments
+// and segments): MOMENT_REVIEWER=on enables it; mock analysis mode always
+// reviews so the CI chain proves the path.
+export function reviewerEnabled(): boolean {
+  return (
+    process.env.MOMENT_REVIEWER === "on" ||
+    process.env.ANALYSIS_PROVIDER === "mock"
+  );
+}
+
 // 0 = fails the rubric, 1 = partial, 2 = clean pass.
 const rubric = z.number().int().min(0).max(2);
 
