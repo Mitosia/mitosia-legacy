@@ -44,8 +44,11 @@ const momentItemSchema = z
 
 // The array bound is part of the route's output-budget math (24 items ×
 // ~350 tokens/item — see "moment-discovery.candidates" in lib/ai/config.ts).
-// The instruction caps at 18 ranked; this is the hard ceiling it trims
-// under.
+// The instructions deliberately name NO target count — "at most 18"
+// produced exactly 18 on every source regardless of length (M1 finding,
+// 2026-08-26: models treat "at most N" as a quota to fill, padding the
+// tail). The recording decides the count; this bound is only the ceiling
+// the budget is sized for.
 export const momentOutputSchema = z.object({
   candidates: z.array(momentItemSchema).max(24),
 });
@@ -115,7 +118,7 @@ For each candidate emit:
   (scroll-stopping power), insight (density of substance), relevance (to
   the recording's themes), risk (sensitive/controversial/reputational).
 
-At most 18, ranked best first. Prefer distinct moments over near-duplicates of the same beat.`;
+The RECORDING decides how many moments there are — a dense hour may support twenty, a thin one may support six. Propose every genuinely clip-worthy moment and NOTHING more: never pad toward a count, never invent weak candidates to fill out a list. A short list of strong moments is strictly better than a long list with a weak tail. Rank best first, and prefer distinct moments over near-duplicates of the same beat.`;
 
 function contextPreamble(pack: SourceContextPack): string {
   const parts = [
