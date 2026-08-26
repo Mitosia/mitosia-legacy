@@ -37,11 +37,18 @@ export const TASK_ROUTES = {
   // Moment discovery (S6): ONE pass proposing clip-worthy candidates over
   // the cached transcript prefix — editorial judgment, sonnet. Budget math
   // (the S5 rule — thinking counts against maxOutputTokens): schema bound
-  // 24 items × ~350 tokens/item (span + title/hook/summary/anchor +
-  // scores) ≈ 8.5k payload + generous adaptive-thinking headroom ≈ well
-  // under 24k, so the pass cannot truncate.
+  // 24 items × ~650 tokens/item worst case (780 chars of capped text
+  // fields ≈ 200 tokens, + span/scores/keys ≈ 100, + up to 8 seed UUIDs ≈
+  // 220 — UUIDs tokenize expensively) ≈ 15.6k payload + thinking. The old
+  // 24k assumed ~350/item and truncated twice in production before
+  // succeeding (run_06g3q3jk4jkei3tj5opum9qe01, 2026-08-26: two attempts
+  // capped at exactly 24k output, the third needed ~19.6k) — same lesson
+  // as the claims pass (#76), same remedy: bound every field (seedIds got
+  // its .max(8) with this change) and size the cap for the bounded worst
+  // case, ~15.6k + ~12k thinking headroom over the observed high-water →
+  // 32k. Budgets are allowances — only real tokens bill.
   "moment-discovery.candidates": {
-    maxOutputTokens: 24_000,
+    maxOutputTokens: 32_000,
     tier: "sonnet",
   },
   // Cold-context reviewer verdict (S6 §9): one SMALL call per candidate
@@ -56,10 +63,15 @@ export const TASK_ROUTES = {
   },
   // Segment plan (S6.5): ONE pass proposing the episode's full keep/drop
   // partition over the cached prefix — the Editor half of the clip
-  // harness. Budget math: schema bound 64 rows × ~200 tokens/row ≈ 13k
-  // payload + adaptive-thinking headroom (a 2.5h episode legitimately
-  // yields a long plan) → 32k cannot truncate. Default effort — the
-  // coverage plan is core-bet editorial judgment.
+  // harness. Budget math, recomputed honestly after the discovery route's
+  // ~350/item estimate truncated in production (2026-08-26): a maxed KEEP
+  // row is ~270 tokens (780 chars of capped text ≈ 200, + span/kind/keys
+  // ≈ 70), a drop row ~70 (nulled text + reason), so even the
+  // self-contradictory all-64-maxed-keeps ceiling is ~17k payload — a real
+  // plan alternates keeps with tiny drop rows and sits well under that —
+  // + thinking headroom (a 2.5h episode legitimately yields a long plan)
+  // → 32k holds. Default effort — the coverage plan is core-bet editorial
+  // judgment.
   "segment-plan.partition": {
     maxOutputTokens: 32_000,
     tier: "sonnet",

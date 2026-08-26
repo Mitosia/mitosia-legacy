@@ -39,11 +39,14 @@ const momentItemSchema = z
   .extend({ title: z.string().min(1).max(120) })
   .extend({ hook: z.string().min(1).max(200) })
   .extend({ summary: z.string().min(1).max(300) })
-  .extend({ seedIds: z.array(z.uuid()) })
+  // Bounded because UUIDs are token-expensive (~28 tokens each) and an
+  // unbounded array makes the route's output-budget math meaningless; real
+  // candidates cite at most a handful of inventory ids.
+  .extend({ seedIds: z.array(z.uuid()).max(8) })
   .extend({ scores: momentScoresSchema });
 
 // The array bound is part of the route's output-budget math (24 items ×
-// ~350 tokens/item — see "moment-discovery.candidates" in lib/ai/config.ts).
+// ~650 tokens/item — see "moment-discovery.candidates" in lib/ai/config.ts).
 // The instructions deliberately name NO target count — "at most 18"
 // produced exactly 18 on every source regardless of length (M1 finding,
 // 2026-08-26: models treat "at most N" as a quota to fill, padding the
