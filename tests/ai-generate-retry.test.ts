@@ -16,7 +16,11 @@ vi.mock("ai", async (importOriginal) => {
 });
 vi.mock("../lib/ai/provider", () => ({
   getModelCandidates: vi.fn(async () => [
-    { model: { id: "mock-model" }, provider: "anthropic" },
+    {
+      model: { id: "mock-model" },
+      modelId: "mock-model",
+      provider: "anthropic",
+    },
   ]),
 }));
 
