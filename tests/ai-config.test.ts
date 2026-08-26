@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { EFFORT_TIERS, TASK_ROUTES } from "../lib/ai/config";
+import { afterEach, describe, expect, it } from "vitest";
+import { EFFORT_TIERS, routeForTask, TASK_ROUTES } from "../lib/ai/config";
 
 // Config-level invariants for the AI task table. The first wired-effort
 // call on staging (2026-08-24) failed every extraction with "This model
@@ -24,5 +24,32 @@ describe("TASK_ROUTES", () => {
     for (const route of Object.values(TASK_ROUTES)) {
       expect(route.maxOutputTokens).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("tier overrides", () => {
+  afterEach(() => {
+    process.env.MOMENT_DISCOVERY_TIER = undefined;
+    delete process.env.MOMENT_DISCOVERY_TIER;
+    delete process.env.SEGMENT_PLAN_TIER;
+  });
+
+  it("routes the discovery pass to the overridden tier", () => {
+    process.env.MOMENT_DISCOVERY_TIER = "opus";
+    expect(routeForTask("moment-discovery.candidates").tier).toBe("opus");
+    // Untouched tasks keep their table tier.
+    expect(routeForTask("source-extraction.claims").tier).toBe("sonnet");
+  });
+
+  it("ignores invalid values", () => {
+    process.env.MOMENT_DISCOVERY_TIER = "gpt-5";
+    expect(routeForTask("moment-discovery.candidates").tier).toBe("sonnet");
+  });
+
+  it("drops effort when the override tier rejects it", () => {
+    process.env.SEGMENT_PLAN_TIER = "haiku";
+    const route = routeForTask("segment-plan.partition");
+    expect(route.tier).toBe("haiku");
+    expect(route.effort).toBeUndefined();
   });
 });
