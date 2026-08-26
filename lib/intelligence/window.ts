@@ -11,3 +11,7 @@ export const EXTRACTION_STALL_TTL_MINUTES = 20;
 // Discovery is ONE structured-output call over the same prefix plus pure
 // post-processing — comfortably inside the extraction envelope.
 export const DISCOVERY_STALL_TTL_MINUTES = 20;
+
+// Segment planning is one partition call plus per-keep reviewer calls —
+// the same envelope as discovery.
+export const SEGMENT_STALL_TTL_MINUTES = 20;

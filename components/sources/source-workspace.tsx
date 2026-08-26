@@ -16,6 +16,11 @@ import {
   type MomentsRun,
 } from "./moments-panel";
 import {
+  SegmentsPanel,
+  type SegmentsRun,
+  type SegmentView,
+} from "./segments-panel";
+import {
   SourceMap,
   type SourceMapAnalysis,
   SpeakerSuggestionBanner,
@@ -46,6 +51,10 @@ interface SourceWorkspaceProps {
   posterUrl: string | null;
   // Non-null once the retrieval index is ready — gates the Ask panel
   qa: { history: QuestionHistoryItem[] } | null;
+  segments: {
+    run: SegmentsRun;
+    segments: SegmentView[];
+  } | null;
   sourceId: string;
   transcript: {
     revision: number;
@@ -63,6 +72,7 @@ export function SourceWorkspace({
   peaksUrl,
   posterUrl,
   qa,
+  segments,
   sourceId,
   transcript,
 }: SourceWorkspaceProps) {
@@ -90,6 +100,15 @@ export function SourceWorkspace({
         <MomentsPanel
           candidates={moments.candidates}
           run={moments.run}
+          sourceId={sourceId}
+          transcriptUrl={transcript ? transcript.url : null}
+          video={video}
+        />
+      ) : null}
+      {segments ? (
+        <SegmentsPanel
+          run={segments.run}
+          segments={segments.segments}
           sourceId={sourceId}
           transcriptUrl={transcript ? transcript.url : null}
           video={video}

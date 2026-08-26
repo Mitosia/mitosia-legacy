@@ -26,6 +26,7 @@ const INDEX_FAILURE = /Voyage embeddings failed \(429\)/;
 const ONE_ACCEPTED = /1 accepted/;
 const ONE_ACCEPTED_ONE_REJECTED = /1 accepted · 1 rejected/;
 const RERUN_REFUSAL = /review decisions/;
+const SEGMENT_RERUN_REFUSAL = /review decisions/;
 const REVIEW_TRIM_END = /Reviewer: trim end/;
 
 test.beforeAll(() => {
@@ -392,6 +393,154 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     [sourceId]
   );
   expect(runAfterRefusal.status).toBe("ready");
+
+  // ---- Segment clips (S6.5): the coverage lane ----
+  // Planning is a button, never a chain: the missing state carries the
+  // CTA, and the mock plan tiles the fixture as keep/drop/keep.
+  await expect(page.getByTestId("segments-panel")).toBeVisible({
+    timeout: 15_000,
+  });
+  await page.getByTestId("plan-segments").click();
+  await expect
+    .poll(
+      async () => {
+        const [planRun] = await queryRows<{ status: string }>(
+          "SELECT status FROM segment_plan_run WHERE source_id = $1",
+          [sourceId]
+        );
+        return planRun?.status ?? "missing";
+      },
+      { timeout: 60_000 }
+    )
+    .toBe("ready");
+
+  const segItems = page.getByTestId("segment-item");
+  await expect(segItems).toHaveCount(2, { timeout: 30_000 });
+  await expect(page.getByTestId("segment-drop")).toHaveCount(1);
+
+  // The partition, proven from the database: chronological keep/drop/keep
+  // rows tiling the fixture, grounded keeps, a reasoned drop, and the
+  // reviewer's cold verdicts on keeps (mock flags the last keep).
+  const segRows = await queryRows<{
+    drop_reason: string | null;
+    end_ms: string;
+    grounded: boolean;
+    idx: string;
+    kind: string;
+    review_fix: string | null;
+    review_scores: unknown;
+    start_ms: string;
+  }>(
+    "SELECT idx, kind, grounded, drop_reason, start_ms, end_ms, review_fix, review_scores FROM segment_clip WHERE source_id = $1 ORDER BY idx",
+    [sourceId]
+  );
+  expect(segRows.map((segRow) => segRow.kind)).toEqual([
+    "keep",
+    "drop",
+    "keep",
+  ]);
+  expect(Number(segRows[0]?.start_ms)).toBe(0);
+  for (const [position, segRow] of segRows.entries()) {
+    const following = segRows[position + 1];
+    if (following) {
+      expect(Number(following.start_ms)).toBeGreaterThanOrEqual(
+        Number(segRow.end_ms)
+      );
+    }
+  }
+  const keeps = segRows.filter((segRow) => segRow.kind === "keep");
+  expect(keeps.every((segRow) => segRow.grounded)).toBe(true);
+  expect(keeps.every((segRow) => segRow.review_scores !== null)).toBe(true);
+  expect(
+    keeps.filter((segRow) => segRow.review_fix === "trim_end")
+  ).toHaveLength(1);
+  expect(segRows.find((segRow) => segRow.kind === "drop")?.drop_reason).toBe(
+    "low_energy"
+  );
+  await expect(page.getByTestId("segment-review-flag")).toHaveCount(1);
+
+  // Playback contract on the second chapter: play-from-in-point hits the
+  // exact in, a card click applies the 3s pre-roll (clamped to 0 here).
+  const secondKeep = segItems.nth(1);
+  await secondKeep.getByTestId("segment-play-in").click();
+  const keepStartMs = Number(
+    await secondKeep.getByTestId("segment-card").getAttribute("data-start-ms")
+  );
+  expect(keepStartMs).toBeGreaterThan(0);
+  await page.waitForFunction(
+    (expected) => {
+      const video = document.querySelector("video");
+      return Boolean(video && Math.abs(video.currentTime - expected) < 0.5);
+    },
+    keepStartMs / 1000,
+    { timeout: 10_000 }
+  );
+
+  // Nudge the second chapter's in-point back a sentence; the adjusted
+  // bounds persist.
+  await secondKeep.getByTestId("segment-nudge-in-prev").click();
+  await expect(secondKeep.getByTestId("segment-nudge-delta")).toBeVisible();
+  await expect
+    .poll(
+      async () => {
+        const [adjusted] = await queryRows<{
+          adjusted_start_ms: string | null;
+        }>(
+          "SELECT adjusted_start_ms FROM segment_clip WHERE source_id = $1 AND idx = 2",
+          [sourceId]
+        );
+        return adjusted?.adjusted_start_ms;
+      },
+      { timeout: 15_000 }
+    )
+    .not.toBeNull();
+
+  // Decisions: accept the first chapter, reject the second through the
+  // reason menu (interactive UI — the menu must open).
+  await segItems.nth(0).getByTestId("segment-accept").click();
+  await expect(page.getByTestId("segments-readout")).toHaveText(ONE_ACCEPTED, {
+    timeout: 15_000,
+  });
+  await secondKeep.getByTestId("segment-reject").click();
+  const segReason = page
+    .getByTestId("segment-reject-reason")
+    .filter({ hasText: "Wrong boundaries" });
+  await expect(segReason).toBeVisible({ timeout: 10_000 });
+  await segReason.click();
+  await expect
+    .poll(
+      async () => {
+        const [rejectedSeg] = await queryRows<{ status: string }>(
+          "SELECT status FROM segment_clip WHERE source_id = $1 AND idx = 2",
+          [sourceId]
+        );
+        return rejectedSeg?.status;
+      },
+      { timeout: 15_000 }
+    )
+    .toBe("rejected");
+  const [rejectedSeg] = await queryRows<{ reject_reason: string | null }>(
+    "SELECT reject_reason FROM segment_clip WHERE source_id = $1 AND idx = 2",
+    [sourceId]
+  );
+  expect(rejectedSeg.reject_reason).toBe("wrong_boundaries");
+
+  // The model's drop is a proposal, not a veto: restore it.
+  await page.getByTestId("segment-restore").click();
+  await expect(segItems).toHaveCount(3, { timeout: 15_000 });
+  const [restoredSeg] = await queryRows<{ kind: string; status: string }>(
+    "SELECT kind, status FROM segment_clip WHERE source_id = $1 AND idx = 1",
+    [sourceId]
+  );
+  expect(restoredSeg.kind).toBe("keep");
+  expect(restoredSeg.status).toBe("proposed");
+
+  // Re-planning must refuse while decisions exist.
+  await page.getByTestId("rerun-segments").click();
+  await expect(page.getByTestId("rerun-segments-error")).toHaveText(
+    SEGMENT_RERUN_REFUSAL,
+    { timeout: 15_000 }
+  );
 
   // Park the player deep again — the Ask section below asserts its
   // citation click performs a real, observable seek.

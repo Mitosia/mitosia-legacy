@@ -1,6 +1,11 @@
 import { and, eq } from "drizzle-orm";
 import { db } from "@/lib/db";
-import { momentCandidate, organization, source } from "@/lib/db/schema";
+import {
+  momentCandidate,
+  organization,
+  segmentClip,
+  source,
+} from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { tuneOutboundConnections } from "@/lib/net-tuning";
 
@@ -141,6 +146,46 @@ async function orgCandidates(organizationId: string): Promise<CandidateRow[]> {
   );
 }
 
+async function orgSegments(organizationId: string): Promise<CandidateRow[]> {
+  return await withOrgScope(organizationId, (tx) =>
+    tx
+      .select({
+        adjustedEndMs: segmentClip.adjustedEndMs,
+        adjustedStartMs: segmentClip.adjustedStartMs,
+        endMs: segmentClip.endMs,
+        sourceId: segmentClip.sourceId,
+        sourceTitle: source.title,
+        startMs: segmentClip.startMs,
+        status: segmentClip.status,
+      })
+      .from(segmentClip)
+      .innerJoin(source, eq(segmentClip.sourceId, source.id))
+      .where(eq(segmentClip.kind, "keep"))
+      .orderBy(source.title, segmentClip.idx)
+  );
+}
+
+function reportGroup(label: string, rows: CandidateRow[], overall: Metrics) {
+  if (rows.length === 0) {
+    return;
+  }
+  write(label);
+  const bySource = new Map<string, CandidateRow[]>();
+  for (const row of rows) {
+    const list = bySource.get(row.sourceId) ?? [];
+    list.push(row);
+    bySource.set(row.sourceId, list);
+  }
+  for (const [sourceId, sourceRows] of bySource) {
+    const metrics = emptyMetrics();
+    for (const row of sourceRows) {
+      accumulate(metrics, row);
+      accumulate(overall, row);
+    }
+    report(`${sourceRows[0]?.sourceTitle ?? sourceId} (${sourceId})`, metrics);
+  }
+}
+
 async function main() {
   tuneOutboundConnections();
   const orgs = await db
@@ -148,37 +193,34 @@ async function main() {
     .from(organization);
 
   const overall = emptyMetrics();
+  const overallSegments = emptyMetrics();
   for (const org of orgs) {
     // biome-ignore lint/performance/noAwaitInLoops: one org at a time keeps the output readable
-    const rows = await orgCandidates(org.id);
-    if (rows.length === 0) {
+    const [rows, segmentRows] = await Promise.all([
+      orgCandidates(org.id),
+      orgSegments(org.id),
+    ]);
+    if (rows.length === 0 && segmentRows.length === 0) {
       continue;
     }
-    write(`── ${org.name}`);
-    const bySource = new Map<string, CandidateRow[]>();
-    for (const row of rows) {
-      const list = bySource.get(row.sourceId) ?? [];
-      list.push(row);
-      bySource.set(row.sourceId, list);
-    }
-    for (const [sourceId, sourceRows] of bySource) {
-      const metrics = emptyMetrics();
-      for (const row of sourceRows) {
-        accumulate(metrics, row);
-        accumulate(overall, row);
-      }
-      report(
-        `${sourceRows[0]?.sourceTitle ?? sourceId} (${sourceId})`,
-        metrics
-      );
-    }
+    reportGroup(`── ${org.name} · moments`, rows, overall);
+    reportGroup(
+      `── ${org.name} · segment clips (keeps)`,
+      segmentRows,
+      overallSegments
+    );
   }
 
-  if (overall.total === 0) {
-    write("no moment candidates anywhere yet");
-  } else {
-    write("── OVERALL");
+  if (overall.total === 0 && overallSegments.total === 0) {
+    write("no clip candidates anywhere yet");
+  }
+  if (overall.total > 0) {
+    write("── OVERALL · moments");
     report("all sources", overall);
+  }
+  if (overallSegments.total > 0) {
+    write("── OVERALL · segment clips");
+    report("all sources", overallSegments);
   }
   process.exit(0);
 }
