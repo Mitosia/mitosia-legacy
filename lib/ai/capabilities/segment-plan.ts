@@ -45,9 +45,9 @@ const segmentItemSchema = z
       .nullable(),
   });
 
-// The bound is output-budget math only (64 × ~200 tokens — see
-// "segment-plan.partition" in lib/ai/config.ts), never a target: the
-// instructions name no counts at all.
+// The bound is output-budget math only (64 rows, ~270 tokens for a maxed
+// keep row — see "segment-plan.partition" in lib/ai/config.ts), never a
+// target: the instructions name no counts at all.
 export const segmentPlanOutputSchema = z.object({
   segments: z.array(segmentItemSchema).max(64),
 });
