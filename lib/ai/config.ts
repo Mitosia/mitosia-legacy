@@ -127,8 +127,35 @@ export const TASK_ROUTES = {
 } as const;
 export type AiTask = keyof typeof TASK_ROUTES;
 
+// Per-task tier override via env — the model A/B switch for the quality
+// program (M1 finding 2026-08-26: candidate taste, not boundaries, is the
+// open question, and this table's own header has always said editorial
+// judgment rides Opus). Raw env reads outside serverEnvSchema (the
+// standing precedent); an invalid value is ignored, never a boot failure.
+// Flip it in the Trigger env, re-run the pass, judge the sets blind.
+const TIER_OVERRIDE_ENV: Partial<Record<AiTask, string>> = {
+  "moment-discovery.candidates": "MOMENT_DISCOVERY_TIER",
+  "segment-plan.partition": "SEGMENT_PLAN_TIER",
+};
+
+function isModelTier(value: string): value is ModelTier {
+  return value in MODEL_TIERS;
+}
+
 export function routeForTask(task: AiTask): TaskRoute {
-  return TASK_ROUTES[task];
+  const route: TaskRoute = TASK_ROUTES[task];
+  const envVar = TIER_OVERRIDE_ENV[task];
+  const override = envVar ? process.env[envVar] : undefined;
+  if (!(override && isModelTier(override)) || override === route.tier) {
+    return route;
+  }
+  // Effort must not survive onto a tier that rejects the parameter (the
+  // haiku hard-API-error lesson).
+  if (route.effort && !EFFORT_TIERS.has(override)) {
+    const { effort: _effort, ...rest } = route;
+    return { ...rest, tier: override };
+  }
+  return { ...route, tier: override };
 }
 
 // USD per million tokens (first-party list prices, 2026-08). Used only for
