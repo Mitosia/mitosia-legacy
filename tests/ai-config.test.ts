@@ -52,4 +52,35 @@ describe("tier overrides", () => {
     expect(route.tier).toBe("haiku");
     expect(route.effort).toBeUndefined();
   });
+
+  it("routes an OpenRouter slug to the audition path", () => {
+    process.env.MOMENT_DISCOVERY_TIER = "moonshotai/kimi-k3";
+    const route = routeForTask("moment-discovery.candidates");
+    expect(route.openrouterModel).toBe("moonshotai/kimi-k3");
+    // The table row still supplies the output budget; effort (an
+    // Anthropic-only parameter) never rides along on an audition.
+    expect(route.tier).toBe("sonnet");
+    expect(route.maxOutputTokens).toBe(
+      TASK_ROUTES["moment-discovery.candidates"].maxOutputTokens
+    );
+    expect(route.effort).toBeUndefined();
+  });
+
+  it("accepts variant and alias slug forms", () => {
+    process.env.MOMENT_DISCOVERY_TIER = "google/gemini-3.1-pro-preview:batch";
+    expect(routeForTask("moment-discovery.candidates").openrouterModel).toBe(
+      "google/gemini-3.1-pro-preview:batch"
+    );
+    process.env.MOMENT_DISCOVERY_TIER = "~moonshotai/kimi-latest";
+    expect(routeForTask("moment-discovery.candidates").openrouterModel).toBe(
+      "~moonshotai/kimi-latest"
+    );
+  });
+
+  it("rejects slug-shaped junk", () => {
+    process.env.MOMENT_DISCOVERY_TIER = "not a model/id with spaces";
+    const route = routeForTask("moment-discovery.candidates");
+    expect(route.openrouterModel).toBeUndefined();
+    expect(route.tier).toBe("sonnet");
+  });
 });

@@ -4,7 +4,6 @@ import {
   type AiTask,
   EFFORT_TIERS,
   estimateCostUsd,
-  MODEL_TIERS,
   routeForTask,
 } from "./config";
 import { getModelCandidates } from "./provider";
@@ -107,6 +106,29 @@ function isRetryableSchemaMiss(error: unknown): boolean {
   );
 }
 
+// OpenRouter reports the real billed cost in provider metadata when usage
+// accounting is on (the provider seam enables it on every OpenRouter
+// candidate); Anthropic costs come from our own price table instead.
+function openRouterCostUsd(providerMetadata: unknown): number | null {
+  const cost = (
+    providerMetadata as
+      | { openrouter?: { usage?: { cost?: number } } }
+      | undefined
+  )?.openrouter?.usage?.cost;
+  return typeof cost === "number" ? cost : null;
+}
+
+function candidateCostUsd(
+  candidate: { modelId: string; provider: string },
+  inputTokens: number,
+  outputTokens: number,
+  providerMetadata: unknown
+): number | null {
+  return candidate.provider === "anthropic"
+    ? estimateCostUsd(candidate.modelId, inputTokens, outputTokens)
+    : openRouterCostUsd(providerMetadata);
+}
+
 export async function generateStructured<T>(
   task: AiTask,
   system: string,
@@ -164,13 +186,14 @@ export async function generateStructured<T>(
       return {
         output: schema.parse(result.object),
         usage: {
-          costUsd: estimateCostUsd(
-            MODEL_TIERS[route.tier],
+          costUsd: candidateCostUsd(
+            candidate,
             inputTokens,
-            outputTokens
+            outputTokens,
+            result.providerMetadata
           ),
           inputTokens,
-          model: MODEL_TIERS[route.tier],
+          model: candidate.modelId,
           outputTokens,
           provider: candidate.provider,
           task,

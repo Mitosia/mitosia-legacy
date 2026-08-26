@@ -145,6 +145,9 @@ export type AiTask = keyof typeof TASK_ROUTES;
 // judgment rides Opus). Raw env reads outside serverEnvSchema (the
 // standing precedent); an invalid value is ignored, never a boot failure.
 // Flip it in the Trigger env, re-run the pass, judge the sets blind.
+// Two accepted forms, told apart by the "/" every OpenRouter id carries:
+// a first-party tier name ("opus"), or an OpenRouter model slug
+// ("moonshotai/kimi-k3") — the third-party audition path.
 const TIER_OVERRIDE_ENV: Partial<Record<AiTask, string>> = {
   "moment-discovery.candidates": "MOMENT_DISCOVERY_TIER",
   "segment-plan.partition": "SEGMENT_PLAN_TIER",
@@ -154,20 +157,43 @@ function isModelTier(value: string): value is ModelTier {
   return value in MODEL_TIERS;
 }
 
-export function routeForTask(task: AiTask): TaskRoute {
+// OpenRouter ids: author/model, occasionally with a variant suffix
+// (":batch") or a leading "~" alias.
+const OPENROUTER_SLUG = /^[\w~][\w.~-]*\/[\w.~:-]+$/;
+
+export type ResolvedRoute = TaskRoute & {
+  // Set when the override names an OpenRouter model. The provider seam
+  // then makes OpenRouter the ONLY candidate — a silent first-party
+  // fallback mid-audition would produce a mislabeled A/B set — and effort
+  // is dropped (an Anthropic-only parameter). The table row still supplies
+  // maxOutputTokens.
+  openrouterModel?: string;
+};
+
+export function routeForTask(task: AiTask): ResolvedRoute {
   const route: TaskRoute = TASK_ROUTES[task];
   const envVar = TIER_OVERRIDE_ENV[task];
   const override = envVar ? process.env[envVar] : undefined;
-  if (!(override && isModelTier(override)) || override === route.tier) {
+  if (!override) {
     return route;
   }
-  // Effort must not survive onto a tier that rejects the parameter (the
-  // haiku hard-API-error lesson).
-  if (route.effort && !EFFORT_TIERS.has(override)) {
-    const { effort: _effort, ...rest } = route;
-    return { ...rest, tier: override };
+  if (isModelTier(override)) {
+    if (override === route.tier) {
+      return route;
+    }
+    // Effort must not survive onto a tier that rejects the parameter (the
+    // haiku hard-API-error lesson).
+    if (route.effort && !EFFORT_TIERS.has(override)) {
+      const { effort: _effort, ...rest } = route;
+      return { ...rest, tier: override };
+    }
+    return { ...route, tier: override };
   }
-  return { ...route, tier: override };
+  if (OPENROUTER_SLUG.test(override)) {
+    const { effort: _effort, ...rest } = route;
+    return { ...rest, openrouterModel: override };
+  }
+  return route;
 }
 
 // USD per million tokens (first-party list prices, 2026-08). Used only for
