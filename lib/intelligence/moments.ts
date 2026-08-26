@@ -430,7 +430,7 @@ function unionOverlappingRanges(
 }
 
 function semanticPair(
-  candidates: readonly DedupeInput[],
+  candidates: readonly MsRange[],
   footprints: readonly number[][],
   vectors: readonly (number[] | null)[],
   a: number,
@@ -507,6 +507,29 @@ function verdictsFromGroups(
     }
   }
   return verdicts;
+}
+
+// The semantic pass alone, as pairs — the segment planner flags
+// twice-told stories (both survive; a flag, never suppression) with the
+// exact same footprint/cosine rules the moment dedupe uses.
+export function semanticTwinPairs(
+  ranges: readonly MsRange[],
+  chunks: readonly DedupeChunk[]
+): [number, number][] {
+  if (chunks.length === 0) {
+    return [];
+  }
+  const footprints = ranges.map((range) => chunkFootprint(range, chunks));
+  const vectors = footprints.map((footprint) => meanVector(footprint, chunks));
+  const pairs: [number, number][] = [];
+  for (let a = 0; a < ranges.length; a += 1) {
+    for (let b = a + 1; b < ranges.length; b += 1) {
+      if (semanticPair(ranges, footprints, vectors, a, b)) {
+        pairs.push([a, b]);
+      }
+    }
+  }
+  return pairs;
 }
 
 export function dedupeCandidates(

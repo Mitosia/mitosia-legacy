@@ -12,6 +12,10 @@ import type {
 } from "@/components/sources/moments-panel";
 import { RefreshPoller } from "@/components/sources/refresh-poller";
 import { RetryIngestButton } from "@/components/sources/retry-ingest-button";
+import type {
+  SegmentsRun,
+  SegmentView,
+} from "@/components/sources/segments-panel";
 import type { SourceMapAnalysis } from "@/components/sources/source-map";
 import { SourceWorkspace } from "@/components/sources/source-workspace";
 import { Badge } from "@/components/ui/badge";
@@ -29,6 +33,8 @@ import {
   momentCandidate,
   momentDiscoveryRun,
   project,
+  segmentClip,
+  segmentPlanRun,
   source,
   sourceAnalysis,
   sourceArtifact,
@@ -56,6 +62,10 @@ import {
   scheduleSourceIndexReap,
 } from "@/lib/intelligence/index-reaper";
 import { listRecentQuestions } from "@/lib/intelligence/qa";
+import {
+  isStalledSegmentPlan,
+  scheduleSegmentPlanReap,
+} from "@/lib/intelligence/segment-reaper";
 import { requireOrg } from "@/lib/org";
 import {
   isStalledTranscription,
@@ -216,6 +226,7 @@ function pageIsSettled(data: {
   discoveryRun: { status: string } | null;
   extractionRun: { status: string } | null;
   index: { status: string } | null;
+  segmentRun: { status: string } | null;
   status: string;
   transcript: { status: string } | null;
 }): boolean {
@@ -225,7 +236,8 @@ function pageIsSettled(data: {
     jobSettled(data.analysis) &&
     jobSettled(data.index) &&
     jobSettled(data.extractionRun) &&
-    jobSettled(data.discoveryRun)
+    jobSettled(data.discoveryRun) &&
+    jobSettled(data.segmentRun)
   );
 }
 
@@ -298,6 +310,36 @@ function workspaceMoments(data: {
   };
 }
 
+// Segment planning is a button, never a chain: the missing state carries
+// the "Plan segment clips" CTA once extraction is ready.
+function workspaceSegments(data: {
+  currentRevision: { revision: number } | null;
+  extractionRun: { status: string } | null;
+  segmentRun: {
+    error: string | null;
+    revision: number | null;
+    status: string;
+  } | null;
+  segments: SegmentView[];
+}): { run: SegmentsRun; segments: SegmentView[] } | null {
+  if (!data.segmentRun) {
+    return data.extractionRun?.status === "ready"
+      ? { run: { error: null, stale: false, status: "missing" }, segments: [] }
+      : null;
+  }
+  return {
+    run: {
+      error: data.segmentRun.error,
+      stale:
+        data.segmentRun.status === "ready" &&
+        data.currentRevision !== null &&
+        (data.segmentRun.revision ?? 0) < data.currentRevision.revision,
+      status: data.segmentRun.status,
+    },
+    segments: data.segments,
+  };
+}
+
 function workspaceAnalysis(data: {
   analysis: {
     entities: unknown;
@@ -337,6 +379,7 @@ function scheduleSourceMaintenance(
     currentRevision: { revision: number } | null;
     discoveryRun: { stalled: boolean } | null;
     extractionRun: { stalled: boolean } | null;
+    segmentRun: { stalled: boolean } | null;
     id: string;
     index: { revision: number | null; stalled: boolean; status: string } | null;
     transcript: { stalled: boolean } | null;
@@ -356,6 +399,9 @@ function scheduleSourceMaintenance(
   }
   if (data.discoveryRun?.stalled) {
     scheduleDiscoveryReap(organizationId);
+  }
+  if (data.segmentRun?.stalled) {
+    scheduleSegmentPlanReap(organizationId);
   }
   if (
     data.currentRevision &&
@@ -536,6 +582,66 @@ export default async function SourceDetailPage(
       })
     );
 
+    const [segmentRunRow] = await tx
+      .select({
+        error: segmentPlanRun.error,
+        revision: segmentPlanRun.revision,
+        stalled: sql<boolean>`(${isStalledSegmentPlan})`,
+        status: segmentPlanRun.status,
+      })
+      .from(segmentPlanRun)
+      .where(eq(segmentPlanRun.sourceId, sourceRow.id))
+      .limit(1);
+
+    const segmentRows =
+      segmentRunRow?.status === "ready"
+        ? await tx
+            .select({
+              adjustedEndMs: segmentClip.adjustedEndMs,
+              adjustedStartMs: segmentClip.adjustedStartMs,
+              dropReason: segmentClip.dropReason,
+              endMs: segmentClip.endMs,
+              flags: segmentClip.flags,
+              grounded: segmentClip.grounded,
+              hook: segmentClip.hook,
+              id: segmentClip.id,
+              idx: segmentClip.idx,
+              kind: segmentClip.kind,
+              rejectReason: segmentClip.rejectReason,
+              reviewFix: segmentClip.reviewFix,
+              reviewNotes: segmentClip.reviewNotes,
+              reviewScores: segmentClip.reviewScores,
+              startMs: segmentClip.startMs,
+              status: segmentClip.status,
+              summary: segmentClip.summary,
+              title: segmentClip.title,
+            })
+            .from(segmentClip)
+            .where(eq(segmentClip.sourceId, sourceRow.id))
+            .orderBy(segmentClip.idx)
+        : [];
+    // Ungrounded keeps render as drops would be wrong; they render as
+    // keeps with their no_anchor flag — the human decides. All rows reach
+    // the plan view: coverage is the point.
+    const segments: SegmentView[] = segmentRows.map(
+      ({ grounded, reviewScores, ...row }) => ({
+        ...row,
+        flags: Array.isArray(row.flags) ? (row.flags as string[]) : [],
+        reviewFlagged:
+          grounded &&
+          reviewScores !== null &&
+          isFlaggedVerdict({
+            suggestedFix: row.reviewFix ?? "none",
+            ...(reviewScores as {
+              opensCold: number;
+              resolves: number;
+              standsAlone: number;
+              titleTruthful: number;
+            }),
+          }),
+      })
+    );
+
     // Only grounded rows reach the UI — the aligner's gate is the whole
     // point of the provenance model.
     const extractions =
@@ -602,6 +708,8 @@ export default async function SourceDetailPage(
       extractionRun: extractionRunRow ?? null,
       extractions,
       index: indexRow ?? null,
+      segmentRun: segmentRunRow ?? null,
+      segments,
       transcript: transcriptRow ?? null,
     };
   });
@@ -670,6 +778,7 @@ export default async function SourceDetailPage(
           peaksUrl={waveformKey ? `/api/media/${waveformKey}` : null}
           posterUrl={posterKey ? `/api/media/${posterKey}` : null}
           qa={qaHistory === null ? null : { history: qaHistory }}
+          segments={workspaceSegments(data)}
           sourceId={data.id}
           transcript={workspaceTranscript(data)}
         />

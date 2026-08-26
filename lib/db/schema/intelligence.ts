@@ -400,6 +400,145 @@ export const momentCandidateRelations = relations(
   })
 );
 
+// ---- Segment clips (S6.5, the coverage lane) ------------------------------
+//
+// segment_plan_run is the lifecycle row (one per source, the discovery-run
+// clone); segment_clip holds the episode PARTITION the Editor pass
+// proposed: chronological keep/drop rows that tile the whole recording —
+// every second accounted for (docs/episode-to-clips.md §4, coverage
+// invariant). Keeps are chapters-as-videos whose anchor grounded inside
+// their span; drops carry a reason and are restorable. No numeric
+// length/count constraints anywhere (constraint policy, 2026-08-26):
+// duration/count outliers become observability flags for the human
+// reviewer, never auto-enforcement.
+
+const SEGMENT_KINDS = ["keep", "drop"] as const;
+export type SegmentKind = (typeof SEGMENT_KINDS)[number];
+
+const SEGMENT_STATUSES = ["proposed", "accepted", "rejected"] as const;
+export type SegmentStatus = (typeof SEGMENT_STATUSES)[number];
+
+// Type-level only — extends without migration.
+const DROP_REASONS = [
+  "housekeeping",
+  "sponsor",
+  "low_energy",
+  "weaker_telling",
+  "thin",
+  "other",
+] as const;
+export type SegmentDropReason = (typeof DROP_REASONS)[number];
+
+export const segmentPlanRun = pgTable(
+  "segment_plan_run",
+  {
+    attempts: integer("attempts").default(0).notNull(),
+    contextSnapshotId: uuid("context_snapshot_id").references(
+      () => contextSnapshot.id,
+      { onDelete: "set null" }
+    ),
+    // {segments, kept, dropped, grounded, flagged, reviewed} — run facts
+    counts: jsonb("counts"),
+    error: text("error"),
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    models: jsonb("models"),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    revision: integer("revision"),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => source.id, { onDelete: "cascade" }),
+    status: text("status", { enum: INDEX_STATUSES })
+      .default("pending")
+      .notNull(),
+    ...timestamps,
+  },
+  (table) => [
+    index("segment_plan_run_org_idx").on(table.organizationId),
+    uniqueIndex("segment_plan_run_source_idx").on(table.sourceId),
+  ]
+);
+
+export const segmentClip = pgTable(
+  "segment_clip",
+  {
+    // Human boundary edits; null until touched
+    adjustedEndMs: integer("adjusted_end_ms"),
+    adjustedStartMs: integer("adjusted_start_ms"),
+    // Verbatim phrase from inside the segment, aligner-verified; null on
+    // drops (nothing to ground)
+    anchorText: text("anchor_text"),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    decidedAt: timestamp("decided_at"),
+    decidedBy: text("decided_by").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    // drop rows only: why this stretch earns no clip
+    dropReason: text("drop_reason", { enum: DROP_REASONS }),
+    endMs: integer("end_ms").notNull(),
+    // Observability flags (constraint policy): ["short_outlier",
+    // "long_outlier", "twice_told", "gap_fill", …] — reviewer-facing,
+    // never enforcement
+    flags: jsonb("flags").notNull(),
+    grounded: boolean("grounded").notNull(),
+    groundingScore: real("grounding_score").notNull(),
+    hook: text("hook"),
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    // Chronological position in the plan (0-based) — segments are a
+    // timeline partition, not a ranking
+    idx: integer("idx").notNull(),
+    kind: text("kind", { enum: SEGMENT_KINDS }).notNull(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    rawEndMs: integer("raw_end_ms").notNull(),
+    rawStartMs: integer("raw_start_ms").notNull(),
+    rejectNote: text("reject_note"),
+    rejectReason: text("reject_reason", { enum: REJECT_REASONS }),
+    // Cold-context reviewer verdict on keeps (same agent as moments)
+    reviewFix: text("review_fix", { enum: REVIEW_FIXES }),
+    reviewNotes: text("review_notes"),
+    reviewScores: jsonb("review_scores"),
+    revision: integer("revision").notNull(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => segmentPlanRun.id, { onDelete: "cascade" }),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => source.id, { onDelete: "cascade" }),
+    startMs: integer("start_ms").notNull(),
+    status: text("status", { enum: SEGMENT_STATUSES })
+      .default("proposed")
+      .notNull(),
+    summary: text("summary"),
+    title: text("title"),
+  },
+  (table) => [
+    index("segment_clip_org_idx").on(table.organizationId),
+    index("segment_clip_source_idx").on(table.sourceId, table.idx),
+    index("segment_clip_run_idx").on(table.runId),
+  ]
+);
+
+export const segmentPlanRunRelations = relations(
+  segmentPlanRun,
+  ({ many, one }) => ({
+    segments: many(segmentClip),
+    source: one(source, {
+      fields: [segmentPlanRun.sourceId],
+      references: [source.id],
+    }),
+  })
+);
+
+export const segmentClipRelations = relations(segmentClip, ({ one }) => ({
+  run: one(segmentPlanRun, {
+    fields: [segmentClip.runId],
+    references: [segmentPlanRun.id],
+  }),
+}));
+
 // ---- Source Q&A (S5) -----------------------------------------------------
 //
 // One row per question asked of a source: the answer, its verified

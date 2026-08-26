@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { runMomentDiscovery } from "@/lib/ai/capabilities/moment-discovery";
+import { runSegmentPlan } from "@/lib/ai/capabilities/segment-plan";
 import {
   runSourceAnalysis,
   transcriptToPromptText,
@@ -17,12 +18,14 @@ import {
   scoreExtractions,
   scoreMoments,
   scoreQa,
+  scoreSegments,
   scoreSpeakerSuggestions,
   scoreSummary,
 } from "@/lib/ai/evals/scorers";
 import { buildChunks } from "@/lib/intelligence/chunks";
 import { groundExtractions } from "@/lib/intelligence/grounding";
 import { buildMomentRows } from "@/lib/intelligence/moments";
+import { buildSegmentRows, checkPartition } from "@/lib/intelligence/segments";
 import type { TranscriptData } from "@/lib/transcription/types";
 
 // Golden-eval runner for the source-analysis capability: every fixture in
@@ -49,6 +52,9 @@ const THRESHOLDS: Record<string, number> = {
   moments: 0.8,
   // Answerability verdicts + citation-overlap on the golden questions.
   qa: 0.7,
+  // Segment plan: grounded-keep rate with hard penalties for a broken
+  // partition — coverage is the product.
+  segments: 0.8,
   speakers: 0.6,
   summary: 0.4,
 };
@@ -239,6 +245,24 @@ async function evaluateFixture(
     []
   );
 
+  // The coverage lane runs the same fixture through the real partition
+  // capability + the production tiling gauntlet.
+  const plan = await runSegmentPlan({
+    analysis: null,
+    contextPack: { ...fixture.pack, kind: "segment-plan" },
+    durationMs: fixture.durationMs,
+    momentInventory: [],
+    seeds: [],
+    transcript: fixture.transcript,
+  });
+  const segmentRows = buildSegmentRows(
+    plan.items,
+    fixture.transcript.words,
+    fixture.durationMs,
+    []
+  );
+  const partition = checkPartition(segmentRows, fixture.transcript.words);
+
   const qaOutcomes = await evaluateQuestions(fixture);
 
   const scores: Record<string, ReturnType<typeof scoreSummary>> = {
@@ -249,6 +273,7 @@ async function evaluateFixture(
       fixture.durationMs,
       fixture.transcript.words
     ),
+    segments: scoreSegments(segmentRows, partition.ok),
     speakers: scoreSpeakerSuggestions(result.editorial.speakers, speakerIds),
     summary: scoreSummary(result.editorial.summary),
   };
@@ -284,6 +309,7 @@ async function evaluateFixture(
     ...result.usage,
     ...extraction.usage,
     ...discovery.usage,
+    ...plan.usage,
   ].reduce((total, usage) => total + (usage.costUsd ?? 0), 0);
   if (spentUsd > 0) {
     console.log(`   cost: $${spentUsd.toFixed(4)}`);
