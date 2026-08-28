@@ -78,9 +78,7 @@ test("the transcript panel seeks, searches, and highlights", async ({
 
   // The mock transcription settles moments after ready; the poller grows
   // the sidebar's Transcript tab.
-  await page
-    .getByTestId("workspace-tab-transcript")
-    .click({ timeout: 30_000 });
+  await page.getByTestId("workspace-tab-transcript").click({ timeout: 30_000 });
   const panel = page.getByTestId("transcript-panel");
   await expect(panel).toBeVisible();
 
