@@ -1,0 +1,178 @@
+# Clip cut architecture: boundaries that feel cut by an editor
+
+**Status: Design (2026-08-28).** Written from the Gate M1 verdict measured the same day. **Consumes:** docs/episode-to-clips.md (§8 quality bar, §9 editorial team — this doc is the build plan for §9's team, revised where evidence demanded), docs/clipping-landscape.md, the S6/S6.5 pipelines, and the M1 review record on staging. **Feeds:** the next M1 rounds, then S8 (edit spec) once a round passes.
+
+Direction (Rajesh, 2026-08-28): boundary selection is the biggest issue — moments start early or end abruptly. Build the best agentic architecture, harness, and prompt engineering for cuts that feel like a real editor's; apply it to both lanes; moments must feel like quick shorts while segments must feel like topics, never like shorts candidates; and evaluate vision honestly rather than dismissing it.
+
+---
+
+## 1. The verdict: M1 failed on boundaries, not selection
+
+Gate M1 was measured 2026-08-28: Rajesh reviewed all 21 Brett Lee candidates in the two-pane workspace.
+
+- **3 accepted · 4 shortlisted · 14 rejected → 18% acceptance** against the ≥70% bar.
+- **wrong_boundaries ×9 of the 14 rejections** (then not_interesting ×2, out_of_context ×1, duplicate ×1, other ×1). The rejected candidates were mostly strong *finds* — the Kohli's-eyes moment, the Preity Zinta rumour, the Mohali standoff — with wrong *cuts*. Selection is close to solved; cutting is not.
+- The two failure shapes, verified against the transcript (`pnpm moments:metrics --detail`, added with this doc):
+  - **Opens on the previous topic's tail.** The Preity Zinta clip opens on "…they're gonna keep producing superstars" — the end of the *previous* answer. Several candidates open on inter-topic banter before the actual story is provoked.
+  - **Closes past the payoff into the next beat, or before the payoff lands.** The Ashes clip ran 192 seconds — through the payoff and an entire second story (his retirement) — before ending on the *next* exchange's opening.
+- **`raw→snap` deltas were small (mostly <3s per side): the deterministic gauntlet is not the problem.** Snapping faithfully polishes boundaries that are wrong at the narrative level. Symmetrically, the three accepted candidates needed **zero** nudging — when the proposed cut is right, the machinery downstream keeps it right.
+- Length discipline also failed: 192s and 133s "moments" survived to review. A moment is a short; those are segments wearing the wrong badge.
+- **Segments over-segment.** Brett Lee's plan: 26 keeps at ~100s median; Karma: 20 keeps. Those are beat-sized slices — shorts candidates — not the 6–10 topic chapters a 58-minute interview actually contains. This despite the prompt already saying "one complete narrative arc… never split one arc": identity *language* alone does not hold against the model's default granularity.
+
+Every number above regenerates from staging via `pnpm moments:metrics --detail`.
+
+## 2. Diagnosis: why the current shape cannot cut precisely
+
+Four causes, all structural — none is "the model is too weak" (the nine-model audition already put Opus, the best measured cutter, in the seat):
+
+1. **The model cannot address the timeline it is cutting.** The transcript reaches the prompt as paragraph lines with **one `[mm:ss]` stamp per paragraph** (`transcriptToPromptText`), where a paragraph spans 30–90 seconds of speech. The model must then emit boundaries as free-form **milliseconds** — interpolated positions inside text it has no coordinates for. The research is unambiguous that this is the weakest possible contract: numeric span generation scores 5–34% F1 while *selection from enumerated indices* recovers +21–45pp (span-labeling, arXiv 2601.16946); TimeStampEval (arXiv 2511.11594) shows boundary misses collapse from 12–16% to ~5% purely from prompt layout, with 89–96% exact-match in the best configuration. Spotify's production chaptering pipeline has the model emit **sentence indices, never timestamps**, with a deterministic index→time mapping — exactly our "model proposes, code disposes" philosophy, applied one layer earlier than we apply it.
+2. **One pass holds every objective at once.** A single call reads ~58 minutes and emits ~20 candidates × (span + anchor + title + hook + summary + 5 scores) in one structured response. Long-list extraction saturates near 50% recall and structured-output quality degrades hardest near capacity limits (arXiv 2405.02732, 2606.09410). Boundary precision — the property the product lives on — gets whatever attention is left after finding, titling, and scoring. No pass ever re-examines *one clip's* boundaries with full attention; the cheapest, highest-evidence fix in the literature is exactly that pass (TimeStampEval's assisted-fuzzy staging: narrow to a local window, then decide — accuracy +4–50pp and ~90% lower cost-per-correct).
+3. **The narrative rules live in one sentence of prompt and one single-turn backstop.** "Start at the question or setup" is one instruction among thirty; `captureLeadIn` deterministically recovers only a *single* preceding other-speaker turn (≤20s, ≤3s gap) — two-turn setups and long questions slip through by design (noted in its own header comment). Nothing at all guards the out-point: the designed lead-out trim was deliberately unbuilt pending evidence, segment *ends* are never independently snapped, and story extractions trust the model's approximate end verbatim (`grounding.ts` comment: "approximate but the only signal"). M1 has now supplied the evidence those deferrals were waiting for.
+4. **Lane identity is asserted, not enforced by structure.** Both lanes read the same paragraph rendering and emit the same shape of span list. The segment prompt says "arc" but nothing shows the model what *episode-native chapter granularity* looks like versus shorts granularity, and no downstream signal pushes back when 26 beat-slices come back (outlier flags are relative to the plan's *own* median, so uniform over-segmentation is invisible to them).
+
+## 3. What the outside evidence says
+
+Digest of the research pack (full citations in §10):
+
+- **Span selection**: enumerate cut candidates with IDs; instructions before transcript; text-before-timestamp compact lines; bare numbers; reasoning fields *before* committed indices in the schema (left-to-right generation means the first committed value constrains the rest). All directly measured, double-digit effects.
+- **Two-stage boundary work**: coarse find over the whole episode, then per-item refinement over a small local window. The strongest single pattern in the evidence (accuracy up, cost-per-correct down ~90%).
+- **Verification**: grounding-then-prune is published best practice (arXiv 2306.00024) — we already do it. Critic loops only work with *external* evidence, not self-re-reading (CRITIC): a reviewer must see the rendered result (the actual span text, the actual boundary frames), never the proposer's claim.
+- **The competition fails exactly here.** Measured discard rates for AI clippers run 13–40%; clip-selection accuracy drops to ~40% on **multi-speaker** content — our precise domain; "cuts off mid-sentence / missed the punchline / started on the last word of the previous thought" are the category's signature complaints, and "selects natural breaks" is literally a marketable differentiator today. Nobody ships deterministic grids, grounding gates, cold review, or human-boundary metrics. The category's bar is low where our bar is highest — this architecture is the moat.
+- **Editor craft** converges on: in-point at the setup or at peak tension (sometimes *trimming* the question to open in medias res), every second of the hook doing work, out-point immediately after the payoff lands, and preserving meaningful pauses rather than stripping all air.
+- **Vision** — see §7; summary: frontier VLMs cannot localize in hour-scale video (best closed model 0.115 mIoU on ~76-minute content; specialized models beat Gemini 3 Pro and GPT-5 at temporal retrieval; timestamp-hallucination bug reports persist across three Gemini generations), but three *specific* visual signals are cheap and evidenced — a deterministic shot-change grid, per-clip frame QC, and optional whole-episode enrichment at Flash prices.
+
+## 4. The cutting room: pass/agent topology
+
+The design keeps docs/episode-to-clips.md §9's frame — Orchestrator (deterministic code, never a model), Director, Editor, Reviewer, one bounded revision, human last gate — with **one amendment**: the Editor's job splits in two, because the evidence says one pass cannot both *find* and *cut* well at any prompt quality. Finding wants the whole episode; cutting wants a two-minute reel and full attention. A real cutting room separates the story editor's rough cut from the cutter's fine cut for the same reason.
+
+The room, per source (both lanes, ~120–150 coordinated model calls, all sequenced by deterministic code with the existing lifecycle rows, reapers, claim idempotency, and ledger correlations):
+
+**Pass 0 — the cut-point substrate (deterministic, no model).** Everything the model will later *select from*, computed once from the word timeline and unit-tested forever:
+- Sentence, pause, and speaker-turn grids — exist today (`sentenceStarts`/`sentenceStartTimes`/`sentenceEndTimes`/`pauseBoundaries`/`speakerTurnStartTimes` in lib/intelligence/moments.ts).
+- **Question annotation** (new): turns whose text is interrogative-shaped get a `·q` mark — upgrades lead-in/lead-out backstops from structural to semantic.
+- **Shot-change grid** (new, §7): camera-cut timestamps from the 360p proxy, an ingest artifact.
+- Two renderings with **stable enumerated IDs**: a *coarse* rendering (one line per paragraph, `P042`, for finding) and a *fine* rendering (one line per sentence, `s0417|14:02|S2: text` with `·q`/`¶2.1s` pause/`⟲turn`/`·cut` glyphs, built per window on demand, ~40–60 tokens/sentence). Instructions before transcript; compact text-with-timestamp lines; mm:ss stays *visible* (the model reasons about pacing) but is never the output coordinate.
+
+**Pass 1 — DIRECTOR (`episode-brief.compose`, opus, full cached prefix; ships Round 3).** The "watch the whole thing first" step made explicit: episode spine (ordered topics with rough ranges), marquee arcs, tone/format profile, drop territories. **The brief persists as a storage artifact + DB row keyed to transcript revision** — load-bearing detail: segment planning is a button that may run hours later, when the 1h prompt cache is cold; the brief artifact is the durable cross-run memory the cache cannot be.
+
+**Pass 2 — EDITORS, rough cut (amended existing passes, opus, shared cached prefix).** `moment-discovery.candidates` and `segment-plan.partition` keep their single-pass shape and opus seat, with three amendments (Round 2): sentence/paragraph-**ID selection instead of millisecond emission**; an explicit *coarse mandate* — "identify the region where the beat lives; a dedicated cutter will place the exact cut" — which removes the pressure that produced 192s moments and lets the pass be scored on recall, which is what a long-context pass is actually good at; and lane-identity contracts (§6). One system string + one union schema (`mode` discriminant) across Director and both Editors, instruction text after the cache breakpoint — the S5 cache-key rule; assert `cache_read_input_tokens > 0` in Langfuse.
+
+**Pass 3 — CUTTER, fine cut (`clip-fine.cut`, new; sonnet medium to start; per-clip small calls, cache-exempt; ships ROUND 1).** The surgical core, and the round-one lever. For each rough candidate: code builds a window — the rough span **±90s, expanded to whole speaker turns, mandatorily including the two preceding complete turns and one following turn** (two-turn setups and lead-outs are inside the window *by construction*). Rendered fine (~1.5–2.5k tokens — the regime where span-selection evals hit 89–96% exact). The Cutter sees only this reel plus a five-line job card (title/hook, arc note, the lane's craft brief) and returns `{reasoning, inSentenceId, setupSentenceId, payoffSentenceId, outSentenceId, confidence, couldNotFind?}` — reasoning **before** the committed IDs (left-to-right generation), and a legal escape hatch: `couldNotFind`/`no_single_payoff` turns "this region is not one moment" into a flag instead of a shipped mislabeled chapter.
+
+Spend discipline (pure ordering, real money): the Cutter runs **after** clamp + grounding + dedupe — never pay to refine a row the aligner will hide or dedupe will suppress. After cutting: re-ground `anchorText` inside the refined span (the provenance gate re-proves itself; a fine cut that excludes the anchor un-grounds the clip — a tripwire against the Cutter drifting off the Editor's story), and **re-run IoU dedupe** (refined boundaries can converge two candidates). A Cutter failure leaves coarse bounds standing, flagged `unrefined` — it can never fail a run (the Reviewer's contract).
+
+For segments the Cutter refines **cut points, not spans**: each boundary between chapters gets one ±60s window showing *both sides* — "where exactly does the first topic end and the second begin?" — with adjacent drop text visible (so a keep never opens on a sponsor-read's tail), emitting one `cutId` that re-enters `snapCutIndex`/`buildSegmentRows`/`checkPartition`. This closes the documented "segment ends are never independently snapped" gap without touching coverage-by-construction.
+
+**Pass 4 — deterministic gauntlet (extended).** ID→ms resolution is a lookup (`resolveSpan`; invalid IDs clamp + flag `id_clamped`; `snapToSentences` survives as the fallback for free-ms input — e.g. an OpenRouter audition model that fumbles IDs). Then the narrative backstops (§5), anchor grounding (unchanged — it caught GLM-5.2 fabricating anchors and is the only integrity check that works on audition models; verbatim `anchorText` stays, ID-only substitutes rejected), dedupe (+ the known rank-diversity fix), composite scoring, rank; for segments, partition synthesis and `checkPartition` untouched.
+
+**Pass 5 — REVIEWER (`moment-review.verdict`, exists; armed Round 3).** Cold per-clip, contract unchanged, inputs upgraded (§8).
+
+**Pass 6 — one bounded revision round (deterministic routing; Round 3).** Code — never a model — routes: a Reviewer `extend_start`/`trim_end`/`trim_start`/`extend_end` fix sends that clip through the Cutter **once more** (window widened toward the fix, reviewer note appended), pre-persistence so it never collides with re-run refusal; re-gauntlet; if the revised bounds fail grounding, keep the original and record `revision_rejected` — the round can only help or no-op, never loop. `retitle` routes to a title-only micro-call; `drop` never auto-applies. **Sunset clause**: if revised clips don't beat pre-revision bounds (human-acceptance-wise) within two rounds, remove the actuator and keep the flags.
+
+## 5. The boundary mechanism
+
+**Selection, never generation.** The model's only coordinates are enumerated IDs; there is no millisecond field anywhere in any schema. Code owns the ID→ms bijection. Snapping stops *correcting* the model and starts *executing* it — the Spotify production pattern, and the single strongest evidence-backed change (+21–45pp for selection over numeric generation; boundary off-by-ones collapse to ~5% with this layout).
+
+**The Cutter's brief is craft, not extraction** — the editor-craft findings as descriptions of what a good cut *is*, no numbers anywhere (constraint: no numeric editorial enforcement):
+
+> *In-point*: open where the tension starts — the setup line, or the last sentence of the question if it rambles; sometimes the strongest open trims the question entirely and starts on the answer's first punch. Never open on the tail of the previous answer; never open on an unresolved referent ("that's when…" with an unseen antecedent).
+> *Out-point*: the payoff lands inside the clip, and the clip ends on the first natural breath after it lands. Do not run into the next question. Do not strip the air: if the payoff is followed by a beat of silence, the out-point is after the silence.
+> *One beat*: when a second story begins, the clip is over.
+
+**Every measured failure shape gets model judgment first and a deterministic backstop behind it:**
+
+| M1 failure | Model layer | Deterministic backstop |
+|---|---|---|
+| Opens on previous topic's tail | The tail is *visible in the window* as labeled sentences the Cutter is briefed to exclude | **`stale_open` flag** (new): in-point sentence is the *final* sentence of a speaker turn (the exact Preity-Zinta shape) |
+| Two-turn setups / long questions missed | Window mandatorily contains two prior turns; `setupSentenceId` selects them | `captureLeadIn` v2: question-aware (`·q`), walks up to **two** prior other-speaker turns, existing `LEAD_IN_MAX_*` caps stand |
+| Closes past the payoff into the next beat | `payoffSentenceId` with the schema-checked invariant **`in ≤ payoff ≤ out`** — the model must *locate* the payoff, not merely stop somewhere; violation → deterministic reject to coarse bounds + flag | **Lead-out trim, finally built** (it has been designed-but-unbuilt since S6): final turn belongs to a different speaker and is question-shaped → trim to previous turn close. Both lanes. |
+| Closes before the payoff lands | Same `payoffSentenceId` localization + the craft brief's "first natural breath after" | **Pause-aware out-point**: resolved out-ms extends past the final sentence end by `min(pauseAfterMs, DEFAULT_PAUSE_GAP_MS)` — every payoff gets its air, identically |
+| 192s two-story "moments" | `couldNotFind`/`no_single_payoff` escape hatch — a legal "this is not one moment" | Relative duration outliers vs the lane's own median (the segments pattern, reused — no absolute thresholds) |
+| Segment ends never deliberately chosen | Per-cut refinement seeing both sides + drop text | Refined cuts re-enter `checkPartition`; coverage still holds by construction |
+
+Backstops are **flags, never auto-rejects** (only integrity failures — grounding, partition violations, invalid IDs — disqualify from surfacing). Every backstop records when it fires (`lead_in_captured`, `lead_out_trimmed`, `stale_open`, `shot_snapped` rates in `moments:metrics --detail`): each is an instrument measuring how often the model needed catching — the prompt-iteration signal, and the promotion path from flag to rule.
+
+**The grid is not ground truth** (the failure mode every design draft missed until adversarial review): the sentence grid is ASR-derived — Deepgram's punctuation decides where a "sentence" ends, and selection-only makes a mis-segmented grid an *unreachable-cut* problem while the nudge metrics, which walk the same grid, are blind to it by construction ("median nudge → 0" can mean the human settled for the nearest legal point). Three cheap mitigations ship with the rounds: (a) **grid-quality instrumentation** — rate of human nudges landing adjacent to suspiciously long "sentences", plus a punctuation-boundary audit against one hand-labeled hour; (b) the review scrubber records the *desired* position even when the applied nudge snaps to the grid; (c) a **bounded sub-sentence escape hatch** (optional word-offset within the chosen sentence, validated by pure code) held in reserve — built only if (a)/(b) show the grid is the ceiling, because legitimate mid-sentence cold opens ("…and that's when I knew") are a shorts staple the craft evidence explicitly names.
+
+## 6. Lane identity: shorts vs topics, without quotas
+
+Identity stops being prompt adjectives and becomes **grid granularity, brief, and rubric**:
+
+- **Moments are cut on the sentence grid with a shorts brief.** A moment is defined ostensively — *one beat: a single setup→payoff unit a stranger would stop scrolling for; the hook is the first seconds; it dies the moment a second story starts; the length of a held breath, not a topic summary.* Defenses: the `no_single_payoff` escape; relative-duration outlier flags; a `hook_far_from_open` **flag** when the hook's grounded position sits deep in the clip (a flag, not a disqualifier — grounding disqualifies on provenance only, never on judgment).
+- **Chapters are proposed on the paragraph grid with a table-of-contents contract.** The rough segments pass must emit, *before any cut*, the episode's `tableOfContents` — chapter titles as a YouTube chapter list would name them, each answering "what is this section about" at topic altitude — and then place each cut naming which two chapters it separates (reasoning-before-commitment at plan level: a model that just wrote "Chapter 4: The 2005 Ashes" is structurally less likely to slice it into six beat-clips). Cuts are paragraph IDs (a chapter is a *union of paragraphs* — the coarse grid makes beat-slicing awkward the way a coarse timeline makes jump cuts awkward); the Cutter then places the exact sentence at each transition. From Round 3 the Director's spine anchors granularity further.
+- **Deterministic over-segmentation defense**: `same_topic_neighbors` (new; reuses `semanticTwinPairs`' chunk-vector machinery) — adjacent keeps whose chunk-centroid cosine exceeds the twin threshold flag both as "one chapter cut in two," merged by the human with one click. Under-segmentation stays covered by `long_outlier`. Nothing auto-merges.
+- **Lane-specific reviewer rubrics** (§8): moments are scored on hook velocity and standalone-ness; chapters on topic completeness ("setup, development, resolution of ONE topic") — a chapter that feels like a short scores badly on its own lane's axis, which is exactly Rajesh's product line ("segments should not feel like candidates for YouTube shorts") made mechanical.
+- Review UI addition: each moment card shows the chapter title its span falls inside — mislabeled lane membership becomes visually obvious.
+
+## 7. Vision: the honest verdict
+
+Vision was evaluated seriously, per direction — and the evidence splits it cleanly into what it can and cannot do:
+
+**Rejected: any VLM proposing or validating boundaries on hour-scale video.** The numbers are unambiguous: on ~76-minute content the best closed model scores **0.115 mIoU** at temporal grounding (a plain CLIP frame-retrieval baseline scores 0.269, and a retrieve-then-ground hybrid 0.354 — still far below what our transcript grid already delivers); 85% of its failures are *search* failures our word timeline already solves; Gemini timestamp-jumping bugs persist across three model generations; ByteDance built a specialized model (Vidi2.5) precisely because it "substantially outperforms Gemini 3 Pro and GPT-5" at this; and talking-head interviews are vision's *weakest* case — the localization signal (question/answer structure, story beats, pauses) lives in the transcript. Even OpusClip positions its multimodal ClipAnything for low-dialogue footage. Spending Gemini-3-Pro-class money (~$4+/hr input) here buys a coin flip.
+
+**Adopted — three tiers where vision earns its keep:**
+
+1. **Shot-change grid (deterministic, ingest-time, ~$0).** New `lib/media/shots.ts` step after HLS verification: `ffmpeg -i <360p proxy> -vf "select='gt(scene,0.3)',metadata=print"` on the pinned 8.1.2 (invocation empirically verified), parsed to `shots.json` — a `source_artifact` row with `size_bytes` per the ledger rule. ~1–4 min CPU per source-hour; ~240–720 events/hr on multicam podcasts; a locked single-camera shot correctly yields near-zero events (no visual constraint — behavior unchanged). Two consumers: `·cut` markers in the fine rendering (the Cutter gets a real editor's "the camera cut here — something changed" instinct at zero model cost), and a **shot-snap micro-adjust** in the gauntlet: a boundary landing 80–500ms from a shot change moves *onto* it — never near it (a camera switch right after a cut reads as a flash-cut) — **iff** the move stays within the sentence's silence margin: never across a sentence boundary, never over speech. Threshold 0.3 calibrates against Brett Lee's known camera switches.
+2. **Per-clip visual QC (`clip-qc.frames`, haiku vision, env-gated `CLIP_VISUAL_QC`; Round 4).** For surviving candidates: 3–5 frames (first, hook-sentence, last) extracted via the I-frame-only playlists — built in S2 for exactly this class of keyframe-exact sampling. One small call per clip: mid-gesture/mid-blink open? black/transition frame? speaker off camera? reaction beat at the close? Emits **flags only** (`awkward_open_frame`, `off_camera_hook`, `reaction_shot_close`…), badges beside the Reviewer's; never moves a boundary. ~$0.006–0.008/clip.
+3. **Full-episode visual enrichment (Gemini Flash low-res, ~$0.11–0.33/hr) — deferred, recorded so it isn't re-litigated.** The only defensible slot is visual-*events* input (demos, props, b-roll) to the Director's brief for low-dialogue footage — which our current corpus has none of. Build when an agency client brings screen-share or demo content. Never boundary authority.
+
+## 8. Verification, revision, and the reviewer ceiling
+
+- **The grounding aligner stays the provenance gate, unchanged** — verbatim `anchorText`, fuzzy-aligned inside the final span. It is the fabrication detector (GLM-5.2's 24 invented anchors) and the only integrity check that works on OpenRouter audition models; it now additionally polices the Cutter (a cut excluding the anchor un-grounds the clip).
+- **Reviewer: same cold contract, upgraded inputs.** Still only the clip's own span text + title/hook; still 4× 0–2 rubric + ONE fix; still advisory; still never fails a run. Upgrades: the first and last ~15 words rendered as "**OPENS ON: … / CLOSES ON: …**" (pointing the cold read at the measured failure surface); lane-specific rubric (§6); fix vocabulary gains `trim_start`/`extend_end` (both directions occurred in M1; still exactly one fix). Gauntlet/QC flags are **hidden from the Reviewer** — agreement between independent detectors is signal; a Reviewer that sees the flags is an echo.
+- **Calibration before trust**: retro-calibrate the Reviewer against the existing 21 Brett Lee human decisions before any fresh-source reliance. Agreement target stays the 75–80% band per round (`moments:metrics` gains an `agreement` block). **Above ~80% → investigate, don't celebrate** (past the human-human ceiling means echoing surface features). The cheap decorrelation experiment: a different-lab second lens via the existing audition path (`MOMENT_REVIEW_TIER=openai/gpt-5.6-terra` — Terra's drop-taxonomy strength in the nine-model audition makes it the natural first candidate).
+- **Disqualify vs flag, the complete line**: code disqualifies what is *provably broken* (failed grounding, partition violations, invalid IDs); humans dispose of what is *arguably bad* (every editorial flag, every verdict). Nothing else hides rows.
+
+## 9. Measurement: proving the fix
+
+- **Unit tests (pure)**: grid renderers (stable IDs, marker placement), ID↔ms bijection, window construction (turn-aligned, clamped), question detector, `stale_open`, lead-out trim, two-turn lead-in, pause-aware out-points, shot-snap guards (on/near/far, never-across-sentence), `same_topic_neighbors`, shots.json parser, revision routing table. The gauntlet stays the most-tested code in the repo.
+- **The boundary-replay eval** — the supervised dataset put to work: the Brett Lee 21-decision record (3 zero-nudge accepts, 9 wrong_boundaries with human evidence) freezes as a local fixture; every architecture round re-runs against it and is scored on whether the 9 now land right *or carry the predicting flag*. Every future M1 round appends. This is the single most direct proof-of-fix available, and it grows free from work the strategist already does.
+- **Golden evals**: `scoreBoundaries` (|Δ| in *sentences*, computable exactly now that gold answers are ID pairs); Cutter eval (given the gold rough range, land within one sentence of the human's final bounds); selection-validity; `scoreSegments` keeps partition+grounding, never durations. Mock modes emit sentence IDs from real fixture paragraphs so CI proves the full resolve path with zero tokens.
+- **`pnpm moments:metrics --detail` grows**: nudge magnitude in sentences (start/end separately), reject-reason distribution (exists), backstop fire-rates, flag precision per flag type (of `stale_open`-flagged, how many did the human trim — the flag→rule promotion pipeline), reviewer agreement, revision win-rate, and the grid-quality instruments (§5).
+- **Note on an old metric**: raw→snap delta — which M1 showed ~0 and therefore uninformative — retires; ID selection makes it structurally zero.
+
+## 10. Rollout: one lever per human round
+
+The M1 loop is the method; never ship two confounded levers into one review round.
+
+- **Round 1 — the Cutter alone** (the single-lever round; everything else unchanged). Insert the fine-cut pass between today's *untouched* opus discovery pass and the gauntlet, plus: ID→ms resolver for its output, lead-out trim, question-aware two-turn lead-in, `stale_open`, pause-air, `payoffSentenceId` invariant, escape hatch, post-cut re-ground + re-dedupe. Moments lane only. Gate: boundary-replay eval on Brett Lee (the 9 wrong_boundaries) + a **fresh-source** M1 round — wrong_boundaries rejects collapse, acceptance moves decisively toward 70%, nudge medians shrink.
+- **Round 2 — the coordinate swap + segments' first real round.** Sentence/paragraph-ID selection in both rough passes (B-layout rendering, coarse mandate), segment per-cut refinement (both sides + drop text), TOC-first segment contract, `same_topic_neighbors`, shot grid (ingest artifact + snap rule + `·cut` markers — deterministic, no narrative confound). Gate: chapter count/median duration reach topic scale on both reference sources *without any quota existing anywhere*; moments metrics hold or improve; first human segment review happens at all.
+- **Round 3 — the screening room.** Director brief (persisted artifact, spine anchoring both lanes) + `MOMENT_REVIEWER=on` with upgraded inputs + the bounded revision round + agreement metric + retro-calibration. Gate: agreement in the 75–80 band; revision win-rate positive (else the sunset clause fires).
+- **Round 4 — the cost pass + visual QC.** Only after measurement (never cheapen the core bet before it's measured): audition haiku and Terra on the Cutter (tiny windows are exactly haiku's regime), Terra as second-lens Reviewer, effort trims, Reviewer sampling; ship `clip-qc.frames` behind its flag.
+- **Round 5 (conditional)** — topic-valley annotations (`multi_beat`, `no_topic_boundary`) *after* validating chunk-vector TextTiling on the real corpus (unvalidated today; its ~1–2min resolution suits chapters, not moments); the sub-sentence escape hatch if grid-quality instruments demand it; Gemini enrichment when low-dialogue content arrives.
+
+## 11. Cost model
+
+Honest recompute (opus $15/$75, cache-read $1.5; sonnet $3/$15; haiku $1/$5; ~15k prefix tokens/source-hour; a 1-hour source yielding ~20 moment candidates, ~8–12 chapters post-fix, ~40 reviewed clips):
+
+| Pass | Model | $/source-hour |
+|---|---|---|
+| Substrate + shot grid | pure code + ffmpeg | ~0 |
+| Director (prime + ~2.5k out) | opus | ~0.47 |
+| Editor moments / chapters (cached reads) | opus | ~0.25 / ~0.21 |
+| Cutter ×20 moments (+ sonnet thinking, realistic) | sonnet med | ~0.40–0.80 |
+| Cutter ×~10 segment cuts | sonnet low | ~0.10 |
+| Reviewer ×~40 | sonnet med | ~0.36 |
+| Revision (~⅓ flagged) | sonnet | ~0.25 |
+| Visual QC ×20 (opt-in) | haiku vision | ~0.14 |
+
+**Steady state ≈ $2.0–2.4/source-hour core** (Round 1 alone adds only ~$0.4–0.8 to today's ~$0.70 total intelligence spend). Full architecture takes total intelligence from ~$0.70 to **~$2.5–3.0/source-hour (~3.5–4×)**. The right denominators: at M1's measured 18%, a 58-minute source bought 3–4 usable clips and a strategist ground through 14 wrong-cut rejects; at the 70% bar the same spend buys ~14 usable clips — **cost per accepted clip falls (~$0.19 → ~$0.16) while strategist-minutes per accepted clip collapse**, and strategist time is the expensive input in an agency product. The real current cost center is *whole failed human rounds*. Cheapening levers are all wired (per-task audition path) and all deliberately post-measurement; the Director is the last place to economize — it is where "plan like a real editor" lives.
+
+## 12. Design provenance
+
+Produced by a three-proposal adversarial panel (editor-workflow, precision, and substrate lenses) over a shared evidence brief (the M1 record + the research pack), scored by two independent judges (feasibility/cost; boundary-quality/evidence). The synthesis takes the newsroom topology and Round-1 sequencing (judged best codebase fidelity, only confound-free first round), the precision lens's coordinate contract and spend-ordering (cheapest correct architecture), the substrate lens's semantic backstops and replay eval, and the judges' jointly-identified grid-blindness risk that no proposal caught alone. Full panel transcripts in the session workflow records (2026-08-28).
+
+## 13. Sources
+
+- TimeStampEval — arXiv 2511.11594 (span-selection layout effects, assisted-fuzzy staging)
+- Strategies for Span Labeling with LLMs — arXiv 2601.16946 (enumerated indices vs numeric generation)
+- Topic-to-Timestamp Alignment by Constrained Evidence Selection — arXiv 2606.20890
+- Chapter-Llama — arXiv 2504.00072 (hour-scale chaptering, windowed prediction)
+- Spotify chaptering pipeline — mlsavvy.substack.com/p/how-spotifys-llms-turn-raw-podcasts
+- Recall Them All — arXiv 2405.02732; Capacity, Not Format — arXiv 2606.09410 (long-list/structured-output degradation)
+- Self-Verification for Clinical IE — arXiv 2306.00024; CRITIC (external-evidence critics)
+- ExtremeWhenBench — arXiv 2606.12300 (hour-scale temporal grounding collapse); Vidi2.5 — arXiv 2511.19529; Charades-STA numbers — arXiv 2503.09146, 2510.17023
+- Gemini video docs/pricing — ai.google.dev/gemini-api/docs/video-understanding; timestamp-jumping practitioner threads (discuss.ai.google.dev)
+- ffmpeg scene detection — verified invocations + local benchmarks on the pinned 8.1.2 (this repo's research session, 2026-08-28); PySceneDetect benchmarks — scenedetect.com/benchmarks; AdSum — arXiv 2510.26569; AutoFlip — research.google/blog/autoflip
+- Competitor evidence: Forasoft category breakdown, ScaleReach 76-clip test (13% unusable on boundaries), BIGVU (20–40% discard), reap.video 2026 benchmark (~40% multi-speaker accuracy), OpusClip ClipAnything positioning, Riverside Magic Clips docs
+- HIVE — arXiv 2507.02790 (shot+transcript+narrative clip framework)
