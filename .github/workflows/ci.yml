@@ -351,9 +351,18 @@ jobs:
       # one — so start it directly on the runner's Docker.
       - name: Start MinIO
         run: |
-          docker run -d --name minio -p 55490:9000 \
-            -e MINIO_ROOT_USER=ci-storage-user -e MINIO_ROOT_PASSWORD=ci-storage-secret \
-            minio/minio server /data
+          # 55490 was once already bound on a hosted runner (PR #101: one
+          # shard failed at docker run with "address already in use", green
+          # on rerun) — clear any stale container and retry the bind.
+          docker rm -f minio 2>/dev/null || true
+          for attempt in 1 2 3; do
+            docker run -d --name minio -p 55490:9000 \
+              -e MINIO_ROOT_USER=ci-storage-user -e MINIO_ROOT_PASSWORD=ci-storage-secret \
+              minio/minio server /data && break
+            echo "minio start attempt $attempt failed; retrying"
+            docker rm -f minio 2>/dev/null || true
+            sleep 5
+          done
           for i in $(seq 1 30); do
             curl -sf http://localhost:55490/minio/health/live && break
             sleep 1
