@@ -17,7 +17,10 @@ import type {
   SegmentView,
 } from "@/components/sources/segments-panel";
 import type { SourceMapAnalysis } from "@/components/sources/source-map";
-import { SourceWorkspace } from "@/components/sources/source-workspace";
+import {
+  SourceDetailsCard,
+  SourceWorkspace,
+} from "@/components/sources/source-workspace";
 import { Badge } from "@/components/ui/badge";
 import {
   Card,
@@ -771,6 +774,7 @@ export default async function SourceDetailPage(
       {data.status === "ready" && hlsKey ? (
         <SourceWorkspace
           analysis={workspaceAnalysis(data)}
+          facts={facts}
           highlights={workspaceHighlights(data)}
           hlsUrl={`/api/media/${hlsKey}`}
           index={data.index}
@@ -794,23 +798,9 @@ export default async function SourceDetailPage(
         <TranscriptStatusCard transcript={data.transcript} />
       ) : null}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Details</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <dl className="grid gap-3 sm:grid-cols-2">
-            {facts.map((fact) => (
-              <div key={fact.label}>
-                <dt className="text-muted-foreground text-xs uppercase tracking-wide">
-                  {fact.label}
-                </dt>
-                <dd className="text-sm">{fact.value}</dd>
-              </div>
-            ))}
-          </dl>
-        </CardContent>
-      </Card>
+      {data.status === "ready" && hlsKey ? null : (
+        <SourceDetailsCard facts={facts} />
+      )}
     </div>
   );
 }

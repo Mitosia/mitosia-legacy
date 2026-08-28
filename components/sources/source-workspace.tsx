@@ -51,8 +51,14 @@ import { type RangePlayback, useRangePlayback } from "./use-range-playback";
 // regardless of the active tab. Panels render into existence as their jobs
 // settle; until the user picks a tab, the first available one is active.
 
+export interface SourceFact {
+  label: string;
+  value: string;
+}
+
 interface SourceWorkspaceProps {
   analysis: SourceMapAnalysis | null;
+  facts: SourceFact[];
   highlights: {
     extractions: HighlightExtraction[];
     run: HighlightsRun;
@@ -101,6 +107,37 @@ const TAB_LABELS: Record<WorkspaceTab, string> = {
 interface WorkspaceSection {
   content: React.ReactNode;
   tab: WorkspaceTab;
+}
+
+// Source facts (duration, size, codecs, original filename). Rendered in the
+// workspace's left column on wide screens, after the tabs on small ones, and
+// standalone by the page while the source is still processing.
+export function SourceDetailsCard({
+  className,
+  facts,
+}: {
+  className?: string;
+  facts: SourceFact[];
+}) {
+  return (
+    <Card className={className} data-testid="source-details">
+      <CardHeader>
+        <CardTitle>Details</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <dl className="grid gap-3 sm:grid-cols-2">
+          {facts.map((fact) => (
+            <div key={fact.label}>
+              <dt className="text-muted-foreground text-xs uppercase tracking-wide">
+                {fact.label}
+              </dt>
+              <dd className="text-sm">{fact.value}</dd>
+            </div>
+          ))}
+        </dl>
+      </CardContent>
+    </Card>
+  );
 }
 
 // Sections in review-priority order; each exists only once its job (or the
@@ -219,9 +256,13 @@ function WorkspaceSidebar({
   sections: WorkspaceSection[];
 }) {
   return (
-    <Tabs onValueChange={onTabChange} value={activeTab}>
+    <Tabs
+      className="lg:sticky lg:top-4 lg:h-[calc(100vh-2rem)]"
+      onValueChange={onTabChange}
+      value={activeTab}
+    >
       <TabsList
-        className="h-auto w-full flex-wrap justify-start"
+        className="h-auto w-full shrink-0 flex-wrap justify-start"
         data-testid="workspace-tabs"
       >
         {sections.map((section) => (
@@ -235,7 +276,12 @@ function WorkspaceSidebar({
         ))}
       </TabsList>
       {sections.map((section) => (
-        <TabsContent keepMounted key={section.tab} value={section.tab}>
+        <TabsContent
+          className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:[&>*]:min-h-full"
+          keepMounted
+          key={section.tab}
+          value={section.tab}
+        >
           {section.content}
         </TabsContent>
       ))}
@@ -244,7 +290,8 @@ function WorkspaceSidebar({
 }
 
 export function SourceWorkspace(props: SourceWorkspaceProps) {
-  const { analysis, hlsUrl, peaksUrl, posterUrl, sourceId, transcript } = props;
+  const { analysis, facts, hlsUrl, peaksUrl, posterUrl, sourceId, transcript } =
+    props;
   const [video, setVideo] = useState<HTMLVideoElement | null>(null);
   const playback = useRangePlayback(video);
   // The user's explicit choice; until they make one, the first available
@@ -263,7 +310,7 @@ export function SourceWorkspace(props: SourceWorkspaceProps) {
 
   return (
     <div className="flex flex-col gap-6 lg:grid lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-start">
-      <div className="flex flex-col gap-4 lg:sticky lg:top-4">
+      <div className="flex flex-col gap-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
         <SourcePlayer
           hlsUrl={hlsUrl}
           onVideoElement={setVideo}
@@ -277,6 +324,7 @@ export function SourceWorkspace(props: SourceWorkspaceProps) {
             suggestions={analysis.speakerSuggestions}
           />
         ) : null}
+        <SourceDetailsCard className="hidden lg:block" facts={facts} />
       </div>
       {activeTab ? (
         <WorkspaceSidebar
@@ -295,6 +343,7 @@ export function SourceWorkspace(props: SourceWorkspaceProps) {
           </CardHeader>
         </Card>
       )}
+      <SourceDetailsCard className="lg:hidden" facts={facts} />
     </div>
   );
 }
