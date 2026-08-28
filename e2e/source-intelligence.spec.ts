@@ -26,7 +26,7 @@ const INDEX_FAILURE = /Voyage embeddings failed \(429\)/;
 const ONE_ACCEPTED = /1 accepted/;
 const ONE_ACCEPTED_ONE_REJECTED = /1 accepted · 1 rejected/;
 const RERUN_REFUSAL = /review decisions/;
-const SEGMENT_RERUN_REFUSAL = /review decisions/;
+const SEGMENT_RERUN_REFUSAL = /human review or edits/;
 const REVIEW_TRIM_END = /Reviewer: trim end/;
 
 test.beforeAll(() => {
@@ -156,6 +156,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     dedupe_group: number | null;
     end_ms: string;
     flags: unknown;
+    id: string;
     grounded: boolean;
     rank: string;
     sensitive: boolean;
@@ -486,6 +487,17 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   expect(segRows.find((segRow) => segRow.kind === "drop")?.drop_reason).toBe(
     "low_energy"
   );
+  const [planFacts] = await queryRows<{ counts: unknown }>(
+    "SELECT counts FROM segment_plan_run WHERE source_id = $1",
+    [sourceId]
+  );
+  expect(planFacts.counts).toMatchObject({
+    architectureVersion: 2,
+    reconcileCalls: 0,
+    reconcileStatus: "skipped",
+    segments: 3,
+    toc: ["Mock chapter one", "Mock chapter two"],
+  });
   await expect(page.getByTestId("segment-review-flag")).toHaveCount(1);
 
   // Range playback with a mid-media out-point: the first chapter's end is
@@ -525,20 +537,23 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     { timeout: 10_000 }
   );
 
-  // Nudge the second chapter's in-point back a sentence; the adjusted
-  // bounds persist.
-  await secondKeep.getByTestId("segment-nudge-in-prev").click();
-  await expect(secondKeep.getByTestId("segment-nudge-delta")).toBeVisible();
+  // Nudge the first chapter's out-point into the adjacent dropped span. The
+  // shared cut persists on both physical rows, including across keep/drop.
+  await firstKeep.getByTestId("segment-nudge-out-next").click();
+  await expect(firstKeep.getByTestId("segment-nudge-delta")).toBeVisible();
   await expect
     .poll(
       async () => {
         const [adjusted] = await queryRows<{
-          adjusted_start_ms: string | null;
+          effective_end_ms: string;
+          effective_start_ms: string;
         }>(
-          "SELECT adjusted_start_ms FROM segment_clip WHERE source_id = $1 AND idx = 2",
+          "SELECT COALESCE(r.adjusted_start_ms, r.start_ms) AS effective_start_ms, COALESCE(l.adjusted_end_ms, l.end_ms) AS effective_end_ms FROM segment_clip l JOIN segment_clip r ON r.run_id = l.run_id AND r.idx = l.idx + 1 WHERE l.source_id = $1 AND l.idx = 0",
           [sourceId]
         );
-        return adjusted?.adjusted_start_ms;
+        return adjusted?.effective_start_ms === adjusted?.effective_end_ms
+          ? adjusted.effective_start_ms
+          : null;
       },
       { timeout: 15_000 }
     )
@@ -577,19 +592,96 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   // The model's drop is a proposal, not a veto: restore it.
   await page.getByTestId("segment-restore").click();
   await expect(segItems).toHaveCount(3, { timeout: 15_000 });
-  const [restoredSeg] = await queryRows<{ kind: string; status: string }>(
-    "SELECT kind, status FROM segment_clip WHERE source_id = $1 AND idx = 1",
+  const [restoredSeg] = await queryRows<{
+    anchor_text: string | null;
+    flags: unknown;
+    grounded: boolean;
+    kind: string;
+    status: string;
+  }>(
+    "SELECT kind, status, grounded, anchor_text, flags FROM segment_clip WHERE source_id = $1 AND idx = 1",
     [sourceId]
   );
   expect(restoredSeg.kind).toBe("keep");
   expect(restoredSeg.status).toBe("proposed");
+  expect(restoredSeg.grounded).toBe(false);
+  expect(restoredSeg.anchor_text).toBeNull();
+  expect(restoredSeg.flags).toEqual(
+    expect.arrayContaining(["human_restored", "needs_metadata_review"])
+  );
 
-  // Re-planning must refuse while decisions exist.
+  // A human merge removes the shared cut atomically: the destination spans
+  // the union, the absorbed row disappears, indexes stay contiguous, stale
+  // decisions are reset, and the remaining rows stay ordered without an
+  // overlap (the transcript grid may retain a sub-frame silence gap).
+  await segItems.nth(1).getByTestId("segment-merge-previous").click();
+  await page.getByTestId("segment-merge-confirm").click();
+  await expect(segItems).toHaveCount(2, { timeout: 15_000 });
+  const mergedRows = await queryRows<{
+    effective_end_ms: string;
+    effective_start_ms: string;
+    flags: unknown;
+    id: string;
+    idx: string;
+    status: string;
+  }>(
+    "SELECT id, idx, status, flags, COALESCE(adjusted_start_ms, start_ms) AS effective_start_ms, COALESCE(adjusted_end_ms, end_ms) AS effective_end_ms FROM segment_clip WHERE source_id = $1 ORDER BY idx",
+    [sourceId]
+  );
+  expect(mergedRows.map((mergedRow) => Number(mergedRow.idx))).toEqual([0, 1]);
+  expect(mergedRows[0]?.status).toBe("proposed");
+  expect(mergedRows[0]?.flags).toEqual(
+    expect.arrayContaining(["human_merged", "needs_metadata_review"])
+  );
+  expect(Number(mergedRows[0]?.effective_end_ms)).toBeLessThanOrEqual(
+    Number(mergedRows[1]?.effective_start_ms)
+  );
+  const [mergeAudit] = await queryRows<{ action: string }>(
+    "SELECT action FROM audit_log WHERE entity_type = 'segment_clip' AND action = 'segment.merged' AND entity_id = $1 ORDER BY created_at DESC LIMIT 1",
+    [mergedRows[0]?.id]
+  );
+  expect(mergeAudit?.action).toBe("segment.merged");
+
+  // Merging deliberately invalidates the old packaging. The editor can fix
+  // it in place; saving clears the metadata-review flag and is audited.
+  const metadataEditor = segItems.nth(0).getByTestId("segment-metadata-editor");
+  await expect(metadataEditor).toHaveAttribute("open", "");
+  await metadataEditor.locator('input[name="title"]').fill("Combined chapter");
+  await metadataEditor
+    .locator('input[name="hook"]')
+    .fill("The combined topic now has one honest hook.");
+  await metadataEditor
+    .locator('textarea[name="summary"]')
+    .fill("The question and answer now play as one complete chapter.");
+  await metadataEditor
+    .getByRole("button", { name: "Save chapter details" })
+    .click();
+  await expect
+    .poll(
+      async () => {
+        const [updated] = await queryRows<{ flags: unknown; title: string }>(
+          "SELECT title, flags FROM segment_clip WHERE source_id = $1 AND idx = 0",
+          [sourceId]
+        );
+        return updated;
+      },
+      { timeout: 15_000 }
+    )
+    .toMatchObject({
+      flags: expect.not.arrayContaining(["needs_metadata_review"]),
+      title: "Combined chapter",
+    });
+
+  // Re-planning must refuse after any human mutation, including a merge or
+  // nudge whose affected chapter was reset to proposed.
   await page.getByTestId("rerun-segments").click();
   await expect(page.getByTestId("rerun-segments-error")).toHaveText(
     SEGMENT_RERUN_REFUSAL,
     { timeout: 15_000 }
   );
+  await expect(
+    page.getByRole("button", { name: "Re-plan and discard edits" })
+  ).toBeVisible();
 
   // Park the player deep again — the Ask section below asserts its
   // citation click performs a real, observable seek.

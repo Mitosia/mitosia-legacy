@@ -99,6 +99,13 @@
       "when": 1787923703602,
       "tag": "0013_cutting-room",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1787932853231,
+      "tag": "0014_solid_doctor_faustus",
+      "breakpoints": true
     }
   ]
 }

@@ -471,7 +471,12 @@ export const segmentPlanRun = pgTable(
     ),
     // {segments, kept, dropped, grounded, flagged, reviewed} — run facts
     counts: jsonb("counts"),
+    // Any human mutation of the generated partition increments this. The
+    // rerun guard must protect nudges/restores/merges too, not only explicit
+    // accept/reject decisions. Reset only when a replacement plan commits.
+    editVersion: integer("edit_version").default(0).notNull(),
     error: text("error"),
+    humanEditedAt: timestamp("human_edited_at"),
     id: uuid("id").primaryKey().default(sql`uuidv7()`),
     models: jsonb("models"),
     organizationId: text("organization_id")

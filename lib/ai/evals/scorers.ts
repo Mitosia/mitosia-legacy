@@ -381,6 +381,117 @@ export function scoreSegments(
   return { issues, score };
 }
 
+// Semantic chapter-boundary gold is intentionally independent of duration.
+// A fixture labels selected boundaries in its numbered rough atom plan as
+// KEEP (two independently selectable topics) or REMOVE (one continuous
+// topic). The Reconciler's exact-cover groups imply the prediction: adjacent
+// atoms in the same group remove their shared boundary; different groups keep
+// it. Fixtures may label only high-confidence boundaries, so the scorer is
+// bounded to the supplied gold rather than inventing judgments elsewhere.
+export interface SegmentBoundaryDecision {
+  afterAtomId: string;
+  keep: boolean;
+  note?: string;
+}
+
+interface SegmentBoundaryAtom {
+  atomId: string;
+}
+
+interface SegmentBoundaryGroup {
+  atomIds: readonly string[];
+}
+
+export function segmentBoundaryDecisions(
+  atoms: readonly SegmentBoundaryAtom[],
+  groups: readonly SegmentBoundaryGroup[]
+): SegmentBoundaryDecision[] {
+  const groupByAtom = new Map<string, number>();
+  for (const [groupIndex, group] of groups.entries()) {
+    for (const atomId of group.atomIds) {
+      if (groupByAtom.has(atomId)) {
+        throw new Error(`atom ${atomId} appears in more than one group`);
+      }
+      groupByAtom.set(atomId, groupIndex);
+    }
+  }
+  for (const atom of atoms) {
+    if (!groupByAtom.has(atom.atomId)) {
+      throw new Error(`atom ${atom.atomId} is missing from reconciliation`);
+    }
+  }
+
+  return atoms.slice(0, -1).map((atom, index) => {
+    const right = atoms[index + 1];
+    if (!right) {
+      throw new Error("segment boundary has no right atom");
+    }
+    return {
+      afterAtomId: atom.atomId,
+      keep: groupByAtom.get(atom.atomId) !== groupByAtom.get(right.atomId),
+    };
+  });
+}
+
+export function scoreSegmentBoundaries(
+  predicted: readonly SegmentBoundaryDecision[],
+  gold: readonly SegmentBoundaryDecision[]
+): ScoreReport {
+  if (gold.length === 0) {
+    return { issues: ["no segment-boundary gold"], score: 0 };
+  }
+
+  const issues: string[] = [];
+  const predictedById = new Map<string, boolean>();
+  for (const decision of predicted) {
+    if (predictedById.has(decision.afterAtomId)) {
+      issues.push(`duplicate prediction after ${decision.afterAtomId}`);
+      continue;
+    }
+    predictedById.set(decision.afterAtomId, decision.keep);
+  }
+
+  const seenGold = new Set<string>();
+  const totals = new Map<boolean, number>();
+  const correct = new Map<boolean, number>();
+  for (const expected of gold) {
+    if (seenGold.has(expected.afterAtomId)) {
+      issues.push(`duplicate gold boundary after ${expected.afterAtomId}`);
+      continue;
+    }
+    seenGold.add(expected.afterAtomId);
+    totals.set(expected.keep, (totals.get(expected.keep) ?? 0) + 1);
+    const actual = predictedById.get(expected.afterAtomId);
+    if (actual === expected.keep) {
+      correct.set(expected.keep, (correct.get(expected.keep) ?? 0) + 1);
+      continue;
+    }
+    const note = expected.note ? ` (${expected.note})` : "";
+    if (actual === undefined) {
+      issues.push(`no prediction after ${expected.afterAtomId}${note}`);
+    } else if (actual) {
+      issues.push(
+        `kept boundary after ${expected.afterAtomId} that gold removes${note}`
+      );
+    } else {
+      issues.push(
+        `removed boundary after ${expected.afterAtomId} that gold keeps${note}`
+      );
+    }
+  }
+
+  // Macro-average the represented classes. A plan that keeps every rough
+  // boundary cannot hide its fragmentation behind a more numerous KEEP
+  // class, and a plan that merges everything is penalized symmetrically.
+  const classScores = [...totals.entries()].map(
+    ([keep, total]) => (correct.get(keep) ?? 0) / total
+  );
+  const score =
+    classScores.reduce((sum, classScore) => sum + classScore, 0) /
+    classScores.length;
+  return { issues, score };
+}
+
 // Q&A golden score (S5): per fixture question, full credit when the
 // answerability verdict matches AND (for answerable ones) some verified
 // citation overlaps the gold range; the verdict alone earns half. Both

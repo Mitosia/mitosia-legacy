@@ -99,6 +99,14 @@ export const TASK_ROUTES = {
     maxOutputTokens: 32_000,
     tier: "opus",
   },
+  // Global chapter Reconciler: one full-episode pass over the rough plan,
+  // removing false boundaries before the fine Cutter spends calls placing
+  // the survivors. Opus shares the rough pass's cached transcript prefix;
+  // the large cap covers an exact ordered grouping plus adaptive thinking.
+  "segment-plan.reconcile": {
+    maxOutputTokens: 32_000,
+    tier: "opus",
+  },
   // Chapters/topics over a full transcript: broad, structured, cheap.
   // No effort: haiku rejects the parameter (see EFFORT_TIERS).
   "source-analysis.chapters": {
@@ -177,6 +185,7 @@ const TIER_OVERRIDE_ENV: Partial<Record<AiTask, string>> = {
   "moment-discovery.candidates": "MOMENT_DISCOVERY_TIER",
   "moment-review.verdict": "MOMENT_REVIEW_TIER",
   "segment-plan.partition": "SEGMENT_PLAN_TIER",
+  "segment-plan.reconcile": "SEGMENT_PLAN_TIER",
 };
 
 function isModelTier(value: string): value is ModelTier {
