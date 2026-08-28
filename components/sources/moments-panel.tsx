@@ -85,7 +85,10 @@ export interface MomentCandidateView {
 }
 
 export interface MomentsRun {
+  attempts: number;
+  editVersion: number;
   error: string | null;
+  id: string | null;
   // Current transcript revision is newer than the one discovered from
   stale: boolean;
   status: string;
@@ -158,23 +161,56 @@ function formatDeltaSeconds(deltaMs: number): string {
 
 export function RerunDiscoveryButton({
   label = "Run discovery again",
+  observedAttempts,
+  observedEditVersion,
+  observedRunId,
   sourceId,
   testId = "rerun-discovery",
 }: {
   label?: string;
+  observedAttempts: number;
+  observedEditVersion: number;
+  observedRunId: string | null;
   sourceId: string;
   testId?: string;
 }) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState(rerunDiscoveryAction, {});
+  const hasProtectedState =
+    state.protectedAttempts !== undefined &&
+    state.protectedRunId !== undefined &&
+    state.protectedEditVersion !== undefined;
+  const protectedParts = [
+    state.protectedDecisionCount
+      ? `${state.protectedDecisionCount} review ${state.protectedDecisionCount === 1 ? "decision" : "decisions"}`
+      : null,
+    state.protectedBoundaryEditCount
+      ? `${state.protectedBoundaryEditCount} ${state.protectedBoundaryEditCount === 1 ? "clip with boundary edits" : "clips with boundary edits"}`
+      : null,
+  ].filter(Boolean);
   useEffect(() => {
-    if (state.success) {
+    if (state.success || state.refreshRequired) {
       router.refresh();
     }
-  }, [state.success, router]);
+  }, [state.refreshRequired, state.success, router]);
   return (
     <form action={formAction} className="flex flex-wrap items-center gap-2">
       <input name="sourceId" type="hidden" value={sourceId} />
+      {observedRunId ? (
+        <>
+          <input
+            name="observedAttempts"
+            type="hidden"
+            value={observedAttempts}
+          />
+          <input name="observedRunId" type="hidden" value={observedRunId} />
+          <input
+            name="observedEditVersion"
+            type="hidden"
+            value={observedEditVersion}
+          />
+        </>
+      ) : null}
       <Button
         data-testid={testId}
         disabled={pending}
@@ -185,12 +221,48 @@ export function RerunDiscoveryButton({
         {pending ? "Starting…" : label}
       </Button>
       {state.error ? (
-        <p
-          className="text-destructive text-sm"
+        <div
+          aria-live="polite"
+          className="flex basis-full flex-col items-start gap-2 rounded-md border border-destructive/25 bg-destructive/5 p-3"
           data-testid="rerun-discovery-error"
         >
-          {state.error}
-        </p>
+          <p className="text-destructive text-sm">{state.error}</p>
+          {hasProtectedState ? (
+            <>
+              <p className="text-muted-foreground text-xs">
+                {protectedParts.length > 0
+                  ? `This replaces every current moment, including ${protectedParts.join(" and ")}. The audit history remains available.`
+                  : "This replaces every current moment and its human edits. The audit history remains available."}
+              </p>
+              <input
+                name="expectedAttempts"
+                type="hidden"
+                value={state.protectedAttempts}
+              />
+              <input
+                name="expectedRunId"
+                type="hidden"
+                value={state.protectedRunId}
+              />
+              <input
+                name="expectedEditVersion"
+                type="hidden"
+                value={state.protectedEditVersion}
+              />
+              <Button
+                data-testid="rerun-discovery-confirm"
+                disabled={pending}
+                name="force"
+                size="sm"
+                type="submit"
+                value="true"
+                variant="destructive"
+              >
+                {pending ? "Starting…" : "Run again and discard reviews"}
+              </Button>
+            </>
+          ) : null}
+        </div>
       ) : null}
     </form>
   );
@@ -625,6 +697,9 @@ export function MomentsPanel({
       <MomentsStateCard description="Find the standalone clip-worthy moments in this recording — scored, deduped, and grounded to their exact spans.">
         <RerunDiscoveryButton
           label="Find moments"
+          observedAttempts={run.attempts}
+          observedEditVersion={run.editVersion}
+          observedRunId={run.id}
           sourceId={sourceId}
           testId="find-moments"
         />
@@ -644,13 +719,22 @@ export function MomentsPanel({
             {run.error}
           </p>
         ) : null}
-        <RerunDiscoveryButton sourceId={sourceId} />
+        <RerunDiscoveryButton
+          observedAttempts={run.attempts}
+          observedEditVersion={run.editVersion}
+          observedRunId={run.id}
+          sourceId={sourceId}
+        />
       </MomentsStateCard>
     );
   }
   return (
     <MomentsReady
       candidates={candidates}
+      error={run.error}
+      observedAttempts={run.attempts}
+      observedEditVersion={run.editVersion}
+      observedRunId={run.id}
       playback={playback}
       sourceId={sourceId}
       stale={run.stale}
@@ -661,12 +745,20 @@ export function MomentsPanel({
 
 function MomentsReady({
   candidates,
+  error,
+  observedAttempts,
+  observedEditVersion,
+  observedRunId,
   playback,
   sourceId,
   stale,
   transcriptUrl,
 }: {
   candidates: MomentCandidateView[];
+  error: string | null;
+  observedAttempts: number;
+  observedEditVersion: number;
+  observedRunId: string | null;
   playback: RangePlayback;
   sourceId: string;
   stale: boolean;
@@ -762,10 +854,29 @@ function MomentsReady({
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
+        {error ? (
+          <div
+            className="rounded-md border border-destructive/25 bg-destructive/5 p-3"
+            data-testid="moment-rerun-preserved"
+          >
+            <p className="font-medium text-sm">
+              The latest discovery attempt failed. Your previous moments and
+              reviews are unchanged.
+            </p>
+            <p className="mt-1 break-words text-muted-foreground text-xs">
+              {error}
+            </p>
+          </div>
+        ) : null}
         {stale ? (
           <div className="flex flex-wrap items-center gap-2 text-muted-foreground text-sm">
             <span>The transcript changed since these were discovered.</span>
-            <RerunDiscoveryButton sourceId={sourceId} />
+            <RerunDiscoveryButton
+              observedAttempts={observedAttempts}
+              observedEditVersion={observedEditVersion}
+              observedRunId={observedRunId}
+              sourceId={sourceId}
+            />
           </div>
         ) : null}
         {rejectedCount > 0 || view === "rejected" ? (
@@ -814,7 +925,12 @@ function MomentsReady({
             {showAll ? "Show top 10" : `Show all ${active.length}`}
           </Button>
         ) : null}
-        <RerunDiscoveryButton sourceId={sourceId} />
+        <RerunDiscoveryButton
+          observedAttempts={observedAttempts}
+          observedEditVersion={observedEditVersion}
+          observedRunId={observedRunId}
+          sourceId={sourceId}
+        />
       </CardContent>
     </Card>
   );

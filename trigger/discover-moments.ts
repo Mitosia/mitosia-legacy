@@ -13,8 +13,9 @@ tuneOutboundConnections();
 
 // Durable wrapper around the discovery pipeline, shaped exactly like
 // extract-source: telemetry awaited in the per-run init hook, failure state
-// on the run row, rethrow so Trigger's retry policy governs, claimRun()
-// makes retries idempotent.
+// on the run row, rethrow so Trigger's retry policy governs. The payload's
+// dispatch lease plus claimRun's attempt CAS make retries idempotent and make
+// delayed tasks from an older human re-run harmless.
 export const discoverMomentsTask = task({
   id: "discover-moments",
   init: async () => {

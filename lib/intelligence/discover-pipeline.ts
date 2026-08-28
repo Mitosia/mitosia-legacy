@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   fineCutMoment,
   type MomentFineCut,
@@ -21,6 +21,7 @@ import {
   type SourceContextPack,
 } from "@/lib/ai/context";
 import type { StructuredUsage } from "@/lib/ai/generate";
+import { recordAudit } from "@/lib/audit";
 import {
   brand,
   campaign,
@@ -36,7 +37,7 @@ import {
   sourceExtraction,
   transcriptChunk,
 } from "@/lib/db/schema";
-import { withOrgScope } from "@/lib/db/tenant";
+import { type OrgTransaction, withOrgScope } from "@/lib/db/tenant";
 import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
@@ -47,6 +48,7 @@ import {
   loadShotTimes,
   mapWithConcurrency,
 } from "./clip-support";
+import { terminalDiscoveryFailureStatus } from "./discovery-state";
 import { applyMomentFineCut } from "./fine-cut";
 import { buildCutGrid, type CutGrid, cutterWindow } from "./grid";
 import { tokenizeWords } from "./grounding";
@@ -69,8 +71,10 @@ import {
 // grounded=false for run stats but never surface.
 
 const DISCOVER_ERROR_MAX_CHARS = 2000;
+const DISCOVERY_HEARTBEAT_INTERVAL_MS = 60_000;
 
 export interface DiscoveryPayload {
+  dispatchLease: string;
   organizationId: string;
   sourceId: string;
 }
@@ -93,30 +97,33 @@ async function claimRun(payload: DiscoveryPayload): Promise<ClaimedRun | null> {
       .limit(1);
 
     if (!existing) {
-      const [created] = await tx
-        .insert(momentDiscoveryRun)
-        .values({
-          attempts: 1,
-          organizationId: payload.organizationId,
-          sourceId: payload.sourceId,
-          status: "processing",
-        })
-        .onConflictDoNothing({ target: momentDiscoveryRun.sourceId })
-        .returning({ id: momentDiscoveryRun.id });
-      return created ? { attempt: 1, runId: created.id } : null;
-    }
-    if (existing.status === "processing" || existing.status === "ready") {
       return null;
     }
-    await tx
+    // Only an explicitly queued run is claimable. A failed or ready run needs
+    // a new human/automatic transition and lease; accepting a delayed task
+    // directly from either state would resurrect a retired attempt.
+    if (existing.status !== "pending") {
+      return null;
+    }
+    const [claimed] = await tx
       .update(momentDiscoveryRun)
       .set({
         attempts: existing.attempts + 1,
         error: null,
         status: "processing",
       })
-      .where(eq(momentDiscoveryRun.id, existing.id));
-    return { attempt: existing.attempts + 1, runId: existing.id };
+      .where(
+        and(
+          eq(momentDiscoveryRun.id, existing.id),
+          eq(momentDiscoveryRun.attempts, existing.attempts),
+          sql`${momentDiscoveryRun.counts}->>'dispatchLease' = ${payload.dispatchLease}`,
+          eq(momentDiscoveryRun.status, existing.status)
+        )
+      )
+      .returning({ id: momentDiscoveryRun.id });
+    return claimed
+      ? { attempt: existing.attempts + 1, runId: existing.id }
+      : null;
   });
 }
 
@@ -126,21 +133,135 @@ async function claimRun(payload: DiscoveryPayload): Promise<ClaimedRun | null> {
 // extract-pipeline.ts, same contract).
 async function recordRunFailure(
   payload: DiscoveryPayload,
-  runId: string,
+  claimed: ClaimedRun,
   error: unknown,
   finalAttempt: boolean
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown discovery failure";
-  await withOrgScope(payload.organizationId, (tx) =>
-    tx
+  const safeMessage = sanitizeIngestError(message).slice(
+    0,
+    DISCOVER_ERROR_MAX_CHARS
+  );
+  await withOrgScope(payload.organizationId, async (tx) => {
+    const [updated] = await tx
       .update(momentDiscoveryRun)
       .set({
-        error: sanitizeIngestError(message).slice(0, DISCOVER_ERROR_MAX_CHARS),
-        status: finalAttempt ? "failed" : "pending",
+        error: safeMessage,
+        status: finalAttempt ? terminalDiscoveryFailureStatus : "pending",
       })
-      .where(eq(momentDiscoveryRun.id, runId))
+      .where(
+        and(
+          eq(momentDiscoveryRun.id, claimed.runId),
+          eq(momentDiscoveryRun.attempts, claimed.attempt),
+          eq(momentDiscoveryRun.status, "processing")
+        )
+      )
+      .returning({
+        id: momentDiscoveryRun.id,
+        status: momentDiscoveryRun.status,
+      });
+    if (updated?.status === "ready") {
+      await recordAudit(tx, {
+        action: "moment_discovery.refresh_failed_preserved",
+        actorUserId: null,
+        entityId: updated.id,
+        entityType: "moment_discovery_run",
+        metadata: { attempt: claimed.attempt, sourceId: payload.sourceId },
+        organizationId: payload.organizationId,
+      });
+    }
+  });
+}
+
+async function heartbeatDiscoveryRun(
+  payload: DiscoveryPayload,
+  claimed: ClaimedRun
+): Promise<boolean> {
+  return await withOrgScope(payload.organizationId, async (tx) => {
+    const [touched] = await tx
+      .update(momentDiscoveryRun)
+      .set({ updatedAt: new Date() })
+      .where(
+        and(
+          eq(momentDiscoveryRun.id, claimed.runId),
+          eq(momentDiscoveryRun.attempts, claimed.attempt),
+          eq(momentDiscoveryRun.status, "processing")
+        )
+      )
+      .returning({ id: momentDiscoveryRun.id });
+    return Boolean(touched);
+  });
+}
+
+// Recursive timeout instead of setInterval: a slow database heartbeat never
+// overlaps the next one. The stop function also awaits the one in flight so
+// no timer survives finalization or failure recording.
+function startDiscoveryRunHeartbeat(
+  payload: DiscoveryPayload,
+  claimed: ClaimedRun
+): () => Promise<void> {
+  let inFlight: Promise<void> | null = null;
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const schedule = () => {
+    if (stopped) {
+      return;
+    }
+    timer = setTimeout(() => {
+      timer = null;
+      inFlight = heartbeatDiscoveryRun(payload, claimed)
+        .then((active) => {
+          if (!active) {
+            stopped = true;
+          }
+        })
+        .catch((error) => {
+          console.error(
+            `[discover] heartbeat failed for run ${claimed.runId}:`,
+            error
+          );
+        })
+        .finally(() => {
+          inFlight = null;
+          schedule();
+        });
+    }, DISCOVERY_HEARTBEAT_INTERVAL_MS);
+    timer.unref();
+  };
+  schedule();
+  return async () => {
+    stopped = true;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    await inFlight;
+  };
+}
+
+async function assertActiveAttempt(
+  tx: OrgTransaction,
+  claimed: ClaimedRun
+): Promise<{ editVersion: number }> {
+  await tx.execute(
+    sql`SELECT ${momentDiscoveryRun.id} FROM ${momentDiscoveryRun} WHERE ${momentDiscoveryRun.id} = ${claimed.runId} FOR UPDATE`
   );
+  const [active] = await tx
+    .select({ editVersion: momentDiscoveryRun.editVersion })
+    .from(momentDiscoveryRun)
+    .where(
+      and(
+        eq(momentDiscoveryRun.id, claimed.runId),
+        eq(momentDiscoveryRun.attempts, claimed.attempt),
+        eq(momentDiscoveryRun.status, "processing")
+      )
+    )
+    .limit(1);
+  if (!active) {
+    throw new Error("Moment discovery attempt is no longer active");
+  }
+  return active;
 }
 
 interface DiscoveryContext {
@@ -308,15 +429,34 @@ async function reviewSurvivors(
 // that a healthy run must keep visibly moving.
 async function writeStage(
   payload: DiscoveryPayload,
-  runId: string,
+  claimed: ClaimedRun,
   stage: string
 ): Promise<void> {
-  await withOrgScope(payload.organizationId, (tx) =>
-    tx
+  const active = await withOrgScope(payload.organizationId, async (tx) => {
+    const [updated] = await tx
       .update(momentDiscoveryRun)
-      .set({ counts: { stage } })
-      .where(eq(momentDiscoveryRun.id, runId))
-  );
+      .set({
+        counts: sql`(
+          COALESCE(${momentDiscoveryRun.counts}, '{}'::jsonb)
+          - 'dispatchState' - 'dispatchId' - 'dispatchedAt'
+        ) || jsonb_build_object(
+          'dispatchLease', ${payload.dispatchLease}::text,
+          'stage', ${stage}::text
+        )`,
+      })
+      .where(
+        and(
+          eq(momentDiscoveryRun.id, claimed.runId),
+          eq(momentDiscoveryRun.attempts, claimed.attempt),
+          eq(momentDiscoveryRun.status, "processing")
+        )
+      )
+      .returning({ id: momentDiscoveryRun.id });
+    return Boolean(updated);
+  });
+  if (!active) {
+    throw new Error("Moment discovery attempt is no longer active");
+  }
 }
 
 // The Cutter pass (§4 Pass 3) over the grounded, unsuppressed survivors:
@@ -464,6 +604,7 @@ export async function runDiscovery(
   if (!claimed) {
     return;
   }
+  const stopHeartbeat = startDiscoveryRunHeartbeat(payload, claimed);
 
   try {
     const transcript = await loadCurrentTranscript(
@@ -490,7 +631,7 @@ export async function runDiscovery(
     const grid = buildCutGrid(transcript.data.words);
     const shotTimesMs = await loadShotTimes(payload);
 
-    await writeStage(payload, claimed.runId, "brief");
+    await writeStage(payload, claimed, "brief");
     const ensured = await ensureEpisodeBrief(
       payload,
       clipPrefixInput(
@@ -504,7 +645,7 @@ export async function runDiscovery(
       transcript.revision
     );
 
-    await writeStage(payload, claimed.runId, "rough");
+    await writeStage(payload, claimed, "rough");
     const result = await runMomentDiscovery(
       {
         analysis: context.analysis,
@@ -532,7 +673,7 @@ export async function runDiscovery(
       chunks
     );
 
-    await writeStage(payload, claimed.runId, "cut");
+    await writeStage(payload, claimed, "cut");
     const cutUsage = await fineCutSurvivors(
       rows,
       grid,
@@ -542,7 +683,7 @@ export async function runDiscovery(
     // Refined boundaries can converge two candidates — dedupe re-runs.
     rows = dedupeAndRankMomentRows(rows, chunks);
 
-    await writeStage(payload, claimed.runId, "review");
+    await writeStage(payload, claimed, "review");
     const review = await reviewSurvivors(rows, transcript.data.words);
     // Verdicts keyed by row IDENTITY, not index — the revision round and
     // its re-rank reorder the array.
@@ -554,7 +695,7 @@ export async function runDiscovery(
       }
     }
 
-    await writeStage(payload, claimed.runId, "revise");
+    await writeStage(payload, claimed, "revise");
     const revisionNotes = new Map<MomentRow, string>();
     for (const [row, verdict] of verdictByRow) {
       if (REVISION_FIXES.has(verdict.suggestedFix)) {
@@ -574,6 +715,10 @@ export async function runDiscovery(
     rows = dedupeAndRankMomentRows(rows, chunks);
 
     await withOrgScope(payload.organizationId, async (tx) => {
+      // A reaper may have retired this attempt while a provider call was in
+      // flight. Lock and verify the exact claim before any replacement rows,
+      // context snapshot, or metering can be committed.
+      const activeAttempt = await assertActiveAttempt(tx, claimed);
       const [snapshot] = await tx
         .insert(contextSnapshot)
         .values({
@@ -584,13 +729,45 @@ export async function runDiscovery(
         })
         .returning({ id: contextSnapshot.id });
 
+      const [replacementFacts] = await tx
+        .select({
+          boundaryEditCount: sql<number>`count(*) FILTER (WHERE ${momentCandidate.adjustedStartMs} IS NOT NULL OR ${momentCandidate.adjustedEndMs} IS NOT NULL)::int`,
+          candidateCount: sql<number>`count(*)::int`,
+          decisionCount: sql<number>`count(*) FILTER (WHERE ${momentCandidate.status} <> 'proposed')::int`,
+        })
+        .from(momentCandidate)
+        .where(eq(momentCandidate.sourceId, payload.sourceId));
+
       // Re-runs replace: candidates belong to exactly one run per source.
-      // (The rerun ACTION refuses while human decisions exist — decided
-      // rows are the M1 record — so this delete only ever clears
-      // undecided proposals.)
+      // Human work reaches this point only after the action's exact-version
+      // destructive confirmation; its decision/boundary metrics remain in
+      // the append-only audit trail.
       await tx
         .delete(momentCandidate)
         .where(eq(momentCandidate.sourceId, payload.sourceId));
+      const replacedCandidateCount = Number(
+        replacementFacts?.candidateCount ?? 0
+      );
+      if (replacedCandidateCount > 0) {
+        await recordAudit(tx, {
+          action: "moment_discovery.replaced",
+          actorUserId: null,
+          entityId: claimed.runId,
+          entityType: "moment_discovery_run",
+          metadata: {
+            discardedBoundaryEditCount: Number(
+              replacementFacts?.boundaryEditCount ?? 0
+            ),
+            discardedCandidateCount: replacedCandidateCount,
+            discardedDecisionCount: Number(
+              replacementFacts?.decisionCount ?? 0
+            ),
+            previousEditVersion: activeAttempt.editVersion,
+            sourceId: payload.sourceId,
+          },
+          organizationId: payload.organizationId,
+        });
+      }
       if (rows.length > 0) {
         await tx.insert(momentCandidate).values(
           rows.map((row) => ({
@@ -604,11 +781,12 @@ export async function runDiscovery(
         );
       }
 
-      await tx
+      const [finalized] = await tx
         .update(momentDiscoveryRun)
         .set({
           contextSnapshotId: snapshot?.id ?? null,
           counts: {
+            dispatchLease: payload.dispatchLease,
             flagged: [...review.verdicts.values()].filter(isFlaggedVerdict)
               .length,
             grounded: rows.filter((row) => row.grounded).length,
@@ -617,7 +795,9 @@ export async function runDiscovery(
             revised: rows.filter((row) => row.flags.includes("revised")).length,
             suppressed: rows.filter((row) => row.suppressed).length,
           },
+          editVersion: 0,
           error: null,
+          humanEditedAt: null,
           models: Object.fromEntries(
             result.usage.map((usage) => [
               usage.task,
@@ -627,7 +807,17 @@ export async function runDiscovery(
           revision: transcript.revision,
           status: "ready",
         })
-        .where(eq(momentDiscoveryRun.id, claimed.runId));
+        .where(
+          and(
+            eq(momentDiscoveryRun.id, claimed.runId),
+            eq(momentDiscoveryRun.attempts, claimed.attempt),
+            eq(momentDiscoveryRun.status, "processing")
+          )
+        )
+        .returning({ id: momentDiscoveryRun.id });
+      if (!finalized) {
+        throw new Error("Moment discovery attempt lost its finalization lease");
+      }
 
       // The cutting room's per-clip passes: each summed into one ledger
       // entry (the reviewer's pattern) — the ledger meters the pass,
@@ -720,10 +910,12 @@ export async function runDiscovery(
   } catch (error) {
     await recordRunFailure(
       payload,
-      claimed.runId,
+      claimed,
       error,
       options.finalAttempt ?? true
     );
     throw error;
+  } finally {
+    await stopHeartbeat();
   }
 }
