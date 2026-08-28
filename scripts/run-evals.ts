@@ -1,7 +1,15 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { runMomentDiscovery } from "@/lib/ai/capabilities/moment-discovery";
-import { runSegmentPlan } from "@/lib/ai/capabilities/segment-plan";
+import { runSegmentReconcilePass } from "@/lib/ai/capabilities/episode-clips";
+import {
+  clipPrefixInput,
+  runMomentDiscovery,
+} from "@/lib/ai/capabilities/moment-discovery";
+import {
+  runSegmentPlan,
+  type SegmentPlanInput,
+  type SegmentPlanResult,
+} from "@/lib/ai/capabilities/segment-plan";
 import {
   runSourceAnalysis,
   transcriptToPromptText,
@@ -14,17 +22,31 @@ import { getEmbeddingProvider } from "@/lib/ai/embeddings/provider";
 import { judgeCitationRelevance, judgeSummary } from "@/lib/ai/evals/judge";
 import {
   type QaOutcome,
+  type SegmentBoundaryDecision,
   scoreChapters,
   scoreExtractions,
   scoreMoments,
   scoreQa,
+  scoreSegmentBoundaries,
   scoreSegments,
   scoreSpeakerSuggestions,
   scoreSummary,
+  segmentBoundaryDecisions,
 } from "@/lib/ai/evals/scorers";
 import { buildChunks } from "@/lib/intelligence/chunks";
-import { groundExtractions } from "@/lib/intelligence/grounding";
+import { buildCutGrid } from "@/lib/intelligence/grid";
+import {
+  alignExtraction,
+  groundExtractions,
+  tokenizeWords,
+} from "@/lib/intelligence/grounding";
 import { buildMomentRows } from "@/lib/intelligence/moments";
+import {
+  applySegmentGrouping,
+  numberSegmentAtoms,
+  type SegmentAtom,
+  type SegmentGrouping,
+} from "@/lib/intelligence/segment-reconcile";
 import { buildSegmentRows, checkPartition } from "@/lib/intelligence/segments";
 import type { TranscriptData } from "@/lib/transcription/types";
 
@@ -52,6 +74,10 @@ const THRESHOLDS: Record<string, number> = {
   moments: 0.8,
   // Answerability verdicts + citation-overlap on the golden questions.
   qa: 0.7,
+  // Optional fixture gold over selected semantic boundaries. Macro-averaged
+  // KEEP/REMOVE accuracy makes both uniform fragmentation and uniform merging
+  // fail without imposing a duration rule.
+  "segment-boundaries": 0.8,
   // Segment plan: grounded-keep rate with hard penalties for a broken
   // partition — coverage is the product.
   segments: 0.8,
@@ -70,6 +96,15 @@ interface Fixture {
     goldStartMs?: number;
     question: string;
   }[];
+  // Semantic gold owns a PINNED rough atom plan. Atom IDs are positional and
+  // must never be attached to a newly generated rough plan whose topics may
+  // differ between model runs. Omit until a human has labeled a stable plan;
+  // the runner skips this score rather than inventing gold from duration.
+  segmentBoundaryGold?: {
+    decisions: SegmentBoundaryDecision[];
+    roughItems: SegmentPlanResult["items"];
+    tableOfContents: string[];
+  };
   transcript: TranscriptData;
 }
 
@@ -196,6 +231,133 @@ function printScore(
   return pass;
 }
 
+const SEGMENT_RECONCILE_ATTEMPTS = 2;
+
+interface EvalSegmentReconciliation {
+  atoms: SegmentAtom[];
+  groups: SegmentGrouping[];
+  issues: string[];
+  items: SegmentPlanResult["items"];
+  status: "applied" | "fallback" | "skipped";
+  usage: SegmentPlanResult["usage"];
+}
+
+function identitySegmentGroups(
+  atoms: readonly SegmentAtom[]
+): SegmentGrouping[] {
+  return atoms.map((atom) => ({
+    atomIds: [atom.atomId],
+    dropReason: atom.dropReason,
+    hook: atom.hook,
+    kind: atom.kind,
+    reasoning: "Eval identity group for a rough segment atom.",
+    summary: atom.summary,
+    title: atom.title,
+  }));
+}
+
+function groundedSegmentAtomIds(
+  atoms: readonly SegmentAtom[],
+  transcript: TranscriptData
+): Set<string> {
+  const tokens = tokenizeWords(transcript.words);
+  const grounded = new Set<string>();
+  for (const atom of atoms) {
+    if (atom.kind !== "keep" || !atom.anchorText) {
+      continue;
+    }
+    const aligned = alignExtraction(
+      atom.anchorText,
+      atom.startMs,
+      atom.endMs,
+      tokens
+    );
+    if (
+      aligned.grounded &&
+      aligned.startMs >= atom.startMs &&
+      aligned.endMs <= atom.endMs
+    ) {
+      grounded.add(atom.atomId);
+    }
+  }
+  return grounded;
+}
+
+async function reconcileSegmentsForEval(
+  input: SegmentPlanInput,
+  plan: SegmentPlanResult
+): Promise<EvalSegmentReconciliation> {
+  const atoms = numberSegmentAtoms(plan.items);
+  const groundedAtomIds = groundedSegmentAtomIds(atoms, input.transcript);
+  const groupingContext = { groundedAtomIds };
+  const identityGroups = identitySegmentGroups(atoms);
+  const identity = applySegmentGrouping(atoms, identityGroups, groupingContext);
+  const hasMergeCandidate = atoms.some(
+    (atom, index) => atom.kind === "keep" && atoms[index + 1]?.kind === "keep"
+  );
+  if (
+    atoms.length < 2 ||
+    !hasMergeCandidate ||
+    process.env.ANALYSIS_PROVIDER === "mock"
+  ) {
+    return {
+      atoms,
+      groups: identityGroups,
+      issues: identity.issues,
+      items: identity.items,
+      status: identity.status === "fallback" ? "fallback" : "skipped",
+      usage: [],
+    };
+  }
+
+  const prefix = clipPrefixInput(input, buildCutGrid(input.transcript.words));
+  const usage: SegmentPlanResult["usage"] = [];
+  let issues: string[] = [];
+  let previousGroups: SegmentGrouping[] = [];
+  for (let attempt = 0; attempt < SEGMENT_RECONCILE_ATTEMPTS; attempt += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: the second pass repairs the first pass's exact deterministic validation errors
+    const run = await runSegmentReconcilePass(
+      prefix,
+      null,
+      plan.tableOfContents,
+      atoms.map((atom) => ({
+        ...atom,
+        anchorText: groundedAtomIds.has(atom.atomId) ? atom.anchorText : null,
+      })),
+      issues,
+      previousGroups
+    );
+    usage.push(run.usage);
+    previousGroups = run.output.reconciliation?.groups ?? [];
+    const applied = applySegmentGrouping(
+      atoms,
+      previousGroups,
+      groupingContext
+    );
+    if (applied.status === "applied") {
+      return {
+        atoms,
+        groups: previousGroups,
+        issues: [],
+        items: applied.items,
+        status: "applied",
+        usage,
+      };
+    }
+    const { issues: appliedIssues } = applied;
+    issues = appliedIssues;
+  }
+
+  return {
+    atoms,
+    groups: identityGroups,
+    issues,
+    items: identity.items,
+    status: "fallback",
+    usage,
+  };
+}
+
 async function evaluateFixture(
   fixture: Fixture,
   useJudge: boolean
@@ -246,17 +408,32 @@ async function evaluateFixture(
   );
 
   // The coverage lane runs the same fixture through the real partition
-  // capability + the production tiling gauntlet.
-  const plan = await runSegmentPlan({
+  // capability, the global semantic Reconciler, and the production tiling
+  // gauntlet. Mock mode deliberately uses identity groups; it smoke-tests the
+  // harness without pretending to make semantic judgments.
+  const segmentInput: SegmentPlanInput = {
     analysis: null,
     contextPack: { ...fixture.pack, kind: "segment-plan" },
     durationMs: fixture.durationMs,
     momentInventory: [],
     seeds: [],
     transcript: fixture.transcript,
-  });
+  };
+  const plan = await runSegmentPlan(segmentInput);
+  const reconciliation = await reconcileSegmentsForEval(segmentInput, plan);
+  const semanticGold = fixture.segmentBoundaryGold;
+  const semanticReconciliation =
+    semanticGold &&
+    semanticGold.decisions.length > 0 &&
+    process.env.ANALYSIS_PROVIDER !== "mock"
+      ? await reconcileSegmentsForEval(segmentInput, {
+          items: semanticGold.roughItems,
+          tableOfContents: semanticGold.tableOfContents,
+          usage: [],
+        })
+      : null;
   const segmentRows = buildSegmentRows(
-    plan.items,
+    reconciliation.items,
     fixture.transcript.words,
     fixture.durationMs,
     []
@@ -280,8 +457,27 @@ async function evaluateFixture(
   if (qaOutcomes.length > 0) {
     scores.qa = scoreQa(qaOutcomes);
   }
+  if (semanticGold && semanticReconciliation) {
+    scores["segment-boundaries"] = scoreSegmentBoundaries(
+      segmentBoundaryDecisions(
+        semanticReconciliation.atoms,
+        semanticReconciliation.groups
+      ),
+      semanticGold.decisions
+    );
+  }
 
   console.log(`── ${fixture.name}`);
+  if (reconciliation.status === "fallback") {
+    console.log(
+      `   WARN segment reconciliation fell back — ${reconciliation.issues.join("; ")}`
+    );
+  }
+  if (semanticReconciliation?.status === "fallback") {
+    console.log(
+      `   WARN semantic-gold reconciliation fell back — ${semanticReconciliation.issues.join("; ")}`
+    );
+  }
   let failed = 0;
   for (const [name, report] of Object.entries(scores)) {
     const threshold = THRESHOLDS[name as keyof typeof THRESHOLDS];
@@ -310,6 +506,8 @@ async function evaluateFixture(
     ...extraction.usage,
     ...discovery.usage,
     ...plan.usage,
+    ...reconciliation.usage,
+    ...(semanticReconciliation?.usage ?? []),
   ].reduce((total, usage) => total + (usage.costUsd ?? 0), 0);
   if (spentUsd > 0) {
     console.log(`   cost: $${spentUsd.toFixed(4)}`);

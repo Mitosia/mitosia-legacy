@@ -3,6 +3,7 @@ import type { CutGrid, CutterWindow } from "@/lib/intelligence/grid";
 import { renderFine, sentenceAtMs } from "@/lib/intelligence/grid";
 import type { MsRange } from "@/lib/intelligence/moments";
 import { generateStructured, type StructuredUsage } from "../generate";
+import type { RawSegmentItem } from "./segment-plan";
 
 // The Cutter (docs/clip-cut-architecture.md §4 Pass 3): the fine cut. One
 // small call per clip over a ±90s two-turn window rendered at SENTENCE
@@ -77,14 +78,16 @@ You see a reel around a proposed cut: sentence lines "s0417 [14:02] S2:
 text" with marks — ⟲turn (opens a speaker turn), ·q (question), ¶N.Ns
 (pause after), ·cut (camera cut). Sentence IDs are your only coordinates.
 
-You are shown what plays BEFORE the cut and what plays AFTER it. Choose
-the sentence where the second span truly begins: the first topic's payoff
-has fully landed (with its breath), and the new topic's setup — usually a
-question or a topic turn — starts. The chapter before the cut must end
-complete; the chapter after must open on its own setup, never on the tail
-of the previous topic. When the material before the cut is dropped
-content (a sponsor read, housekeeping), the cut lands where the kept
-chapter's actual setup begins.
+You are shown what plays BEFORE the cut and what plays AFTER it. The
+boundary types in the request determine the editorial job:
+- KEEP→KEEP: place a genuine topic turn, after the first chapter's payoff
+  and at the second chapter's question or setup.
+- KEEP→DROP: preserve the kept chapter's complete payoff, then choose the
+  first sentence that belongs to the discarded material.
+- DROP→KEEP: exclude the discarded material and choose the kept chapter's
+  actual question or setup.
+The chapter before a KEEP→KEEP cut must end complete; a kept chapter after
+any cut must open on its own setup, never on the tail of earlier material.
 
 Return reasoning (one sentence: what ends, what begins), then cutId — the
 first sentence OF THE SECOND SPAN.`;
@@ -154,7 +157,11 @@ export async function fineCutMoment(
 }
 
 export interface SegmentCutRequest {
+  afterDropReason: RawSegmentItem["dropReason"];
+  afterKind: RawSegmentItem["kind"];
   afterTitle: string;
+  beforeDropReason: RawSegmentItem["dropReason"];
+  beforeKind: RawSegmentItem["kind"] | null;
   beforeTitle: string;
   grid: CutGrid;
   roughCutMs: number;
@@ -165,6 +172,52 @@ export interface SegmentCutRequest {
 export interface SegmentCutOutcome {
   cut: SegmentFineCut;
   usage: StructuredUsage | null;
+}
+
+type SegmentBoundaryRequest = Pick<
+  SegmentCutRequest,
+  "afterDropReason" | "afterKind" | "beforeDropReason" | "beforeKind"
+>;
+
+export function isSegmentBoundaryRefinable(
+  beforeKind: SegmentCutRequest["beforeKind"],
+  afterKind: SegmentCutRequest["afterKind"]
+): boolean {
+  return !(beforeKind === "drop" && afterKind === "drop");
+}
+
+export function segmentBoundaryGuidance(
+  request: SegmentBoundaryRequest
+): string {
+  if (!isSegmentBoundaryRefinable(request.beforeKind, request.afterKind)) {
+    throw new Error("DROP→DROP boundaries are not Cutter targets");
+  }
+  if (request.beforeKind === "keep" && request.afterKind === "drop") {
+    return `KEEP→DROP: choose the first sentence of the discarded ${request.afterDropReason ?? "other"} material, only after the kept chapter's payoff has fully landed.`;
+  }
+  if (request.beforeKind === "drop" && request.afterKind === "keep") {
+    return `DROP→KEEP: exclude all ${request.beforeDropReason ?? "other"} material and choose the kept chapter's first self-contained question or setup sentence.`;
+  }
+  if (request.beforeKind === "keep" && request.afterKind === "keep") {
+    return "KEEP→KEEP: choose the first sentence of the new chapter at a genuine topic turn, after the preceding chapter's payoff has fully landed.";
+  }
+  if (request.beforeKind === null && request.afterKind === "keep") {
+    return "EPISODE START→KEEP: choose the kept chapter's first self-contained question or setup sentence.";
+  }
+  return `EPISODE START→DROP: choose the first sentence that belongs to the discarded ${request.afterDropReason ?? "other"} material.`;
+}
+
+function segmentBoundaryLabel(
+  kind: SegmentCutRequest["beforeKind"],
+  dropReason: RawSegmentItem["dropReason"],
+  title: string
+): string {
+  if (kind === null) {
+    return "EPISODE START";
+  }
+  return kind === "drop"
+    ? `DROP (${dropReason ?? "other"}): "${title}"`
+    : `KEEP: "${title}"`;
 }
 
 function mockSegmentCut(request: SegmentCutRequest): SegmentFineCut {
@@ -178,6 +231,7 @@ function mockSegmentCut(request: SegmentCutRequest): SegmentFineCut {
 export async function fineCutSegmentBoundary(
   request: SegmentCutRequest
 ): Promise<SegmentCutOutcome> {
+  const guidance = segmentBoundaryGuidance(request);
   if (process.env.ANALYSIS_PROVIDER === "mock") {
     return { cut: mockSegmentCut(request), usage: null };
   }
@@ -189,7 +243,17 @@ export async function fineCutSegmentBoundary(
   );
   const roughSentence = sentenceAtMs(request.grid, request.roughCutMs);
   const roughId = roughSentence ? roughSentence.id : 0;
-  const prompt = `BOUNDARY between "${request.beforeTitle}" (before) and "${request.afterTitle}" (after).\nROUGH CUT: near sentence s${roughId}.\n\nREEL:\n${reel}`;
+  const before = segmentBoundaryLabel(
+    request.beforeKind,
+    request.beforeDropReason,
+    request.beforeTitle
+  );
+  const after = segmentBoundaryLabel(
+    request.afterKind,
+    request.afterDropReason,
+    request.afterTitle
+  );
+  const prompt = `BOUNDARY: ${before} → ${after}.\nEDITORIAL RULE: ${guidance}\nROUGH CUT: near sentence s${roughId}.\n\nREEL:\n${reel}`;
   const result = await generateStructured(
     "clip-fine.cut",
     SEGMENT_SYSTEM,

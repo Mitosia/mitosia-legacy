@@ -69,6 +69,7 @@ import {
   isStalledSegmentPlan,
   scheduleSegmentPlanReap,
 } from "@/lib/intelligence/segment-reaper";
+import { SEGMENT_PLAN_ARCHITECTURE_VERSION } from "@/lib/intelligence/segment-reconcile";
 import { requireOrg } from "@/lib/org";
 import {
   isStalledTranscription,
@@ -319,6 +320,7 @@ function workspaceSegments(data: {
   currentRevision: { revision: number } | null;
   extractionRun: { status: string } | null;
   segmentRun: {
+    counts: unknown;
     error: string | null;
     revision: number | null;
     status: string;
@@ -335,8 +337,13 @@ function workspaceSegments(data: {
       error: data.segmentRun.error,
       stale:
         data.segmentRun.status === "ready" &&
-        data.currentRevision !== null &&
-        (data.segmentRun.revision ?? 0) < data.currentRevision.revision,
+        ((data.currentRevision !== null &&
+          (data.segmentRun.revision ?? 0) < data.currentRevision.revision) ||
+          ((
+            (data.segmentRun.counts ?? {}) as {
+              architectureVersion?: number;
+            }
+          ).architectureVersion ?? 1) < SEGMENT_PLAN_ARCHITECTURE_VERSION),
       status: data.segmentRun.status,
     },
     segments: data.segments,
@@ -589,6 +596,7 @@ export default async function SourceDetailPage(
 
     const [segmentRunRow] = await tx
       .select({
+        counts: segmentPlanRun.counts,
         error: segmentPlanRun.error,
         revision: segmentPlanRun.revision,
         stalled: sql<boolean>`(${isStalledSegmentPlan})`,
