@@ -129,8 +129,11 @@ from the in-process fallback to `tasks.trigger("ingest-source", …)`.
 
 ### Deploying the task
 
-Automatic (preferred): the `deploy-trigger` job in `.github/workflows/ci.yml`
-deploys the tasks on every merge to `main`, after `checks` and `e2e` pass.
+Automatic (preferred): `.github/workflows/deploy-trigger.yml` deploys the
+tasks immediately after a protected merge to `main` when Trigger entrypoints,
+their broad `lib/**` dependency tree, build inputs, database contract, or
+dependencies changed. PR CI has already passed before the protected merge;
+UI-only and docs-only merges do not rebuild an identical worker.
 It is **skipped until two repository settings exist** (Settings → Secrets and
 variables → Actions):
 
