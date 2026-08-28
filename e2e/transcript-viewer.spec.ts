@@ -193,6 +193,21 @@ test("the transcript panel seeks, searches, and highlights", async ({
   // different names still show as changes.)
   const banner = page.getByTestId("speaker-suggestions");
   await expect(banner).toBeVisible();
+  // Clipping guard: a max-height flex column once SHRANK this card until
+  // its overflow-hidden border swallowed the buttons — while visibility
+  // checks still passed (clipped content counts as visible). Assert the
+  // Apply button's box actually sits inside the card's box.
+  const bannerBox = await banner.boundingBox();
+  const applyBox = await page
+    .getByTestId("apply-speaker-suggestions")
+    .boundingBox();
+  expect(bannerBox).not.toBeNull();
+  expect(applyBox).not.toBeNull();
+  // biome-ignore lint/style/noNonNullAssertion: asserted non-null above
+  expect(applyBox!.y + applyBox!.height).toBeLessThanOrEqual(
+    // biome-ignore lint/style/noNonNullAssertion: asserted non-null above
+    bannerBox!.y + bannerBox!.height + 1
+  );
   await page.getByTestId("apply-speaker-suggestions").click();
   await expect(banner).toBeHidden({ timeout: 15_000 });
   await page.getByTestId("workspace-tab-transcript").click();

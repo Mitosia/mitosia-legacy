@@ -313,7 +313,12 @@ export function SourceWorkspace(props: SourceWorkspaceProps) {
       {/* p-px on both scroll containers: a card border sitting exactly on
           the overflow clip edge disappears; one pixel of inset keeps every
           border visible. */}
-      <div className="flex flex-col gap-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:p-px">
+      {/* [&>*]:shrink-0 is load-bearing: a max-height flex column SHRINKS
+          its children before it ever scrolls, and the cards (overflow-
+          hidden) then clip their own squeezed content — the speaker
+          banner's buttons vanished exactly this way. With shrink pinned,
+          overflow-y-auto actually scrolls. */}
+      <div className="flex flex-col gap-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:p-px [&>*]:shrink-0">
         <SourcePlayer
           hlsUrl={hlsUrl}
           onVideoElement={setVideo}
