@@ -1,6 +1,8 @@
 # Clip cut architecture: boundaries that feel cut by an editor
 
-**Status: Design (2026-08-28).** Written from the Gate M1 verdict measured the same day. **Consumes:** docs/episode-to-clips.md (§8 quality bar, §9 editorial team — this doc is the build plan for §9's team, revised where evidence demanded), docs/clipping-landscape.md, the S6/S6.5 pipelines, and the M1 review record on staging. **Feeds:** the next M1 rounds, then S8 (edit spec) once a round passes.
+**Status: Rounds 1–3 + shot grid BUILT (2026-08-28, same PR — direction from Rajesh: ship the whole room, on by default, no switches).** Deviations from the round plan are deliberate and small: rounds collapsed into one build; the segment lane gets no revision actuator (its per-cut refinement IS the fine pass, and revising a keep's end means moving a partition cut — flags only); visual QC (§7 tier 2) and topic valleys (Round 5) remain future.
+
+**Original design status: Design (2026-08-28).** Written from the Gate M1 verdict measured the same day. **Consumes:** docs/episode-to-clips.md (§8 quality bar, §9 editorial team — this doc is the build plan for §9's team, revised where evidence demanded), docs/clipping-landscape.md, the S6/S6.5 pipelines, and the M1 review record on staging. **Feeds:** the next M1 rounds, then S8 (edit spec) once a round passes.
 
 Direction (Rajesh, 2026-08-28): boundary selection is the biggest issue — moments start early or end abruptly. Build the best agentic architecture, harness, and prompt engineering for cuts that feel like a real editor's; apply it to both lanes; moments must feel like quick shorts while segments must feel like topics, never like shorts candidates; and evaluate vision honestly rather than dismissing it.
 

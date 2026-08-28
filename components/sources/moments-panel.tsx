@@ -57,6 +57,9 @@ export interface MomentCandidateView {
   adjustedStartMs: number | null;
   composite: number;
   endMs: number;
+  // Deterministic gauntlet/Cutter observability flags — only the
+  // attention-worthy subset renders as badges (MOMENT_FLAG_LABELS).
+  flags: string[];
   hook: string;
   id: string;
   rank: number;
@@ -111,10 +114,25 @@ const REJECT_REASON_ORDER = [
 
 const REVIEW_FIX_LABELS: Record<string, string> = {
   drop: "Reviewer: consider dropping",
+  extend_end: "Reviewer: extend end",
   extend_start: "Reviewer: extend start",
   none: "Reviewer: check",
   retitle: "Reviewer: retitle",
   trim_end: "Reviewer: trim end",
+  trim_start: "Reviewer: trim start",
+};
+
+// Attention-worthy gauntlet flags only — mechanical fire-records
+// (lead_in_captured, shot_snapped, lead_out_trimmed) stay metrics, not
+// badges.
+const MOMENT_FLAG_LABELS: Record<string, string> = {
+  id_clamped: "Cutter IDs clamped",
+  no_single_payoff: "Cutter: not one beat",
+  payoff_invariant: "Cutter: payoff unlocated",
+  refine_ungrounded: "Fine cut rejected",
+  revised: "Revised after review",
+  stale_open: "Check: opens on previous topic?",
+  unrefined: "Coarse bounds (uncut)",
 };
 
 const STATUS_LABELS: Record<MomentStatus, string> = {
@@ -499,6 +517,13 @@ function MomentCard({ candidate, onPlay, onPlayFrom, words }: MomentCardProps) {
                 "Reviewer: check"}
             </Badge>
           ) : null}
+          {candidate.flags
+            .filter((flag) => flag in MOMENT_FLAG_LABELS)
+            .map((flag) => (
+              <Badge data-testid="moment-flag" key={flag} variant="outline">
+                {MOMENT_FLAG_LABELS[flag]}
+              </Badge>
+            ))}
         </span>
         <span className="text-muted-foreground text-sm">{candidate.hook}</span>
         <span className="flex flex-wrap items-center gap-2 text-muted-foreground text-xs tabular-nums">

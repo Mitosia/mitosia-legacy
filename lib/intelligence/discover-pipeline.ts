@@ -1,5 +1,10 @@
 import { and, eq } from "drizzle-orm";
 import {
+  fineCutMoment,
+  type MomentFineCut,
+} from "@/lib/ai/capabilities/clip-fine-cut";
+import {
+  clipPrefixInput,
   type MomentAnalysisContext,
   type MomentSeed,
   runMomentDiscovery,
@@ -37,8 +42,18 @@ import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
 import type { TranscriptWord } from "@/lib/transcription/types";
 import {
+  ensureEpisodeBrief,
+  FINE_CUT_CONCURRENCY,
+  loadShotTimes,
+  mapWithConcurrency,
+} from "./clip-support";
+import { applyMomentFineCut } from "./fine-cut";
+import { buildCutGrid, type CutGrid, cutterWindow } from "./grid";
+import { tokenizeWords } from "./grounding";
+import {
   buildMomentRows,
   type DedupeChunk,
+  dedupeAndRankMomentRows,
   type MomentRow,
   spanText,
 } from "./moments";
@@ -272,6 +287,7 @@ async function reviewSurvivors(
       reviewable.map(({ index, row }) => ({
         hook: row.hook,
         id: String(index),
+        lane: "moment" as const,
         spanText: spanText(words, row),
         title: row.title,
       }))
@@ -286,6 +302,106 @@ async function reviewSurvivors(
     return EMPTY_REVIEW;
   }
 }
+
+// Stage progress written to the run row between passes: the silence-based
+// reaper reads updated_at, and the cutting room's pipeline is long enough
+// that a healthy run must keep visibly moving.
+async function writeStage(
+  payload: DiscoveryPayload,
+  runId: string,
+  stage: string
+): Promise<void> {
+  await withOrgScope(payload.organizationId, (tx) =>
+    tx
+      .update(momentDiscoveryRun)
+      .set({ counts: { stage } })
+      .where(eq(momentDiscoveryRun.id, runId))
+  );
+}
+
+// The Cutter pass (§4 Pass 3) over the grounded, unsuppressed survivors:
+// one fine-cut call per clip, bounded concurrency, failures leave coarse
+// bounds standing (flagged `unrefined`). Returns the summed usage for the
+// ledger.
+async function fineCutSurvivors(
+  rows: MomentRow[],
+  grid: CutGrid,
+  shotTimesMs: readonly number[],
+  words: readonly TranscriptWord[],
+  revisionNotes?: Map<MomentRow, string>
+): Promise<StructuredUsage | null> {
+  const tokens = tokenizeWords(words);
+  const targets = rows
+    .map((row, index) => ({ index, row }))
+    .filter(({ row }) =>
+      revisionNotes ? revisionNotes.has(row) : row.grounded && !row.suppressed
+    );
+  if (targets.length === 0) {
+    return null;
+  }
+  // Revision windows are wider toward whatever the reviewer flagged —
+  // one bounded re-cut, never a loop.
+  const marginMs = revisionNotes ? 120_000 : undefined;
+  const usages: StructuredUsage[] = [];
+  await mapWithConcurrency(targets, FINE_CUT_CONCURRENCY, async (target) => {
+    let cut: MomentFineCut | null = null;
+    try {
+      const outcome = await fineCutMoment({
+        grid,
+        hook: target.row.hook,
+        revisionNote: revisionNotes?.get(target.row) ?? null,
+        roughRange: { endMs: target.row.endMs, startMs: target.row.startMs },
+        shotTimesMs,
+        title: target.row.title,
+        window: cutterWindow(
+          grid,
+          { endMs: target.row.endMs, startMs: target.row.startMs },
+          marginMs
+        ),
+      });
+      ({ cut } = outcome);
+      if (outcome.usage) {
+        usages.push(outcome.usage);
+      }
+    } catch (error) {
+      console.error(
+        `[discover] fine cut failed for "${target.row.title}":`,
+        error
+      );
+    }
+    const before = {
+      endMs: target.row.endMs,
+      startMs: target.row.startMs,
+    };
+    const updated = applyMomentFineCut(
+      target.row,
+      cut,
+      grid,
+      shotTimesMs,
+      tokens
+    );
+    if (
+      revisionNotes &&
+      (updated.startMs !== before.startMs || updated.endMs !== before.endMs) &&
+      !updated.flags.includes("revised")
+    ) {
+      updated.flags.push("revised");
+    }
+    // Assign in place: verdicts and revision notes key by row IDENTITY,
+    // which must survive the cut.
+    Object.assign(target.row, updated);
+  });
+  return sumUsage(usages);
+}
+
+// Fixes that route back through the Cutter for the ONE bounded revision
+// (§4 Pass 6). retitle/drop stay pure flags for the human.
+const REVISION_FIXES = new Set([
+  "extend_start",
+  "trim_start",
+  "trim_end",
+  "extend_end",
+]);
 
 function sumUsage(usages: readonly StructuredUsage[]): StructuredUsage | null {
   const [first] = usages;
@@ -367,13 +483,38 @@ export async function runDiscovery(
     );
     const durationMs = Math.round(context.durationSeconds * 1000);
 
-    const result = await runMomentDiscovery({
-      analysis: context.analysis,
-      contextPack: context.pack,
-      durationMs,
-      seeds: context.seeds,
-      transcript: transcript.data,
-    });
+    // The cutting room (docs/clip-cut-architecture.md §4): brief → rough
+    // cut → deterministic gauntlet → per-clip Cutter → cold review → one
+    // bounded revision. Stage names on the run row keep the reaper's
+    // silence window honest across the longer pipeline.
+    const grid = buildCutGrid(transcript.data.words);
+    const shotTimesMs = await loadShotTimes(payload);
+
+    await writeStage(payload, claimed.runId, "brief");
+    const ensured = await ensureEpisodeBrief(
+      payload,
+      clipPrefixInput(
+        {
+          analysis: context.analysis,
+          contextPack: context.pack,
+          seeds: context.seeds,
+        },
+        grid
+      ),
+      transcript.revision
+    );
+
+    await writeStage(payload, claimed.runId, "rough");
+    const result = await runMomentDiscovery(
+      {
+        analysis: context.analysis,
+        contextPack: context.pack,
+        durationMs,
+        seeds: context.seeds,
+        transcript: transcript.data,
+      },
+      { brief: ensured.brief }
+    );
 
     // seedIds the model invented (not in the inventory it was shown) are
     // dropped deterministically — citations must reference real rows.
@@ -384,13 +525,53 @@ export async function runDiscovery(
     }));
 
     const chunks = await loadDedupeChunks(payload);
-    const rows = buildMomentRows(
+    let rows = buildMomentRows(
       items,
       transcript.data.words,
       durationMs,
       chunks
     );
+
+    await writeStage(payload, claimed.runId, "cut");
+    const cutUsage = await fineCutSurvivors(
+      rows,
+      grid,
+      shotTimesMs,
+      transcript.data.words
+    );
+    // Refined boundaries can converge two candidates — dedupe re-runs.
+    rows = dedupeAndRankMomentRows(rows, chunks);
+
+    await writeStage(payload, claimed.runId, "review");
     const review = await reviewSurvivors(rows, transcript.data.words);
+    // Verdicts keyed by row IDENTITY, not index — the revision round and
+    // its re-rank reorder the array.
+    const verdictByRow = new Map<MomentRow, MomentReviewVerdict>();
+    for (const [index, verdict] of review.verdicts) {
+      const row = rows[index];
+      if (row) {
+        verdictByRow.set(row, verdict);
+      }
+    }
+
+    await writeStage(payload, claimed.runId, "revise");
+    const revisionNotes = new Map<MomentRow, string>();
+    for (const [row, verdict] of verdictByRow) {
+      if (REVISION_FIXES.has(verdict.suggestedFix)) {
+        revisionNotes.set(row, `${verdict.suggestedFix}: ${verdict.notes}`);
+      }
+    }
+    const reviseUsage =
+      revisionNotes.size > 0
+        ? await fineCutSurvivors(
+            rows,
+            grid,
+            shotTimesMs,
+            transcript.data.words,
+            revisionNotes
+          )
+        : null;
+    rows = dedupeAndRankMomentRows(rows, chunks);
 
     await withOrgScope(payload.organizationId, async (tx) => {
       const [snapshot] = await tx
@@ -412,9 +593,9 @@ export async function runDiscovery(
         .where(eq(momentCandidate.sourceId, payload.sourceId));
       if (rows.length > 0) {
         await tx.insert(momentCandidate).values(
-          rows.map((row, index) => ({
+          rows.map((row) => ({
             ...row,
-            ...verdictColumns(review.verdicts.get(index)),
+            ...verdictColumns(verdictByRow.get(row)),
             organizationId: payload.organizationId,
             revision: transcript.revision,
             runId: claimed.runId,
@@ -433,6 +614,7 @@ export async function runDiscovery(
             grounded: rows.filter((row) => row.grounded).length,
             proposed: rows.length,
             reviewed: review.verdicts.size,
+            revised: rows.filter((row) => row.flags.includes("revised")).length,
             suppressed: rows.filter((row) => row.suppressed).length,
           },
           error: null,
@@ -446,6 +628,50 @@ export async function runDiscovery(
           status: "ready",
         })
         .where(eq(momentDiscoveryRun.id, claimed.runId));
+
+      // The cutting room's per-clip passes: each summed into one ledger
+      // entry (the reviewer's pattern) — the ledger meters the pass,
+      // Langfuse holds the per-call detail.
+      const summedPasses: [string, StructuredUsage | null, number][] = [
+        [
+          `discover:${payload.sourceId}:${claimed.attempt}:brief`,
+          ensured.usage,
+          1,
+        ],
+        [
+          `discover:${payload.sourceId}:${claimed.attempt}:cut`,
+          cutUsage,
+          rows.filter((row) => row.grounded && !row.suppressed).length,
+        ],
+        [
+          `discover:${payload.sourceId}:${claimed.attempt}:revise`,
+          reviseUsage,
+          revisionNotes.size,
+        ],
+      ];
+      for (const [correlationId, usage, calls] of summedPasses) {
+        if (!usage) {
+          continue;
+        }
+        // biome-ignore lint/performance/noAwaitInLoops: few entries, same tx
+        await recordUsage(tx, {
+          correlationId,
+          entryType: "ai_tokens",
+          metadata: {
+            calls,
+            costUsd: usage.costUsd,
+            inputTokens: usage.inputTokens,
+            model: usage.model,
+            outputTokens: usage.outputTokens,
+            provider: usage.provider,
+            task: usage.task,
+          },
+          organizationId: payload.organizationId,
+          quantity: usage.inputTokens + usage.outputTokens,
+          sourceId: payload.sourceId,
+          unit: "tokens",
+        });
+      }
 
       // Reviewer spend: all verdict calls summed into one entry — the
       // ledger meters the pass, Langfuse holds the per-call detail.

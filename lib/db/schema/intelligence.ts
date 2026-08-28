@@ -253,7 +253,9 @@ export type MomentCandidateStatus = (typeof CANDIDATE_STATUSES)[number];
 const REVIEW_FIXES = [
   "none",
   "extend_start",
+  "trim_start",
   "trim_end",
+  "extend_end",
   "retitle",
   "drop",
 ] as const;
@@ -325,6 +327,10 @@ export const momentCandidate = pgTable(
     // candidates that never collided
     dedupeGroup: integer("dedupe_group"),
     endMs: integer("end_ms").notNull(),
+    // Deterministic observability flags from the gauntlet + Cutter
+    // (stale_open, lead_out_trimmed, unrefined, id_clamped, …) —
+    // docs/clip-cut-architecture.md §5. Flags inform, never auto-reject.
+    flags: jsonb("flags").notNull().default(sql`'[]'::jsonb`),
     grounded: boolean("grounded").notNull(),
     groundingScore: real("grounding_score").notNull(),
     // One sentence: why a viewer stops scrolling
@@ -428,6 +434,32 @@ const DROP_REASONS = [
   "other",
 ] as const;
 export type SegmentDropReason = (typeof DROP_REASONS)[number];
+
+// The Director's episode brief (docs/clip-cut-architecture.md §4 Pass 1):
+// spine, marquee arcs, tone, drop territories — persisted as durable
+// cross-run memory because segment planning is a button that may run hours
+// after discovery, when the prompt cache is cold. One row per source,
+// replaced when the transcript revision moves.
+export const episodeBrief = pgTable(
+  "episode_brief",
+  {
+    brief: jsonb("brief").notNull(),
+    id: uuid("id").primaryKey().default(sql`uuidv7()`),
+    model: text("model").notNull(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    revision: integer("revision").notNull(),
+    sourceId: uuid("source_id")
+      .notNull()
+      .references(() => source.id, { onDelete: "cascade" }),
+    ...timestamps,
+  },
+  (table) => [
+    index("episode_brief_org_idx").on(table.organizationId),
+    uniqueIndex("episode_brief_source_idx").on(table.sourceId),
+  ]
+);
 
 export const segmentPlanRun = pgTable(
   "segment_plan_run",

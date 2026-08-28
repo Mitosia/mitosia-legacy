@@ -136,6 +136,7 @@ interface DetailRow {
   adjustedEndMs: number | null;
   adjustedStartMs: number | null;
   endMs: number;
+  flags: unknown;
   hook: string | null;
   kind: string | null;
   rank: number;
@@ -215,8 +216,12 @@ function detailLine(row: DetailRow, chunks: ChunkRow[]): void {
       ? ` · nudged in ${deltaLabel(row.adjustedStartMs, row.startMs)}/out ${deltaLabel(row.adjustedEndMs, row.endMs)}`
       : "";
   const kindLabel = row.kind ? `${row.kind} ` : "";
+  const flags =
+    Array.isArray(row.flags) && row.flags.length > 0
+      ? ` · flags: ${row.flags.join(",")}`
+      : "";
   write(
-    `  #${row.rank + 1} ${kindLabel}${statusLabel} · ${timestampMs(inMs)}–${timestampMs(outMs)} (${((outMs - inMs) / 1000).toFixed(0)}s) · raw→snap in ${snapIn}/out ${snapOut}${nudges}${review}`
+    `  #${row.rank + 1} ${kindLabel}${statusLabel} · ${timestampMs(inMs)}–${timestampMs(outMs)} (${((outMs - inMs) / 1000).toFixed(0)}s) · raw→snap in ${snapIn}/out ${snapOut}${nudges}${review}${flags}`
   );
   write(
     `     "${row.title ?? "(untitled)"}"${row.hook ? ` — ${row.hook}` : ""}`
@@ -249,6 +254,7 @@ async function detailMoments(organizationId: string): Promise<DetailRow[]> {
         adjustedEndMs: momentCandidate.adjustedEndMs,
         adjustedStartMs: momentCandidate.adjustedStartMs,
         endMs: momentCandidate.endMs,
+        flags: momentCandidate.flags,
         hook: momentCandidate.hook,
         kind: sql<string | null>`NULL`,
         rank: momentCandidate.rank,
@@ -279,6 +285,7 @@ async function detailSegments(organizationId: string): Promise<DetailRow[]> {
         adjustedEndMs: segmentClip.adjustedEndMs,
         adjustedStartMs: segmentClip.adjustedStartMs,
         endMs: segmentClip.endMs,
+        flags: segmentClip.flags,
         hook: segmentClip.hook,
         kind: segmentClip.kind,
         rank: segmentClip.idx,

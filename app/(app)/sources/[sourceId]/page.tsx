@@ -541,6 +541,7 @@ export default async function SourceDetailPage(
               adjustedStartMs: momentCandidate.adjustedStartMs,
               composite: momentCandidate.composite,
               endMs: momentCandidate.endMs,
+              flags: momentCandidate.flags,
               hook: momentCandidate.hook,
               id: momentCandidate.id,
               rank: momentCandidate.rank,
@@ -569,6 +570,7 @@ export default async function SourceDetailPage(
     const candidates: MomentCandidateView[] = candidateRows.map(
       ({ reviewScores, seedIds, ...row }) => ({
         ...row,
+        flags: Array.isArray(row.flags) ? (row.flags as string[]) : [],
         reviewFlagged:
           reviewScores !== null &&
           isFlaggedVerdict({

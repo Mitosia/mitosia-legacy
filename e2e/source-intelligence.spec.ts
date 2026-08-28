@@ -144,21 +144,32 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
       { timeout: 60_000 }
     )
     .toBe("ready");
+  // The Director's brief persists per source + revision (the cutting
+  // room's cross-run memory) — the mock chain must prove the row exists.
+  const [briefRow] = await queryRows<{ revision: string }>(
+    "SELECT revision FROM episode_brief WHERE source_id = $1",
+    [sourceId]
+  );
+  expect(Number(briefRow.revision)).toBe(1);
+
   const candidateRows = await queryRows<{
     dedupe_group: number | null;
     end_ms: string;
+    flags: unknown;
     grounded: boolean;
     rank: string;
     sensitive: boolean;
     start_ms: string;
     suppressed: boolean;
   }>(
-    "SELECT grounded, sensitive, suppressed, dedupe_group, rank, start_ms, end_ms FROM moment_candidate WHERE source_id = $1 ORDER BY rank",
+    "SELECT grounded, sensitive, suppressed, dedupe_group, rank, start_ms, end_ms, flags FROM moment_candidate WHERE source_id = $1 ORDER BY rank",
     [sourceId]
   );
   expect(candidateRows.length).toBeGreaterThanOrEqual(4);
   for (const candidate of candidateRows) {
     expect(candidate.grounded).toBe(true);
+    // Every row carries the gauntlet's flag array (possibly empty)
+    expect(Array.isArray(candidate.flags)).toBe(true);
     expect(Number(candidate.end_ms)).toBeGreaterThan(
       Number(candidate.start_ms)
     );

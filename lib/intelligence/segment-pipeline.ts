@@ -1,5 +1,9 @@
 import { and, eq } from "drizzle-orm";
-import type { MomentSeed } from "@/lib/ai/capabilities/moment-discovery";
+import { fineCutSegmentBoundary } from "@/lib/ai/capabilities/clip-fine-cut";
+import {
+  clipPrefixInput,
+  type MomentSeed,
+} from "@/lib/ai/capabilities/moment-discovery";
 import {
   isFlaggedVerdict,
   type MomentReviewVerdict,
@@ -7,6 +11,7 @@ import {
   reviewMoments,
 } from "@/lib/ai/capabilities/moment-review";
 import {
+  type RawSegmentItem,
   runSegmentPlan,
   type SegmentPlanInput,
 } from "@/lib/ai/capabilities/segment-plan";
@@ -37,6 +42,13 @@ import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
 import type { TranscriptWord } from "@/lib/transcription/types";
+import {
+  ensureEpisodeBrief,
+  FINE_CUT_CONCURRENCY,
+  loadShotTimes,
+  mapWithConcurrency,
+} from "./clip-support";
+import { buildCutGrid, type CutGrid, cutterWindow } from "./grid";
 import { type DedupeChunk, spanText } from "./moments";
 import { buildSegmentRows, type SegmentRow } from "./segments";
 
@@ -318,6 +330,7 @@ async function reviewKeeps(
       reviewable.map(({ index, row }) => ({
         hook: row.hook ?? "",
         id: String(index),
+        lane: "chapter" as const,
         spanText: spanText(words, row),
         title: row.title ?? "",
       }))
@@ -349,6 +362,85 @@ function verdictColumns(verdict: MomentReviewVerdict | undefined) {
   };
 }
 
+async function writeStage(
+  payload: SegmentPlanPayload,
+  runId: string,
+  stage: string
+): Promise<void> {
+  await withOrgScope(payload.organizationId, (tx) =>
+    tx
+      .update(segmentPlanRun)
+      .set({ counts: { stage } })
+      .where(eq(segmentPlanRun.id, runId))
+  );
+}
+
+const SEGMENT_CUT_MARGIN_MS = 60_000;
+
+function boundaryTitle(item: RawSegmentItem | undefined): string {
+  if (!item) {
+    return "(episode start)";
+  }
+  if (item.kind === "drop") {
+    return `(dropped: ${item.dropReason ?? "other"})`;
+  }
+  return item.title ?? "(untitled chapter)";
+}
+
+// Per-cut refinement (§4 Pass 3, segments): each boundary between
+// proposed spans gets one small call over a ±60s window showing BOTH
+// sides — including adjacent drop text, so a keep never opens on a
+// sponsor read's tail. Refined cuts re-enter buildSegmentRows, so the
+// partition invariant survives untouched. Failures keep the rough cut.
+async function refineSegmentCuts(
+  items: RawSegmentItem[],
+  grid: CutGrid,
+  shotTimesMs: readonly number[],
+  firstWord: TranscriptWord | undefined
+): Promise<{ calls: number; usage: StructuredUsage | null }> {
+  const firstWordMs = firstWord ? firstWord.startMs : 0;
+  const sorted = [...items].sort((a, b) => a.startMs - b.startMs);
+  const targets = sorted
+    .map((item, index) => ({ index, item }))
+    .filter(({ index, item }) => index > 0 || item.startMs > firstWordMs);
+  if (targets.length === 0) {
+    return { calls: 0, usage: null };
+  }
+  const usages: StructuredUsage[] = [];
+  await mapWithConcurrency(targets, FINE_CUT_CONCURRENCY, async (target) => {
+    try {
+      const outcome = await fineCutSegmentBoundary({
+        afterTitle: boundaryTitle(target.item),
+        beforeTitle: boundaryTitle(sorted[target.index - 1]),
+        grid,
+        roughCutMs: target.item.startMs,
+        shotTimesMs,
+        window: cutterWindow(
+          grid,
+          { endMs: target.item.startMs, startMs: target.item.startMs },
+          SEGMENT_CUT_MARGIN_MS
+        ),
+      });
+      if (outcome.usage) {
+        usages.push(outcome.usage);
+      }
+      const sentence =
+        grid.sentences[
+          Math.max(0, Math.min(outcome.cut.cutId, grid.sentences.length - 1))
+        ];
+      if (sentence) {
+        target.item.startMs = sentence.startMs;
+      }
+    } catch (error) {
+      console.error(
+        `[segments] cut refinement failed near ${target.item.startMs}ms:`,
+        error
+      );
+    }
+  });
+  return { calls: targets.length, usage: sumUsage(usages) };
+}
+
 export async function runSegmentPlanPipeline(
   payload: SegmentPlanPayload,
   options: { finalAttempt?: boolean } = {}
@@ -376,18 +468,54 @@ export async function runSegmentPlanPipeline(
     );
     const durationMs = Math.round(context.durationSeconds * 1000);
 
-    const result = await runSegmentPlan({
-      ...context.input,
-      durationMs,
-      transcript: transcript.data,
-    });
+    // The cutting room, chapters lane (§4): persisted brief → TOC-first
+    // rough partition → per-cut refinement seeing both sides → tiling
+    // gauntlet → cold review. Planning stays a button; the brief row is
+    // the cross-run memory when the prompt cache has gone cold.
+    const grid = buildCutGrid(transcript.data.words);
+    const shotTimesMs = await loadShotTimes(payload);
+
+    await writeStage(payload, claimed.runId, "brief");
+    const ensured = await ensureEpisodeBrief(
+      payload,
+      clipPrefixInput(
+        {
+          analysis: context.input.analysis,
+          contextPack: context.input.contextPack,
+          seeds: context.input.seeds,
+        },
+        grid
+      ),
+      transcript.revision
+    );
+
+    await writeStage(payload, claimed.runId, "rough");
+    const result = await runSegmentPlan(
+      {
+        ...context.input,
+        durationMs,
+        transcript: transcript.data,
+      },
+      { brief: ensured.brief }
+    );
+
+    await writeStage(payload, claimed.runId, "cut");
+    const items = result.items.map((item) => ({ ...item }));
+    const refinement = await refineSegmentCuts(
+      items,
+      grid,
+      shotTimesMs,
+      transcript.data.words[0]
+    );
+
     const chunks = await loadDedupeChunks(payload);
     const rows = buildSegmentRows(
-      result.items,
+      items,
       transcript.data.words,
       durationMs,
       chunks
     );
+    await writeStage(payload, claimed.runId, "review");
     const review = await reviewKeeps(rows, transcript.data.words);
 
     await withOrgScope(payload.organizationId, async (tx) => {
@@ -428,8 +556,10 @@ export async function runSegmentPlanPipeline(
               .length,
             grounded: rows.filter((row) => row.grounded).length,
             kept: rows.filter((row) => row.kind === "keep").length,
+            refinedCuts: refinement.calls,
             reviewed: review.verdicts.size,
             segments: rows.length,
+            toc: result.tableOfContents,
           },
           error: null,
           models: Object.fromEntries(
@@ -442,6 +572,42 @@ export async function runSegmentPlanPipeline(
           status: "ready",
         })
         .where(eq(segmentPlanRun.id, claimed.runId));
+
+      const summedPasses: [string, StructuredUsage | null, number][] = [
+        [
+          `segment:${payload.sourceId}:${claimed.attempt}:brief`,
+          ensured.usage,
+          1,
+        ],
+        [
+          `segment:${payload.sourceId}:${claimed.attempt}:cut`,
+          refinement.usage,
+          refinement.calls,
+        ],
+      ];
+      for (const [correlationId, usage, calls] of summedPasses) {
+        if (!usage) {
+          continue;
+        }
+        // biome-ignore lint/performance/noAwaitInLoops: few entries, same tx
+        await recordUsage(tx, {
+          correlationId,
+          entryType: "ai_tokens",
+          metadata: {
+            calls,
+            costUsd: usage.costUsd,
+            inputTokens: usage.inputTokens,
+            model: usage.model,
+            outputTokens: usage.outputTokens,
+            provider: usage.provider,
+            task: usage.task,
+          },
+          organizationId: payload.organizationId,
+          quantity: usage.inputTokens + usage.outputTokens,
+          sourceId: payload.sourceId,
+          unit: "tokens",
+        });
+      }
 
       if (review.usage) {
         await recordUsage(tx, {

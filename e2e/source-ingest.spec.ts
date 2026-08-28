@@ -132,7 +132,14 @@ test("a recording uploads, ingests, and plays as proxy with waveform scrubbing",
   // The fixture has both video and audio, so the pipeline emits all five.
   expect(
     [...new Set(artifacts.map((artifact) => artifact.kind))].sort()
-  ).toEqual(["audio", "hls_master", "poster", "thumbnail", "waveform"]);
+  ).toEqual([
+    "audio",
+    "hls_master",
+    "poster",
+    "shots",
+    "thumbnail",
+    "waveform",
+  ]);
 
   // …and the metered storage figure is those same bytes. The ledger entry
   // is derived from these rows, so any divergence means the derivation

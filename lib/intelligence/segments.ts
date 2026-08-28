@@ -180,9 +180,9 @@ function buildSlots(
 }
 
 function clampRaw(item: RawSegmentItem | null, durationMs: number) {
-  const rawStartMs = Math.max(0, Math.min(item?.startMs ?? 0, durationMs));
+  const rawStartMs = Math.max(0, Math.min(item ? item.startMs : 0, durationMs));
   return {
-    rawEndMs: Math.max(rawStartMs, Math.min(item?.endMs ?? 0, durationMs)),
+    rawEndMs: Math.max(rawStartMs, Math.min(item ? item.endMs : 0, durationMs)),
     rawStartMs,
   };
 }
@@ -225,6 +225,34 @@ function applyTwiceToldFlags(
       const target = keeps[position];
       if (target && !target.row.flags.includes("twice_told")) {
         target.row.flags.push("twice_told");
+      }
+    }
+  }
+}
+
+// Over-segmentation defense (docs/clip-cut-architecture.md §6): two
+// CONSECUTIVE keeps whose chunk-centroid cosine clears the twin threshold
+// are one chapter cut in two — flagged on both, merged by the human with
+// one click. Uniform over-segmentation is invisible to the relative
+// outlier flags (they compare against the plan's own median), which is
+// why this needs its own detector.
+function applySameTopicNeighborFlags(
+  rows: SegmentRow[],
+  chunks: readonly DedupeChunk[]
+): void {
+  const keeps = rows.filter((row) => row.kind === "keep");
+  const ranges: MsRange[] = keeps.map((row) => ({
+    endMs: row.endMs,
+    startMs: row.startMs,
+  }));
+  for (const [a, b] of semanticTwinPairs(ranges, chunks)) {
+    if (b !== a + 1) {
+      continue;
+    }
+    for (const position of [a, b]) {
+      const target = keeps[position];
+      if (target && !target.flags.includes("same_topic_neighbors")) {
+        target.flags.push("same_topic_neighbors");
       }
     }
   }
@@ -320,6 +348,7 @@ export function buildSegmentRows(
 
   applyOutlierFlags(rows);
   applyTwiceToldFlags(rows, chunks);
+  applySameTopicNeighborFlags(rows, chunks);
   for (const [index, row] of rows.entries()) {
     row.idx = index;
   }
