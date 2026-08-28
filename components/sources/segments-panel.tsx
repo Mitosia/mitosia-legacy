@@ -105,16 +105,19 @@ const FLAG_LABELS: Record<string, string> = {
   long_outlier: "Unusually long",
   merged_neighbor: "Merged proposals",
   no_anchor: "No anchor",
+  same_topic_neighbors: "Same topic as neighbor",
   short_outlier: "Unusually short",
   twice_told: "Told twice",
 };
 
 const REVIEW_FIX_LABELS: Record<string, string> = {
   drop: "Reviewer: consider dropping",
+  extend_end: "Reviewer: extend end",
   extend_start: "Reviewer: extend start",
   none: "Reviewer: check",
   retitle: "Reviewer: retitle",
   trim_end: "Reviewer: trim end",
+  trim_start: "Reviewer: trim start",
 };
 
 function stamp(ms: number): string {

@@ -33,6 +33,7 @@ import {
 import { sanitizeIngestError } from "./ingest-error";
 import { generatePeaks } from "./peaks";
 import { probeSource, type SourceProbe } from "./probe";
+import { detectShots } from "./shots";
 import { generatePoster, generateThumbnailStrip } from "./thumbs";
 import {
   assertCoversDuration,
@@ -63,7 +64,7 @@ export interface IngestPayload {
 }
 
 interface ArtifactUpload {
-  kind: "hls_master" | "poster" | "thumbnail" | "audio" | "waveform";
+  kind: "hls_master" | "poster" | "thumbnail" | "audio" | "waveform" | "shots";
   metadata?: Record<string, unknown>;
   // Required, not optional: an artifact row without a size is invisible to
   // per-artifact cost attribution, and the storage ledger entry is summed
@@ -383,6 +384,29 @@ async function runHlsStep(
     renderMasterPlaylist(entries, iframeEntries)
   );
 
+  // Shot-change grid (docs/clip-cut-architecture.md §7): a deterministic
+  // scene-score pass over the LOWEST just-verified local video rung —
+  // decode-bound and cheap next to the ladder itself. The artifact feeds
+  // the clip passes' shot-snap; its absence (older sources) degrades
+  // consumers to no-ops, so this never needs a backfill.
+  const shotsArtifact: ArtifactUpload[] = [];
+  const [proxyRung] = plan
+    .filter((variant) => variant.kind === "video")
+    .sort((a, b) => (a.height ?? 0) - (b.height ?? 0));
+  if (proxyRung) {
+    const shots = await detectShots(
+      join(hlsDir, proxyRung.dirName, "index.m3u8")
+    );
+    const shotsKey = `${keyPrefix}shots/shots.json`;
+    await putJson(shotsKey, shots);
+    shotsArtifact.push({
+      kind: "shots",
+      metadata: { events: shots.events.length, floor: shots.floor },
+      sizeBytes: Buffer.byteLength(JSON.stringify(shots)),
+      storageKey: shotsKey,
+    });
+  }
+
   // The ladder is built; pushing it to storage is the other half of this
   // stage and takes minutes at feature length. Reported as its own step so
   // the badge stops claiming "Preparing playback 100%" while thousands of
@@ -411,6 +435,7 @@ async function runHlsStep(
       sizeBytes: sumSizes(sizes),
       storageKey: `${keyPrefix}hls/master.m3u8`,
     },
+    ...shotsArtifact,
   ];
 }
 

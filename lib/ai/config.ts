@@ -29,6 +29,24 @@ export interface TaskRoute {
 // One row per AI task the product performs. S4 ships source analysis; S5+
 // tasks append rows rather than inventing new plumbing.
 export const TASK_ROUTES = {
+  // The Cutter (docs/clip-cut-architecture.md §4 Pass 3): one small call
+  // per clip over a ±90s sentence-ID reel — the fine cut. Sonnet at
+  // medium effort; budget = tiny ID payload + reasoning + thinking
+  // headroom (sonnet thinks by default and thinking counts).
+  "clip-fine.cut": {
+    effort: "medium",
+    maxOutputTokens: 3000,
+    tier: "sonnet",
+  },
+  // The Director (§4 Pass 1): the episode brief — spine, marquee arcs,
+  // drop zones — over the shared cached prefix. Opus: this is the pass
+  // where "plan like a real editor" lives, and the LAST place to
+  // economize. Budget: spine ≤40 + arcs ≤12 + drops ≤24 rows of short
+  // fields ≈ 4-5k payload + thinking headroom.
+  "episode-brief.compose": {
+    maxOutputTokens: 12_000,
+    tier: "opus",
+  },
   // LLM-as-judge scorers for the golden evals.
   "evals.judge": {
     maxOutputTokens: 2000,
@@ -47,9 +65,13 @@ export const TASK_ROUTES = {
   // its .max(8) with this change) and size the cap for the bounded worst
   // case, ~15.6k + ~12k thinking headroom over the observed high-water →
   // 32k. Budgets are allowances — only real tokens bill.
+  // Opus by default since the nine-model audition (2026-08-26 verdict,
+  // AGENTS.md): only model top-tier in both clip lanes, and CHEAPER than
+  // sonnet per run (6.8k output tokens vs 16-22k — it thinks less to
+  // decide). The env override below remains the audition path.
   "moment-discovery.candidates": {
     maxOutputTokens: 32_000,
-    tier: "sonnet",
+    tier: "opus",
   },
   // Cold-context reviewer verdict (S6 §9): one SMALL call per candidate
   // clip — input is only the clip's own span + title (a few k tokens, no
@@ -72,9 +94,10 @@ export const TASK_ROUTES = {
   // + thinking headroom (a 2.5h episode legitimately yields a long plan)
   // → 32k holds. Default effort — the coverage plan is core-bet editorial
   // judgment.
+  // Opus by default — the audition verdict, same as moment discovery.
   "segment-plan.partition": {
     maxOutputTokens: 32_000,
-    tier: "sonnet",
+    tier: "opus",
   },
   // Chapters/topics over a full transcript: broad, structured, cheap.
   // No effort: haiku rejects the parameter (see EFFORT_TIERS).
@@ -149,7 +172,10 @@ export type AiTask = keyof typeof TASK_ROUTES;
 // a first-party tier name ("opus"), or an OpenRouter model slug
 // ("moonshotai/kimi-k3") — the third-party audition path.
 const TIER_OVERRIDE_ENV: Partial<Record<AiTask, string>> = {
+  "clip-fine.cut": "CLIP_FINE_TIER",
+  "episode-brief.compose": "EPISODE_BRIEF_TIER",
   "moment-discovery.candidates": "MOMENT_DISCOVERY_TIER",
+  "moment-review.verdict": "MOMENT_REVIEW_TIER",
   "segment-plan.partition": "SEGMENT_PLAN_TIER",
 };
 

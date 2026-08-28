@@ -43,7 +43,7 @@ describe("tier overrides", () => {
 
   it("ignores invalid values", () => {
     process.env.MOMENT_DISCOVERY_TIER = "gpt-5";
-    expect(routeForTask("moment-discovery.candidates").tier).toBe("sonnet");
+    expect(routeForTask("moment-discovery.candidates").tier).toBe("opus");
   });
 
   it("drops effort when the override tier rejects it", () => {
@@ -59,7 +59,7 @@ describe("tier overrides", () => {
     expect(route.openrouterModel).toBe("moonshotai/kimi-k3");
     // The table row still supplies the output budget; effort (an
     // Anthropic-only parameter) never rides along on an audition.
-    expect(route.tier).toBe("sonnet");
+    expect(route.tier).toBe("opus");
     expect(route.maxOutputTokens).toBe(
       TASK_ROUTES["moment-discovery.candidates"].maxOutputTokens
     );
@@ -81,6 +81,6 @@ describe("tier overrides", () => {
     process.env.MOMENT_DISCOVERY_TIER = "not a model/id with spaces";
     const route = routeForTask("moment-discovery.candidates");
     expect(route.openrouterModel).toBeUndefined();
-    expect(route.tier).toBe("sonnet");
+    expect(route.tier).toBe("opus");
   });
 });

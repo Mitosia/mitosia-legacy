@@ -564,6 +564,10 @@ export interface MomentRow {
   composite: number;
   dedupeGroup: number | null;
   endMs: number;
+  // Deterministic observability flags (stale_open, lead_out_trimmed,
+  // unrefined, …) — docs/clip-cut-architecture.md §5. Inform, never
+  // auto-reject.
+  flags: string[];
   grounded: boolean;
   groundingScore: number;
   hook: string;
@@ -595,8 +599,13 @@ export function buildMomentRows(
   const processed = items.map((item) => {
     const rawStartMs = Math.max(0, Math.min(item.startMs, durationMs));
     const rawEndMs = Math.max(rawStartMs, Math.min(item.endMs, durationMs));
-    const snapped = captureLeadIn(
-      snapToSentences({ endMs: rawEndMs, startMs: rawStartMs }, words),
+    // Lead-in capture no longer runs here: the Cutter layer's two-turn
+    // question-aware backstop (grid.ts captureLeadInTwoTurn) is the single
+    // lead-in authority — applying both compounded, walking further back
+    // on every pass. captureLeadIn stays exported for the review UI's
+    // client-side helpers and its own tests.
+    const snapped = snapToSentences(
+      { endMs: rawEndMs, startMs: rawStartMs },
       words
     );
     const anchor = groundMomentAnchor(item.anchorText, snapped, tokens);
@@ -605,6 +614,7 @@ export function buildMomentRows(
       composite: compositeScore(item.scores),
       dedupeGroup: null as number | null,
       endMs: snapped.endMs,
+      flags: [] as string[],
       grounded: anchor.grounded && snapped.endMs > snapped.startMs,
       groundingScore: anchor.score,
       hook: item.hook,
@@ -621,7 +631,22 @@ export function buildMomentRows(
     };
   });
 
-  const grounded = processed.filter((row) => row.grounded);
+  return dedupeAndRankMomentRows(processed, chunks);
+}
+
+// Dedupe + strata ranking, callable again after the Cutter or the
+// revision round moves boundaries (refined boundaries can converge two
+// candidates — re-running IoU here is what keeps a converged pair from
+// shipping twice). Resets prior verdicts before re-applying.
+export function dedupeAndRankMomentRows(
+  rows: MomentRow[],
+  chunks: readonly DedupeChunk[]
+): MomentRow[] {
+  for (const row of rows) {
+    row.dedupeGroup = null;
+    row.suppressed = false;
+  }
+  const grounded = rows.filter((row) => row.grounded);
   const verdicts = dedupeCandidates(grounded, chunks);
   for (const [index, verdict] of verdicts.entries()) {
     const row = grounded[index];
@@ -633,13 +658,9 @@ export function buildMomentRows(
 
   const byComposite = (a: MomentRow, b: MomentRow) => b.composite - a.composite;
   const ordered = [
-    ...processed
-      .filter((row) => row.grounded && !row.suppressed)
-      .sort(byComposite),
-    ...processed
-      .filter((row) => row.grounded && row.suppressed)
-      .sort(byComposite),
-    ...processed.filter((row) => !row.grounded).sort(byComposite),
+    ...rows.filter((row) => row.grounded && !row.suppressed).sort(byComposite),
+    ...rows.filter((row) => row.grounded && row.suppressed).sort(byComposite),
+    ...rows.filter((row) => !row.grounded).sort(byComposite),
   ];
   for (const [rank, row] of ordered.entries()) {
     row.rank = rank;

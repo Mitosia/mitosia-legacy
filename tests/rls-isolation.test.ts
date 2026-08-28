@@ -9,9 +9,12 @@ import {
   campaign,
   client,
   contextSnapshot,
+  episodeBrief,
   momentCandidate,
   momentDiscoveryRun,
   project,
+  segmentClip,
+  segmentPlanRun,
   source,
   sourceAnalysis,
   sourceArtifact,
@@ -237,6 +240,42 @@ async function seedOrgChain(organizationId: string): Promise<SeededIds> {
       suppressed: false,
       title: `${organizationId} moment`,
     });
+    const [segmentRunRow] = await tx
+      .insert(segmentPlanRun)
+      .values({
+        organizationId,
+        revision: 1,
+        // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+        sourceId: sourceRow!.id,
+        status: "ready",
+      })
+      .returning({ id: segmentPlanRun.id });
+    await tx.insert(segmentClip).values({
+      endMs: 1000,
+      flags: [],
+      grounded: true,
+      groundingScore: 1,
+      idx: 0,
+      kind: "keep",
+      organizationId,
+      rawEndMs: 1000,
+      rawStartMs: 0,
+      revision: 1,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      runId: segmentRunRow!.id,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      sourceId: sourceRow!.id,
+      startMs: 0,
+      title: `${organizationId} segment`,
+    });
+    await tx.insert(episodeBrief).values({
+      brief: { seeded: true },
+      model: "mock",
+      organizationId,
+      revision: 1,
+      // biome-ignore lint/style/noNonNullAssertion: seeded row always returns
+      sourceId: sourceRow!.id,
+    });
     await tx.insert(sourceQuestion).values({
       answer: "seed answer",
       answerable: true,
@@ -333,6 +372,9 @@ const TENANT_TABLES = [
   { label: "source_extraction", table: sourceExtraction },
   { label: "moment_discovery_run", table: momentDiscoveryRun },
   { label: "moment_candidate", table: momentCandidate },
+  { label: "segment_plan_run", table: segmentPlanRun },
+  { label: "segment_clip", table: segmentClip },
+  { label: "episode_brief", table: episodeBrief },
   { label: "source_question", table: sourceQuestion },
   { label: "context_snapshot", table: contextSnapshot },
   { label: "source_analysis", table: sourceAnalysis },

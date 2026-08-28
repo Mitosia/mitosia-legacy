@@ -53,6 +53,9 @@ const ARTIFACT_KINDS = [
   "thumbnail",
   "audio",
   "waveform",
+  // Shot-change grid (docs/clip-cut-architecture.md §7): scene-score
+  // events from the proxy rung, consumed by the clip passes' shot-snap.
+  "shots",
 ] as const;
 export type ArtifactKind = (typeof ARTIFACT_KINDS)[number];
 

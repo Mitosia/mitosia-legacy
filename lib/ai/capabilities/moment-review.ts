@@ -16,12 +16,13 @@ import { generateStructured, type StructuredUsage } from "../generate";
 // The reviewer informs the human review — it never moves boundaries
 // itself, and a reviewer outage never fails discovery.
 
-// The one switch for the Reviewer agent across BOTH clip lanes (moments
-// and segments): MOMENT_REVIEWER=on enables it; mock analysis mode always
+// The Reviewer runs BY DEFAULT across both clip lanes (decision
+// 2026-08-28: the cutting room ships whole — no switches to remember).
+// MOMENT_REVIEWER=off is the escape hatch; mock analysis mode always
 // reviews so the CI chain proves the path.
 export function reviewerEnabled(): boolean {
   return (
-    process.env.MOMENT_REVIEWER === "on" ||
+    process.env.MOMENT_REVIEWER !== "off" ||
     process.env.ANALYSIS_PROVIDER === "mock"
   );
 }
@@ -41,7 +42,9 @@ const verdictSchema = z
     suggestedFix: z.enum([
       "none",
       "extend_start",
+      "trim_start",
       "trim_end",
+      "extend_end",
       "retitle",
       "drop",
     ]),
@@ -53,6 +56,11 @@ export type MomentReviewVerdict = z.infer<typeof verdictSchema>;
 export interface ReviewableMoment {
   hook: string;
   id: string;
+  // Lane-specific rubric emphasis: a moment is judged as a short (hook
+  // velocity, one beat); a chapter as a topic (setup, development,
+  // resolution of ONE subject — a chapter that feels like a short scores
+  // badly on its own lane's axis).
+  lane: "chapter" | "moment";
   // Display-form transcript text of exactly [startMs, endMs] — the whole
   // context the reviewer gets.
   spanText: string;
@@ -79,8 +87,21 @@ Score each rubric 0, 1, or 2:
   related; 0 = misleading.
 
 suggestedFix — exactly one of: none | extend_start (opening lacks its
-setup) | trim_end (runs past the payoff) | retitle (content fine, packaging
-wrong) | drop (no fix would make this stand alone).
+setup) | trim_start (opens on leftover tail of a previous topic) |
+trim_end (runs past the payoff) | extend_end (cuts before the payoff
+lands) | retitle (content fine, packaging wrong) | drop (no fix would
+make this stand alone).
+
+The clip's first and last lines are quoted as OPENS ON / CLOSES ON —
+judge those cut points explicitly: does the opening orient, does the
+close land.
+
+LANE tells you what this clip is meant to be. A "moment" is a short: one
+beat, hook in the first seconds, payoff at the close. A "chapter" is a
+topic a viewer picks from an episode's chapter list: judge whether ONE
+subject gets its setup, development, and resolution — a chapter that
+feels like a quick short (a lone beat with no development) fails
+standsAlone for its lane, and extra runway is normal, not a flaw.
 
 Guardrails:
 - Do NOT penalize a clip for including its setup question or a slightly
@@ -89,6 +110,18 @@ Guardrails:
   grammar are normal — never penalize them.
 - notes: one or two sentences naming the single most important issue, or
   what works if none.`;
+
+// The first/last ~15 words set off explicitly — M1 measured the cut
+// points as the failure surface, so the cold read is pointed at them.
+const EDGE_WORDS = 15;
+const WHITESPACE = /\s+/;
+
+function reviewPrompt(moment: ReviewableMoment): string {
+  const words = moment.spanText.split(WHITESPACE).filter(Boolean);
+  const opens = words.slice(0, EDGE_WORDS).join(" ");
+  const closes = words.slice(Math.max(0, words.length - EDGE_WORDS)).join(" ");
+  return `LANE: ${moment.lane}\nTITLE: ${moment.title}\nHOOK: ${moment.hook}\nOPENS ON: ${opens}\nCLOSES ON: ${closes}\n\nCLIP TRANSCRIPT:\n${moment.spanText}`;
+}
 
 export async function reviewMoments(
   moments: readonly ReviewableMoment[]
@@ -102,7 +135,7 @@ export async function reviewMoments(
       generateStructured(
         "moment-review.verdict",
         SYSTEM,
-        `TITLE: ${moment.title}\nHOOK: ${moment.hook}\n\nCLIP TRANSCRIPT:\n${moment.spanText}`,
+        reviewPrompt(moment),
         verdictSchema
       )
     )
