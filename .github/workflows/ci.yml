@@ -217,6 +217,7 @@ jobs:
             specs: >-
               e2e/ingest-reaper.spec.ts
               e2e/source-ingest.spec.ts
+              e2e/upload-reaper.spec.ts
               e2e/upload-resume.spec.ts
               e2e/offline-resilience.spec.ts
           - shard: workspace
@@ -225,7 +226,6 @@ jobs:
               e2e/source-intelligence.spec.ts
               e2e/transcript-viewer.spec.ts
               e2e/upload-adopt.spec.ts
-              e2e/upload-reaper.spec.ts
     # Measured at ~4 minutes (2 parallel workers). A run with no ceiling sat
     # on a stalled Playwright download for 3.5 hours before anyone noticed,
     # holding up a merge the whole time; GitHub's own default is 6 hours,
