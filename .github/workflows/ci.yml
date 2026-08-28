@@ -1,8 +1,6 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
 
 concurrency:
@@ -26,11 +24,11 @@ env:
   STORAGE_FORCE_PATH_STYLE: "true"
 
 jobs:
-  # Classifies the diff so docs-only changes skip the e2e job: half of the
+  # Classifies the diff so docs-only changes skip validation: half of the
   # merges to main touch nothing but docs/ and *.md (measured 19 of 39 on
   # 2026-08-24), and each was paying the full ~4.5-minute e2e run for it.
-  # A required check skipped via `if:` satisfies branch protection, so
-  # docs-only PRs merge on `checks` alone.
+  # Required checks skipped via `if:` satisfy branch protection, so
+  # docs-only PRs only pay for this small classifier.
   #
   # Fail-open by construction: any uncertainty — force-push, zero SHA,
   # git error, or this job failing outright — must RUN e2e, never skip it.
@@ -40,10 +38,6 @@ jobs:
   # runs. Skipping e2e on a code change is the failure mode that lets a
   # regression merge; ~15 s of classifier on every run is the premium.
   #
-  # Knock-on, and deliberate: a docs-only merge to main also skips
-  # deploy-trigger (its `needs` includes e2e, and a skipped need skips the
-  # dependent). Correct, because .md files reach neither the app image nor
-  # the Trigger bundle — a deploy would rebuild an identical worker.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -59,18 +53,11 @@ jobs:
       - name: Classify the diff
         id: classify
         env:
-          EVENT: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
-          BEFORE: ${{ github.event.before }}
         run: |
-          files=""
-          if [ "$EVENT" = "pull_request" ]; then
-            # HEAD is the PR merge commit; three-dot against the base is
-            # exactly the PR's file set.
-            files=$(git diff --name-only "origin/${BASE_REF}...HEAD" 2>/dev/null || true)
-          elif [ "$EVENT" = "push" ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
-            files=$(git diff --name-only "$BEFORE" HEAD 2>/dev/null || true)
-          fi
+          # HEAD is the PR merge commit; three-dot against the base is
+          # exactly the PR's file set.
+          files=$(git diff --name-only "origin/${BASE_REF}...HEAD" 2>/dev/null || true)
           if [ -z "$files" ]; then
             echo "Could not classify the diff — running the full pipeline."
             echo "code=true" >> "$GITHUB_OUTPUT"
@@ -80,12 +67,16 @@ jobs:
           if echo "$files" | grep -qvE '^docs/|\.md$'; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Docs-only diff — the e2e job (and any deploy) will be skipped."
+            echo "Docs-only diff — validation jobs will be skipped."
             echo "code=false" >> "$GITHUB_OUTPUT"
           fi
 
   checks:
     runs-on: ubuntu-latest
+    needs: changes
+    # Fail open if classification is unavailable; only an explicit docs-only
+    # result skips validation.
+    if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
     # Measured at ~3 minutes; this is a hang backstop, not a budget.
     timeout-minutes: 15
     env:
@@ -123,9 +114,6 @@ jobs:
       - name: Lint and format check
         run: pnpm check
 
-      - name: Typecheck
-        run: pnpm typecheck
-
       - name: Cross-tenant isolation tests
         run: pnpm test
 
@@ -149,6 +137,9 @@ jobs:
             nextjs-${{ runner.os }}-
 
       - name: Build
+        # Next 16.3 runs the project-local tsc CLI during `next build`, so a
+        # separate `next typegen && tsc --noEmit` immediately beforehand was
+        # the same full-project type check twice.
         run: pnpm build
 
       # ——— Production-parity e2e (playwright.prod.config.ts) ———
@@ -205,7 +196,8 @@ jobs:
           DATABASE_URL: postgres://ci_app:ci_app@localhost:5432/ci
         run: pnpm e2e:prod
 
-  e2e:
+  e2e-shards:
+    name: e2e / ${{ matrix.shard }}
     runs-on: ubuntu-latest
     needs: changes
     # `!= 'false'`, not `== 'true'`: if the classifier fails, its output is
@@ -214,6 +206,26 @@ jobs:
     # without it a dead classifier would silently skip e2e, and a skipped
     # required check MERGES.
     if: ${{ !cancelled() && needs.changes.outputs.code != 'false' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Balanced from real CI durations on 2026-08-28. Separate runners
+          # provide four CPUs without oversubscribing a 2-vCPU machine (three
+          # Playwright workers on one runner already proved flaky in PR #62).
+          - shard: pipeline
+            specs: >-
+              e2e/ingest-reaper.spec.ts
+              e2e/source-ingest.spec.ts
+              e2e/upload-resume.spec.ts
+              e2e/offline-resilience.spec.ts
+          - shard: workspace
+            specs: >-
+              e2e/app-shell.spec.ts
+              e2e/source-intelligence.spec.ts
+              e2e/transcript-viewer.spec.ts
+              e2e/upload-adopt.spec.ts
+              e2e/upload-reaper.spec.ts
     # Measured at ~4 minutes (2 parallel workers). A run with no ceiling sat
     # on a stalled Playwright download for 3.5 hours before anyone noticed,
     # holding up a merge the whole time; GitHub's own default is 6 hours,
@@ -297,7 +309,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: e2e/.fixtures
-          key: e2e-fixtures-${{ runner.os }}-${{ hashFiles('e2e/**/*.spec.ts') }}
+          # Per-shard keys prevent two cold jobs racing to save different
+          # partial fixture directories under one immutable cache key.
+          key: e2e-fixtures-${{ runner.os }}-${{ matrix.shard }}-${{ hashFiles('e2e/**/*.spec.ts') }}
 
       # The ingest e2e generates its fixture and runs the real pipeline, so
       # CI's ffmpeg has to be the one the image ships (Alpine 3.24 → 8.1.x).
@@ -366,7 +380,10 @@ jobs:
           SQL
 
       - name: Run end-to-end tests
-        run: pnpm e2e
+        # Invoke Playwright directly: `pnpm e2e -- files...` inserts a literal
+        # `--` before the file filters, causing Playwright to ignore them and
+        # run the full suite in both shards.
+        run: pnpm exec playwright test ${{ matrix.specs }}
 
       # Traces (recorded on first retry) are the only way to debug a
       # headless-only playback failure.
@@ -374,71 +391,30 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: playwright-test-results
+          name: playwright-test-results-${{ matrix.shard }}
           path: test-results/
           retention-days: 7
 
-  # Deploys the trigger/ tasks to Trigger.dev cloud on every merge to main,
-  # after CI is green. The app deploys itself through Dokploy's webhook, but
-  # the worker image only updates through an explicit `trigger.dev deploy` —
-  # previously a manual step, which meant the deployed worker could drift
-  # arbitrarily far behind main.
-  #
-  # Opt-in switch: the TRIGGER_PROJECT_REF repository VARIABLE. Until it
-  # exists this job is skipped (vars are readable in job-level `if`; secrets
-  # are not). Setting the variable without also adding the
-  # TRIGGER_ACCESS_TOKEN repository secret (a tr_pat_… personal access token
-  # from the Trigger.dev dashboard) is a misconfiguration and fails loudly
-  # rather than skipping. Setup steps: docs/media-infra-setup.md.
-  #
-  # The server env (STORAGE_*, DATABASE_URL, BETTER_AUTH_SECRET,
-  # DEEPGRAM_API_KEY, …) must already be set in the Trigger environment:
-  # deploy *indexes* tasks by importing them, and lib/env.ts parses the whole
-  # schema at import, so a missing var aborts the deploy — not the first run.
-  #
-  # Note the workflow-level concurrency group cancels an in-flight deploy
-  # when another merge lands; Trigger.dev deploys promote atomically
-  # server-side, so a cancelled upload just never promotes.
-  deploy-trigger:
+  # Branch protection requires one stable `e2e` context. The expensive work
+  # happens above on two runners; this tiny fan-in keeps that context stable
+  # and also succeeds for an intentional docs-only skip.
+  e2e:
     runs-on: ubuntu-latest
-    needs: [checks, e2e]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TRIGGER_PROJECT_REF != ''
-    # Remote image build on Trigger's side; measured deploys are a few
-    # minutes. Hang backstop, not a budget.
-    timeout-minutes: 15
+    needs: [changes, e2e-shards]
+    if: ${{ always() }}
+    timeout-minutes: 2
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: pnpm
-
-      # The CLI bundles trigger.config.ts and the task modules with esbuild,
-      # resolving imports from node_modules — deps must be installed.
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile
-
-      # The CLI version is derived from @trigger.dev/sdk in package.json:
-      # CLI/SDK drift breaks deploys (S3 lesson, docs/media-infra-setup.md),
-      # and deriving it here means a dependency bump moves both together.
-      # Never @latest.
-      - name: Deploy trigger tasks
+      - name: Verify e2e shards
         env:
-          TRIGGER_ACCESS_TOKEN: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
-          TRIGGER_PROJECT_REF: ${{ vars.TRIGGER_PROJECT_REF }}
-          # Config-eval downloads the pinned ffmpeg from this repo's own
-          # ffmpeg-static/* release into the image build context — Trigger's
-          # remote builders cannot reach a private-repo release themselves
-          # (scripts/ffmpeg-pin.mjs).
-          GH_TOKEN: ${{ github.token }}
+          CODE_CHANGE: ${{ needs.changes.outputs.code }}
+          SHARDS_RESULT: ${{ needs.e2e-shards.result }}
         run: |
-          if [ -z "$TRIGGER_ACCESS_TOKEN" ]; then
-            echo "::error::TRIGGER_PROJECT_REF variable is set but the TRIGGER_ACCESS_TOKEN secret is missing — add a tr_pat_… token from the Trigger.dev dashboard as a repo secret."
+          if [ "$CODE_CHANGE" = "false" ]; then
+            echo "Docs-only change — e2e intentionally skipped."
+            exit 0
+          fi
+          if [ "$SHARDS_RESULT" != "success" ]; then
+            echo "::error::One or more e2e shards did not pass (result: $SHARDS_RESULT)."
             exit 1
           fi
-          CLI_VERSION=$(node -p "require('./package.json').dependencies['@trigger.dev/sdk'].replace(/^[~^]/, '')")
-          echo "Deploying with trigger.dev@${CLI_VERSION} (pinned to @trigger.dev/sdk)"
-          npx "trigger.dev@${CLI_VERSION}" deploy
+          echo "All e2e shards passed."

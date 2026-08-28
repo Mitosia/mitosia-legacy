@@ -1,0 +1,65 @@
+name: Deploy Trigger.dev
+
+on:
+  push:
+    branches: [main]
+    # The app deploys independently through Dokploy. Rebuild the worker only
+    # when its entrypoints, broad server-side dependency tree, build config,
+    # database contract, or installed dependencies change. This deliberately
+    # over-includes lib/**; an unnecessary worker deploy is cheaper than a
+    # stale task caused by a brittle hand-maintained import list.
+    paths:
+      - "trigger/**"
+      - "trigger.config.ts"
+      - "lib/**"
+      - "drizzle/**"
+      - "scripts/check-ffmpeg-version.mjs"
+      - "scripts/ffmpeg-pin.mjs"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "tsconfig.json"
+
+concurrency:
+  group: deploy-trigger-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Main is protected by strict, admin-enforced PR checks, so the tree arriving
+  # here has already passed CI. Starting immediately avoids rerunning the same
+  # 6-minute suite before updating the worker.
+  deploy-trigger:
+    runs-on: ubuntu-latest
+    if: vars.TRIGGER_PROJECT_REF != ''
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The CLI bundles trigger.config.ts and the task modules with esbuild,
+      # resolving imports from node_modules — dependencies must be installed.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The CLI version is derived from @trigger.dev/sdk in package.json:
+      # CLI/SDK drift breaks deploys, and deriving it here moves both together.
+      - name: Deploy trigger tasks
+        env:
+          TRIGGER_ACCESS_TOKEN: ${{ secrets.TRIGGER_ACCESS_TOKEN }}
+          TRIGGER_PROJECT_REF: ${{ vars.TRIGGER_PROJECT_REF }}
+          # Config evaluation downloads the pinned private release asset into
+          # the Trigger image build context.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -z "$TRIGGER_ACCESS_TOKEN" ]; then
+            echo "::error::TRIGGER_PROJECT_REF is set but TRIGGER_ACCESS_TOKEN is missing."
+            exit 1
+          fi
+          CLI_VERSION=$(node -p "require('./package.json').dependencies['@trigger.dev/sdk'].replace(/^[~^]/, '')")
+          echo "Deploying with trigger.dev@${CLI_VERSION} (pinned to @trigger.dev/sdk)"
+          npx "trigger.dev@${CLI_VERSION}" deploy
