@@ -12,6 +12,7 @@ export const EXTRACTION_STALL_TTL_MINUTES = 20;
 // post-processing — comfortably inside the extraction envelope.
 export const DISCOVERY_STALL_TTL_MINUTES = 20;
 
-// Segment planning is one partition call plus per-keep reviewer calls —
-// the same envelope as discovery.
+// Segment planning can include multiple full-episode model passes plus
+// per-boundary and per-keep calls. The pipeline heartbeats once per minute,
+// so this is a silence window rather than a maximum runtime.
 export const SEGMENT_STALL_TTL_MINUTES = 20;

@@ -97,18 +97,24 @@ interface Slot {
   startWord: number;
 }
 
-// A collapsed proposal joins an existing slot: flagged for the reviewer,
-// keeping the more content-bearing identity.
-function absorbItem(slot: Slot, item: RawSegmentItem): void {
+function itemAnchorCandidates(item: RawSegmentItem): string[] {
+  return [...new Set([item.anchorText, ...(item.anchorCandidates ?? [])])]
+    .map((candidate) => candidate?.trim() ?? "")
+    .filter(Boolean);
+}
+
+// A proposal whose allotted slot has no audible duration contributes no
+// editorial identity. Fold only its vacuous words into the previous slot and
+// flag the collapse; never let an inaudible KEEP/DROP atom replace the
+// previous audible side of a hard barrier.
+function absorbVacuousSlot(slot: Slot): void {
   slot.merged = true;
-  if (slot.item?.kind !== "keep" && item.kind === "keep") {
-    slot.item = item;
-  }
 }
 
 // Partition the word range into slots from the proposed items' snapped
 // starts. Items map to slots in order; a collapsed cut (two proposals
-// snapping to one point) merges neighbors, preferring the keep's identity.
+// snapping to one point) folds the vacuous proposal into the audible side
+// without changing that side's KEEP/DROP identity.
 // A slot whose words span zero time merges the same way: Deepgram rounds
 // sub-centisecond words to equal start/end ms, so a proposal cutting
 // exactly at the final word's end would otherwise stand as a zero-length
@@ -143,6 +149,7 @@ function buildSlots(
   }
 
   let cursor = leadIsAudible ? leadIndex : 0;
+  let pendingVacuousCollapse = false;
   for (const [position, item] of sorted.entries()) {
     const nextItem = sorted[position + 1];
     const nextCut = nextItem
@@ -152,7 +159,9 @@ function buildSlots(
     if (nextCut <= cursor) {
       // The next proposal's cut collapsed into this slot: merge.
       if (current) {
-        absorbItem(current, item);
+        absorbVacuousSlot(current);
+      } else {
+        pendingVacuousCollapse = true;
       }
       continue;
     }
@@ -160,20 +169,24 @@ function buildSlots(
       // Zero-length slot: its words are inaudible, so the previous slot
       // absorbs both them and the proposal's identity. With no previous
       // slot the words fold forward into the next one instead (cursor
-      // stays) and the vacuous proposal is discarded.
+      // stays); the next audible slot records the discarded identity as a
+      // merged neighbor.
       if (current) {
-        absorbItem(current, item);
+        absorbVacuousSlot(current);
         current.endWord = nextCut - 1;
         cursor = nextCut;
+      } else {
+        pendingVacuousCollapse = true;
       }
       continue;
     }
     slots.push({
       endWord: nextCut - 1,
       item,
-      merged: false,
+      merged: pendingVacuousCollapse,
       startWord: cursor,
     });
+    pendingVacuousCollapse = false;
     cursor = nextCut;
   }
   return slots.filter((slot) => slot.endWord >= slot.startWord);
@@ -240,18 +253,21 @@ function applySameTopicNeighborFlags(
   rows: SegmentRow[],
   chunks: readonly DedupeChunk[]
 ): void {
-  const keeps = rows.filter((row) => row.kind === "keep");
-  const ranges: MsRange[] = keeps.map((row) => ({
+  const keeps = rows
+    .map((row, rowIndex) => ({ row, rowIndex }))
+    .filter(({ row }) => row.kind === "keep");
+  const ranges: MsRange[] = keeps.map(({ row }) => ({
     endMs: row.endMs,
     startMs: row.startMs,
   }));
   for (const [a, b] of semanticTwinPairs(ranges, chunks)) {
-    if (b !== a + 1) {
+    const left = keeps[a];
+    const right = keeps[b];
+    if (!(left && right) || right.rowIndex !== left.rowIndex + 1) {
       continue;
     }
-    for (const position of [a, b]) {
-      const target = keeps[position];
-      if (target && !target.flags.includes("same_topic_neighbors")) {
+    for (const target of [left.row, right.row]) {
+      if (!target.flags.includes("same_topic_neighbors")) {
         target.flags.push("same_topic_neighbors");
       }
     }
@@ -264,20 +280,37 @@ function slotGrounding(
   endMs: number,
   tokens: ReturnType<typeof tokenizeWords>,
   flags: string[]
-): { grounded: boolean; groundingScore: number } {
+): {
+  anchorText: string | null;
+  grounded: boolean;
+  groundingScore: number;
+} {
   if (item?.kind !== "keep") {
-    return { grounded: true, groundingScore: 1 };
+    return { anchorText: null, grounded: true, groundingScore: 1 };
   }
-  if (!item.anchorText) {
+  const candidates = itemAnchorCandidates(item);
+  if (candidates.length === 0) {
     flags.push("no_anchor");
-    return { grounded: false, groundingScore: 0 };
+    return { anchorText: null, grounded: false, groundingScore: 0 };
   }
-  const aligned = alignExtraction(item.anchorText, startMs, endMs, tokens);
-  return {
-    grounded:
-      aligned.grounded && aligned.startMs >= startMs && aligned.endMs <= endMs,
-    groundingScore: aligned.score,
-  };
+  let best: { score: number; text: string } | null = null;
+  for (const text of candidates) {
+    const aligned = alignExtraction(text, startMs, endMs, tokens);
+    const grounded =
+      aligned.grounded && aligned.startMs >= startMs && aligned.endMs <= endMs;
+    if (grounded && (best === null || aligned.score > best.score)) {
+      best = { score: aligned.score, text };
+    }
+  }
+  if (best) {
+    return {
+      anchorText: best.text,
+      grounded: true,
+      groundingScore: best.score,
+    };
+  }
+  flags.push("no_anchor");
+  return { anchorText: null, grounded: false, groundingScore: 0 };
 }
 
 function slotToRow(
@@ -299,7 +332,7 @@ function slotToRow(
 
   const { rawEndMs, rawStartMs } = clampRaw(item, durationMs);
   const isKeep = item?.kind === "keep";
-  const { grounded, groundingScore } = slotGrounding(
+  const { anchorText, grounded, groundingScore } = slotGrounding(
     item,
     startMs,
     endMs,
@@ -308,7 +341,7 @@ function slotToRow(
   );
 
   return {
-    anchorText: isKeep ? (item?.anchorText ?? null) : null,
+    anchorText: isKeep ? anchorText : null,
     dropReason: isKeep
       ? null
       : (item?.dropReason ?? ("other" as SegmentDropReason)),
@@ -381,6 +414,12 @@ export function checkPartition(
     issues.push("plan does not end at the last word");
   }
   const wordStarts = new Set(words.map((word) => word.startMs));
+  const adjacentWordCuts = new Set(
+    words.slice(0, -1).map((word, index) => {
+      const next = words[index + 1];
+      return `${word.endMs}:${next?.startMs ?? "missing"}`;
+    })
+  );
   for (const [index, row] of rows.entries()) {
     if (row.endMs <= row.startMs) {
       issues.push(`segment ${index} has an empty range`);
@@ -397,6 +436,9 @@ export function checkPartition(
     }
     if (!wordStarts.has(next.startMs)) {
       issues.push(`segment ${index + 1} starts off the word timeline`);
+    }
+    if (!adjacentWordCuts.has(`${row.endMs}:${next.startMs}`)) {
+      issues.push(`segments ${index} and ${index + 1} omit timeline words`);
     }
   }
   return { issues, ok: issues.length === 0 };

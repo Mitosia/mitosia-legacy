@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   scoreChapters,
+  scoreSegmentBoundaries,
   scoreSpeakerSuggestions,
   scoreSummary,
+  segmentBoundaryDecisions,
 } from "../lib/ai/evals/scorers";
 
 const goodChapters = [
@@ -93,5 +95,87 @@ describe("scoreSummary", () => {
         "## Heading\nA summary with markdown that is otherwise long enough to pass the length gate. It even has two sentences."
       ).issues.join(" ")
     ).toContain("markdown");
+  });
+});
+
+describe("scoreSegmentBoundaries", () => {
+  const atoms = [{ atomId: "A000" }, { atomId: "A001" }, { atomId: "A002" }];
+
+  it("derives keep/remove decisions from exact-cover groups", () => {
+    expect(
+      segmentBoundaryDecisions(atoms, [
+        { atomIds: ["A000", "A001"] },
+        { atomIds: ["A002"] },
+      ])
+    ).toEqual([
+      { afterAtomId: "A000", keep: false },
+      { afterAtomId: "A001", keep: true },
+    ]);
+  });
+
+  it("passes a plan that matches both boundary classes", () => {
+    const decisions = [
+      { afterAtomId: "A000", keep: false },
+      { afterAtomId: "A001", keep: true },
+    ];
+
+    expect(scoreSegmentBoundaries(decisions, decisions)).toEqual({
+      issues: [],
+      score: 1,
+    });
+  });
+
+  it("catches uniform over-fragmentation without a duration threshold", () => {
+    const report = scoreSegmentBoundaries(
+      [
+        { afterAtomId: "A000", keep: true },
+        { afterAtomId: "A001", keep: true },
+      ],
+      [
+        {
+          afterAtomId: "A000",
+          keep: false,
+          note: "question and direct answer",
+        },
+        { afterAtomId: "A001", keep: true, note: "new subject" },
+      ]
+    );
+
+    expect(report.score).toBe(0.5);
+    expect(report.issues.join(" ")).toContain("gold removes");
+  });
+
+  it("penalizes over-merging symmetrically", () => {
+    const report = scoreSegmentBoundaries(
+      [
+        { afterAtomId: "A000", keep: false },
+        { afterAtomId: "A001", keep: false },
+      ],
+      [
+        { afterAtomId: "A000", keep: false },
+        { afterAtomId: "A001", keep: true, note: "new subject" },
+      ]
+    );
+
+    expect(report.score).toBe(0.5);
+    expect(report.issues.join(" ")).toContain("gold keeps");
+  });
+
+  it("scores only the high-confidence boundaries supplied by a fixture", () => {
+    const report = scoreSegmentBoundaries(
+      [
+        { afterAtomId: "A000", keep: true },
+        { afterAtomId: "A001", keep: false },
+      ],
+      [{ afterAtomId: "A001", keep: false }]
+    );
+
+    expect(report).toEqual({ issues: [], score: 1 });
+  });
+
+  it("rejects an incomplete reconciliation inventory", () => {
+    expect(() =>
+      segmentBoundaryDecisions(atoms, [{ atomIds: ["A000", "A002"] }])
+    ).toThrow("A001 is missing");
   });
 });

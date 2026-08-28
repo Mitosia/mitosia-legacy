@@ -19,22 +19,32 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import {
   decideSegmentAction,
+  mergeSegmentAction,
   planSegmentsAction,
   restoreSegmentAction,
   saveSegmentBoundariesAction,
+  saveSegmentMetadataAction,
 } from "@/lib/actions/segments";
-import {
-  sentenceEndTimes,
-  sentenceStartTimes,
-} from "@/lib/intelligence/moments";
+import { sentenceStartTimes } from "@/lib/intelligence/moments";
 import type { TranscriptData } from "@/lib/transcription/types";
 import type { RangePlayback } from "./use-range-playback";
 
@@ -102,12 +112,16 @@ const DROP_REASON_LABELS: Record<string, string> = {
 
 const FLAG_LABELS: Record<string, string> = {
   gap_fill: "Uncovered stretch",
+  human_merged: "Merged by editor",
+  human_restored: "Restored by editor",
   long_outlier: "Unusually long",
   merged_neighbor: "Merged proposals",
+  needs_metadata_review: "Review title and summary",
   no_anchor: "No anchor",
   same_topic_neighbors: "Same topic as neighbor",
   short_outlier: "Unusually short",
   twice_told: "Told twice",
+  ungrounded_after_edit: "Anchor falls outside edited range",
 };
 
 const REVIEW_FIX_LABELS: Record<string, string> = {
@@ -141,6 +155,14 @@ function formatMinutes(ms: number): string {
     : `${minutes.toFixed(1)} min`;
 }
 
+function effectiveStart(segment: SegmentView): number {
+  return segment.adjustedStartMs ?? segment.startMs;
+}
+
+function effectiveEnd(segment: SegmentView): number {
+  return segment.adjustedEndMs ?? segment.endMs;
+}
+
 export function PlanSegmentsButton({
   label = "Plan segment clips again",
   sourceId,
@@ -170,26 +192,57 @@ export function PlanSegmentsButton({
         {pending ? "Starting…" : label}
       </Button>
       {state.error ? (
-        <p
-          className="text-destructive text-sm"
-          data-testid="rerun-segments-error"
-        >
-          {state.error}
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p
+            className="text-destructive text-sm"
+            data-testid="rerun-segments-error"
+          >
+            {state.error}
+          </p>
+          {state.error.includes("human review or edits") ? (
+            <>
+              <input
+                name="expectedRunId"
+                type="hidden"
+                value={state.protectedRunId}
+              />
+              <input
+                name="expectedEditVersion"
+                type="hidden"
+                value={state.protectedEditVersion}
+              />
+              <Button
+                disabled={pending}
+                name="force"
+                size="sm"
+                type="submit"
+                value="true"
+                variant="destructive"
+              >
+                Re-plan and discard edits
+              </Button>
+            </>
+          ) : null}
+        </div>
       ) : null}
     </form>
   );
 }
 
 function SegmentNudges({
+  nextSegment,
   onPlayFrom,
+  previousSegment,
   segment,
   words,
 }: {
+  nextSegment: SegmentView | null;
   onPlayFrom: (startMs: number, endMs: number) => void;
+  previousSegment: SegmentView | null;
   segment: SegmentView;
   words: TranscriptData["words"] | null;
 }) {
+  const router = useRouter();
   const [bounds, setBounds] = useState({
     inMs: segment.adjustedStartMs ?? segment.startMs,
     outMs: segment.adjustedEndMs ?? segment.endMs,
@@ -210,13 +263,17 @@ function SegmentNudges({
     saveSegmentBoundariesAction,
     {}
   );
+  useEffect(() => {
+    if (state.success) {
+      router.refresh();
+    }
+  }, [state.success, router]);
 
   const grid = useMemo(() => {
     if (!words || words.length === 0) {
       return null;
     }
     return {
-      ends: sentenceEndTimes(words),
       starts: sentenceStartTimes(words),
     };
   }, [words]);
@@ -229,37 +286,63 @@ function SegmentNudges({
       times.filter((time) => time < at).at(-1);
     const after = (times: number[], at: number) =>
       times.find((time) => time > at);
-    const valid = (nextIn: number | undefined, nextOut: number | undefined) =>
-      nextIn !== undefined && nextOut !== undefined && nextIn < nextOut
-        ? { in: nextIn, out: nextOut }
+    const valid = (
+      boundary: number | undefined,
+      outerStart: number,
+      outerEnd: number
+    ) =>
+      boundary !== undefined && boundary > outerStart && boundary < outerEnd
+        ? boundary
         : undefined;
     return {
-      inNext: valid(after(grid.starts, inMs), outMs),
-      inPrev: valid(before(grid.starts, inMs), outMs),
-      outNext: valid(inMs, after(grid.ends, outMs)),
-      outPrev: valid(inMs, before(grid.ends, outMs)),
+      inNext: previousSegment
+        ? valid(
+            after(grid.starts, inMs),
+            effectiveStart(previousSegment),
+            outMs
+          )
+        : undefined,
+      inPrev: previousSegment
+        ? valid(
+            before(grid.starts, inMs),
+            effectiveStart(previousSegment),
+            outMs
+          )
+        : undefined,
+      outNext: nextSegment
+        ? valid(after(grid.starts, outMs), inMs, effectiveEnd(nextSegment))
+        : undefined,
+      outPrev: nextSegment
+        ? valid(before(grid.starts, outMs), inMs, effectiveEnd(nextSegment))
+        : undefined,
     };
-  }, [grid, inMs, outMs]);
+  }, [grid, inMs, nextSegment, outMs, previousSegment]);
 
   const nudge = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       const key = event.currentTarget.dataset.nudge as
         | keyof NonNullable<typeof targets>
         | undefined;
-      const target = key ? targets?.[key] : undefined;
-      if (!target) {
+      const boundaryMs = key ? targets?.[key] : undefined;
+      const editsStart = key?.startsWith("in") ?? false;
+      const leftSegment = editsStart ? previousSegment : segment;
+      const rightSegment = editsStart ? segment : nextSegment;
+      if (
+        boundaryMs === undefined ||
+        leftSegment === null ||
+        rightSegment === null
+      ) {
         return;
       }
-      setBounds({ inMs: target.in, outMs: target.out });
       const formData = new FormData();
-      formData.set("segmentId", segment.id);
-      formData.set("adjustedStartMs", String(target.in));
-      formData.set("adjustedEndMs", String(target.out));
+      formData.set("boundaryMs", String(boundaryMs));
+      formData.set("leftSegmentId", leftSegment.id);
+      formData.set("rightSegmentId", rightSegment.id);
       startTransition(() => {
         formAction(formData);
       });
     },
-    [targets, segment.id, formAction]
+    [targets, previousSegment, segment, nextSegment, inMs, outMs, formAction]
   );
   const playFromIn = useCallback(() => {
     onPlayFrom(inMs, outMs);
@@ -343,6 +426,213 @@ function SegmentNudges({
   );
 }
 
+function SegmentMergeActions({
+  nextSegment,
+  previousSegment,
+  segment,
+}: {
+  nextSegment: SegmentView | null;
+  previousSegment: SegmentView | null;
+  segment: SegmentView;
+}) {
+  const router = useRouter();
+  const [direction, setDirection] = useState<"next" | "previous" | null>(null);
+  const [state, formAction, pending] = useActionState(mergeSegmentAction, {});
+  useEffect(() => {
+    if (state.success) {
+      router.refresh();
+    }
+  }, [state.success, router]);
+  const requestMerge = useCallback(
+    (event: React.MouseEvent<HTMLButtonElement>) => {
+      const requested = event.currentTarget.dataset.direction;
+      if (requested !== "previous" && requested !== "next") {
+        return;
+      }
+      const neighbor = requested === "previous" ? previousSegment : nextSegment;
+      if (neighbor?.kind !== "keep") {
+        return;
+      }
+      setDirection(requested);
+    },
+    [nextSegment, previousSegment]
+  );
+  const confirmMerge = useCallback(() => {
+    const neighbor = direction === "previous" ? previousSegment : nextSegment;
+    if (!direction || neighbor?.kind !== "keep") {
+      return;
+    }
+    const formData = new FormData();
+    if (direction === "previous") {
+      formData.set("destinationId", neighbor.id);
+      formData.set("absorbedId", segment.id);
+    } else {
+      formData.set("destinationId", segment.id);
+      formData.set("absorbedId", neighbor.id);
+    }
+    setDirection(null);
+    startTransition(() => formAction(formData));
+  }, [direction, formAction, nextSegment, previousSegment, segment.id]);
+  const onDialogChange = useCallback((open: boolean) => {
+    if (!open) {
+      setDirection(null);
+    }
+  }, []);
+  const selectedNeighbor =
+    direction === "previous" ? previousSegment : nextSegment;
+  const previousKeep = previousSegment?.kind === "keep";
+  const nextKeep = nextSegment?.kind === "keep";
+  if (!(previousKeep || nextKeep)) {
+    return null;
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-xs">
+      {previousKeep ? (
+        <Button
+          data-direction="previous"
+          data-testid="segment-merge-previous"
+          disabled={pending}
+          onClick={requestMerge}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          Merge with previous
+        </Button>
+      ) : null}
+      {nextKeep ? (
+        <Button
+          data-direction="next"
+          data-testid="segment-merge-next"
+          disabled={pending}
+          onClick={requestMerge}
+          size="sm"
+          type="button"
+          variant="outline"
+        >
+          Merge with next
+        </Button>
+      ) : null}
+      {state.error ? (
+        <span className="text-destructive">{state.error}</span>
+      ) : null}
+      <Dialog onOpenChange={onDialogChange} open={direction !== null}>
+        <DialogContent data-testid="segment-merge-dialog">
+          <DialogHeader>
+            <DialogTitle>Merge these chapters?</DialogTitle>
+            <DialogDescription>
+              “{segment.title ?? "Untitled chapter"}” and “
+              {selectedNeighbor?.title ?? "Untitled chapter"}” will become one
+              chapter. You will review its title, hook, and summary next.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose render={<Button type="button" variant="outline" />}>
+              Cancel
+            </DialogClose>
+            <Button
+              data-testid="segment-merge-confirm"
+              disabled={pending}
+              onClick={confirmMerge}
+              type="button"
+              variant="destructive"
+            >
+              Merge chapters
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function SegmentMetadataEditor({ segment }: { segment: SegmentView }) {
+  const router = useRouter();
+  const needsReview = segment.flags.includes("needs_metadata_review");
+  const [open, setOpen] = useState(needsReview);
+  const [state, formAction, pending] = useActionState(
+    saveSegmentMetadataAction,
+    {}
+  );
+  useEffect(() => {
+    if (needsReview) {
+      setOpen(true);
+    }
+  }, [needsReview]);
+  useEffect(() => {
+    if (state.success) {
+      router.refresh();
+    }
+  }, [state.success, router]);
+  const onToggle = useCallback(
+    (event: React.SyntheticEvent<HTMLDetailsElement>) => {
+      setOpen(event.currentTarget.open);
+    },
+    []
+  );
+
+  return (
+    <details
+      className="rounded-md border border-dashed p-2 text-xs"
+      data-testid="segment-metadata-editor"
+      onToggle={onToggle}
+      open={open}
+    >
+      <summary className="cursor-pointer font-medium">
+        {needsReview
+          ? "Finish title, hook, and summary"
+          : "Edit chapter details"}
+      </summary>
+      <form
+        action={formAction}
+        className="mt-3 grid gap-3"
+        key={`${segment.id}:${segment.title ?? ""}:${segment.hook ?? ""}:${segment.summary ?? ""}`}
+      >
+        <input name="segmentId" type="hidden" value={segment.id} />
+        <div className="grid gap-1">
+          <Label htmlFor={`segment-title-${segment.id}`}>Title</Label>
+          <Input
+            defaultValue={segment.title ?? ""}
+            id={`segment-title-${segment.id}`}
+            maxLength={120}
+            name="title"
+            required
+          />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor={`segment-hook-${segment.id}`}>Hook</Label>
+          <Input
+            defaultValue={segment.hook ?? ""}
+            id={`segment-hook-${segment.id}`}
+            maxLength={200}
+            name="hook"
+            required
+          />
+        </div>
+        <div className="grid gap-1">
+          <Label htmlFor={`segment-summary-${segment.id}`}>Summary</Label>
+          <textarea
+            className="min-h-20 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            defaultValue={segment.summary ?? ""}
+            id={`segment-summary-${segment.id}`}
+            maxLength={300}
+            name="summary"
+            required
+          />
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button disabled={pending} size="sm" type="submit">
+            {pending ? "Saving…" : "Save chapter details"}
+          </Button>
+          {state.error ? (
+            <span className="text-destructive">{state.error}</span>
+          ) : null}
+        </div>
+      </form>
+    </details>
+  );
+}
+
 function SegmentDecisions({ segment }: { segment: SegmentView }) {
   const router = useRouter();
   const [state, formAction, pending] = useActionState(decideSegmentAction, {});
@@ -383,7 +673,11 @@ function SegmentDecisions({ segment }: { segment: SegmentView }) {
     <div className="flex flex-wrap items-center gap-2">
       <Button
         data-testid="segment-accept"
-        disabled={pending || segment.status === "accepted"}
+        disabled={
+          pending ||
+          segment.status === "accepted" ||
+          segment.flags.includes("needs_metadata_review")
+        }
         onClick={onAccept}
         size="sm"
         type="button"
@@ -460,7 +754,7 @@ function DropRow({ segment }: { segment: SegmentView }) {
       data-testid="segment-drop"
     >
       <span className="tabular-nums">
-        {stamp(segment.startMs)}–{stamp(segment.endMs)}
+        {stamp(effectiveStart(segment))}–{stamp(effectiveEnd(segment))}
       </span>
       <span>Dropped · {DROP_REASON_LABELS[segment.dropReason ?? "other"]}</span>
       {segment.flags.includes("gap_fill") ? (
@@ -484,20 +778,24 @@ function DropRow({ segment }: { segment: SegmentView }) {
 }
 
 function KeepCard({
+  nextSegment,
   onPlay,
   onPlayFrom,
   position,
+  previousSegment,
   segment,
   words,
 }: {
+  nextSegment: SegmentView | null;
   onPlay: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onPlayFrom: (startMs: number, endMs: number) => void;
   position: number;
+  previousSegment: SegmentView | null;
   segment: SegmentView;
   words: TranscriptData["words"] | null;
 }) {
-  const inMs = segment.adjustedStartMs ?? segment.startMs;
-  const outMs = segment.adjustedEndMs ?? segment.endMs;
+  const inMs = effectiveStart(segment);
+  const outMs = effectiveEnd(segment);
 
   return (
     <li
@@ -557,7 +855,19 @@ function KeepCard({
           </span>
         ) : null}
       </button>
-      <SegmentNudges onPlayFrom={onPlayFrom} segment={segment} words={words} />
+      <SegmentNudges
+        nextSegment={nextSegment}
+        onPlayFrom={onPlayFrom}
+        previousSegment={previousSegment}
+        segment={segment}
+        words={words}
+      />
+      <SegmentMergeActions
+        nextSegment={nextSegment}
+        previousSegment={previousSegment}
+        segment={segment}
+      />
+      <SegmentMetadataEditor segment={segment} />
       <SegmentDecisions segment={segment} />
     </li>
   );
@@ -566,12 +876,17 @@ function KeepCard({
 function planReadout(segments: readonly SegmentView[]): string {
   const keeps = segments.filter((segment) => segment.kind === "keep");
   const keptMs = keeps.reduce(
-    (total, segment) => total + (segment.endMs - segment.startMs),
+    (total, segment) =>
+      total + (effectiveEnd(segment) - effectiveStart(segment)),
     0
   );
   const droppedMs = segments
     .filter((segment) => segment.kind === "drop")
-    .reduce((total, segment) => total + (segment.endMs - segment.startMs), 0);
+    .reduce(
+      (total, segment) =>
+        total + (effectiveEnd(segment) - effectiveStart(segment)),
+      0
+    );
   const accepted = keeps.filter((s) => s.status === "accepted").length;
   const rejected = keeps.filter((s) => s.status === "rejected").length;
   const decisions =
@@ -670,6 +985,7 @@ function SegmentsReady({
 
   // Same privately-cached object the transcript panel fetches.
   useEffect(() => {
+    setWords(null);
     if (!transcriptUrl) {
       return;
     }
@@ -687,7 +1003,10 @@ function SegmentsReady({
         }
       })
       .catch(() => {
-        // Nudges stay disabled; playback and decisions are unaffected.
+        if (!cancelled) {
+          // Nudges stay disabled; playback and decisions are unaffected.
+          setWords(null);
+        }
       });
     return () => {
       cancelled = true;
@@ -734,12 +1053,12 @@ function SegmentsReady({
       <CardContent className="flex flex-col gap-3">
         {stale ? (
           <div className="flex flex-wrap items-center gap-2 text-muted-foreground text-sm">
-            <span>The transcript changed since this plan was made.</span>
+            <span>This chapter plan is out of date for this source.</span>
             <PlanSegmentsButton sourceId={sourceId} />
           </div>
         ) : null}
         <ol className="flex flex-col gap-2">
-          {ordered.map((segment) => {
+          {ordered.map((segment, index) => {
             if (segment.kind === "drop") {
               return <DropRow key={segment.id} segment={segment} />;
             }
@@ -747,9 +1066,11 @@ function SegmentsReady({
             return (
               <KeepCard
                 key={segment.id}
+                nextSegment={ordered[index + 1] ?? null}
                 onPlay={onPlay}
                 onPlayFrom={onPlayFrom}
                 position={keepPosition}
+                previousSegment={ordered[index - 1] ?? null}
                 segment={segment}
                 words={words}
               />

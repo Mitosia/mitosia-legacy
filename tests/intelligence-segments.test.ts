@@ -133,10 +133,10 @@ describe("buildSegmentRows", () => {
     expect(checkPartition(rows, THREE_SENTENCES).ok).toBe(true);
   });
 
-  it("merges proposals whose cuts collapse, preferring the keep", () => {
+  it("merges same-kind proposals whose cuts collapse", () => {
     const rows = buildSegmentRows(
       [
-        dropItem(0, s2Start),
+        keepItem(0, s2Start, "One two three"),
         // Both of these snap their cut to the same sentence start.
         keepItem(s2Start, s2End, "Four five six"),
         keepItem(s2Start + 60, lastEnd, "Seven eight nine", "Rival claim"),
@@ -148,6 +148,23 @@ describe("buildSegmentRows", () => {
     const merged = rows.find((row) => row.flags.includes("merged_neighbor"));
     expect(merged).toBeDefined();
     expect(merged?.kind).toBe("keep");
+    expect(checkPartition(rows, THREE_SENTENCES).ok).toBe(true);
+  });
+
+  it("does not let a vacuous collapsed keep erase an audible drop barrier", () => {
+    const rows = buildSegmentRows(
+      [
+        dropItem(0, s2Start),
+        keepItem(s2Start, s2End, "Four five six"),
+        keepItem(s2Start + 60, lastEnd, "Seven eight nine"),
+      ],
+      THREE_SENTENCES,
+      DURATION,
+      []
+    );
+
+    expect(rows.map((row) => row.kind)).toEqual(["drop", "keep"]);
+    expect(rows[0]?.flags).toContain("merged_neighbor");
     expect(checkPartition(rows, THREE_SENTENCES).ok).toBe(true);
   });
 
@@ -165,6 +182,27 @@ describe("buildSegmentRows", () => {
     expect(rows[0]?.grounded).toBe(false);
     expect(rows[0]?.flags).toContain("no_anchor");
     expect(rows[1]?.grounded).toBe(true);
+  });
+
+  it("grounds from a later candidate when the primary anchor is outside the refined slot", () => {
+    const refinedKeep = {
+      ...keepItem(s2Start, lastEnd, "One two three"),
+      anchorCandidates: ["One two three", "Four five six"],
+    };
+    const rows = buildSegmentRows(
+      [dropItem(0, s2Start), refinedKeep],
+      THREE_SENTENCES,
+      DURATION,
+      []
+    );
+
+    expect(rows.map((row) => row.kind)).toEqual(["drop", "keep"]);
+    expect(rows[1]).toMatchObject({
+      anchorText: "Four five six",
+      grounded: true,
+      startMs: s2Start,
+    });
+    expect(rows[1]?.flags).not.toContain("no_anchor");
   });
 
   it("flags relative duration outliers instead of enforcing lengths", () => {
@@ -231,6 +269,45 @@ describe("buildSegmentRows", () => {
     expect(checkPartition(rows, words).ok).toBe(true);
   });
 
+  it.each([
+    {
+      audible: keepItem(0, lastEnd, "One two three"),
+      expectedKind: "keep" as const,
+      vacuous: dropItem(lastEnd + 400, lastEnd + 400),
+    },
+    {
+      audible: dropItem(0, lastEnd),
+      expectedKind: "drop" as const,
+      vacuous: keepItem(lastEnd + 400, lastEnd + 400, "Bye", "Vacuous keep"),
+    },
+  ])(
+    "preserves an audible $expectedKind across an unlike zero-duration tail",
+    ({ audible, expectedKind, vacuous }) => {
+      const tailMs = lastEnd + 400;
+      const words: TranscriptWord[] = [
+        ...THREE_SENTENCES,
+        {
+          confidence: 0.95,
+          endMs: tailMs,
+          speaker: "0",
+          startMs: tailMs,
+          text: "Bye.",
+        },
+      ];
+      const rows = buildSegmentRows(
+        [audible, vacuous],
+        words,
+        tailMs + 200,
+        []
+      );
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.kind).toBe(expectedKind);
+      expect(rows[0]?.flags).toContain("merged_neighbor");
+      expect(checkPartition(rows, words).ok).toBe(true);
+    }
+  );
+
   it("folds zero-duration lead-in words into the first slot", () => {
     const words: TranscriptWord[] = [
       { confidence: 0.95, endMs: 150, speaker: "0", startMs: 150, text: "Uh." },
@@ -251,6 +328,39 @@ describe("buildSegmentRows", () => {
     expect(checkPartition(rows, words).ok).toBe(true);
   });
 
+  it.each([
+    { leading: keepItem(150, 150, "Uh", "Vacuous keep") },
+    { leading: dropItem(150, 150) },
+  ])(
+    "flags a leading $leading.kind identity collapsed into the next audible slot",
+    ({ leading }) => {
+      const words: TranscriptWord[] = [
+        {
+          confidence: 0.95,
+          endMs: 150,
+          speaker: "0",
+          startMs: 150,
+          text: "Uh.",
+        },
+        ...THREE_SENTENCES,
+      ];
+      const rows = buildSegmentRows(
+        [
+          leading,
+          keepItem(THREE_SENTENCES[0].startMs, lastEnd, "One two three"),
+        ],
+        words,
+        DURATION,
+        []
+      );
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.kind).toBe("keep");
+      expect(rows[0]?.flags).toContain("merged_neighbor");
+      expect(checkPartition(rows, words).ok).toBe(true);
+    }
+  );
+
   it("flags the twice-told story on both tellings via chunk vectors", () => {
     const rows = buildSegmentRows(
       [
@@ -267,5 +377,68 @@ describe("buildSegmentRows", () => {
     expect(rows[0]?.flags).toContain("twice_told");
     expect(rows[1]?.flags).toContain("twice_told");
     expect(rows.every((row) => row.kind === "keep")).toBe(true);
+  });
+
+  it("flags only physically adjacent keeps as same-topic neighbors", () => {
+    const firstEnd = THREE_SENTENCES[2].endMs;
+    const chunks = [
+      { embedding: [1, 0], endMs: firstEnd, startMs: 0 },
+      { embedding: [0, 1], endMs: s2End, startMs: s2Start },
+      { embedding: [0.99, 0.01], endMs: lastEnd, startMs: s3Start },
+    ];
+    const separated = buildSegmentRows(
+      [
+        keepItem(0, firstEnd, "One two three"),
+        dropItem(s2Start, s2End),
+        keepItem(s3Start, lastEnd, "Seven eight nine"),
+      ],
+      THREE_SENTENCES,
+      DURATION,
+      chunks
+    );
+    expect(separated[0]?.flags).toContain("twice_told");
+    expect(separated[2]?.flags).toContain("twice_told");
+    expect(separated[0]?.flags).not.toContain("same_topic_neighbors");
+    expect(separated[2]?.flags).not.toContain("same_topic_neighbors");
+
+    const adjacent = buildSegmentRows(
+      [
+        keepItem(0, firstEnd, "One two three"),
+        keepItem(s3Start, lastEnd, "Seven eight nine"),
+      ],
+      THREE_SENTENCES,
+      DURATION,
+      [chunks[0], chunks[2]].filter((chunk) => chunk !== undefined)
+    );
+    expect(adjacent[0]?.flags).toContain("same_topic_neighbors");
+    expect(adjacent[1]?.flags).toContain("same_topic_neighbors");
+  });
+});
+
+describe("checkPartition", () => {
+  it("detects omitted words even when both row boundaries are word-aligned", () => {
+    const rows = buildSegmentRows(
+      [
+        keepItem(0, THREE_SENTENCES[3].startMs, "One two three"),
+        keepItem(
+          THREE_SENTENCES[3].startMs,
+          THREE_SENTENCES.at(-1)?.endMs ?? DURATION,
+          "Four five six"
+        ),
+      ],
+      THREE_SENTENCES,
+      DURATION,
+      []
+    ).map((row) => ({ ...row }));
+    const [first, second] = rows;
+    if (!(first && second)) {
+      throw new Error("expected two segment rows");
+    }
+    first.endMs = THREE_SENTENCES[0].endMs;
+    second.startMs = THREE_SENTENCES[2].startMs;
+
+    const result = checkPartition(rows, THREE_SENTENCES);
+    expect(result.ok).toBe(false);
+    expect(result.issues).toContain("segments 0 and 1 omit timeline words");
   });
 });
