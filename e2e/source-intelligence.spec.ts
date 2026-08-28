@@ -25,7 +25,9 @@ const FIND_HIGHLIGHTS = /Find highlights/;
 const INDEX_FAILURE = /Voyage embeddings failed \(429\)/;
 const ONE_ACCEPTED = /1 accepted/;
 const ONE_ACCEPTED_ONE_REJECTED = /1 accepted · 1 rejected/;
-const RERUN_REFUSAL = /review decisions/;
+const RERUN_REFUSAL = /review decisions or boundary edits/;
+const RERUN_STALE_CONFIRMATION = /moment reviews changed/;
+const NO_READY_TRANSCRIPT = /no ready transcript/;
 const SEGMENT_RERUN_REFUSAL = /human review or edits/;
 const REVIEW_TRIM_END = /Reviewer: trim end/;
 
@@ -163,7 +165,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     start_ms: string;
     suppressed: boolean;
   }>(
-    "SELECT grounded, sensitive, suppressed, dedupe_group, rank, start_ms, end_ms, flags FROM moment_candidate WHERE source_id = $1 ORDER BY rank",
+    "SELECT id, grounded, sensitive, suppressed, dedupe_group, rank, start_ms, end_ms, flags FROM moment_candidate WHERE source_id = $1 ORDER BY rank",
     [sourceId]
   );
   expect(candidateRows.length).toBeGreaterThanOrEqual(4);
@@ -411,17 +413,249 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   await expect(momentItems).toHaveCount(2);
 
   // Re-running discovery would delete-and-replace the reviewed rows, so
-  // with decisions on record it must refuse loudly.
+  // with decisions on record it must refuse loudly and offer an explicit
+  // destructive confirmation instead of accepting a bare force flag.
   await page.getByTestId("rerun-discovery").click();
   await expect(page.getByTestId("rerun-discovery-error")).toHaveText(
     RERUN_REFUSAL,
     { timeout: 15_000 }
   );
-  const [runAfterRefusal] = await queryRows<{ status: string }>(
-    "SELECT status FROM moment_discovery_run WHERE source_id = $1",
+  await expect(page.getByTestId("rerun-discovery-error")).toHaveAttribute(
+    "aria-live",
+    "polite"
+  );
+  const forceRerun = page.getByRole("button", {
+    exact: true,
+    name: "Run again and discard reviews",
+  });
+  await expect(forceRerun).toBeVisible();
+  const [runAfterRefusal] = await queryRows<{
+    attempts: string;
+    edit_version: string;
+    id: string;
+    status: string;
+  }>(
+    "SELECT id, status, attempts, edit_version FROM moment_discovery_run WHERE source_id = $1",
     [sourceId]
   );
   expect(runAfterRefusal.status).toBe("ready");
+
+  // A confirmation is bound to the exact review version it described. A
+  // second reviewer changing a decision must invalidate the first page's
+  // destructive button, even though both pages still show the same run id.
+  const secondReviewer = await page.context().newPage();
+  try {
+    await secondReviewer.goto(page.url());
+    await secondReviewer
+      .getByTestId("workspace-tab-moments")
+      .click({ timeout: 15_000 });
+    const secondReviewerMoments = secondReviewer.getByTestId("moment-item");
+    await expect(secondReviewerMoments.first()).toBeVisible({
+      timeout: 15_000,
+    });
+    await secondReviewerMoments.first().getByTestId("moment-shortlist").click();
+    await expect
+      .poll(
+        async () => {
+          const [reviewState] = await queryRows<{
+            edit_version: string;
+            status: string;
+          }>(
+            `SELECT run.edit_version, candidate.status
+              FROM moment_discovery_run AS run
+              INNER JOIN moment_candidate AS candidate ON candidate.run_id = run.id
+              WHERE run.source_id = $1 AND candidate.rank = 0`,
+            [sourceId]
+          );
+          return (
+            reviewState?.status === "shortlisted" &&
+            Number(reviewState.edit_version) >
+              Number(runAfterRefusal.edit_version)
+          );
+        },
+        { timeout: 15_000 }
+      )
+      .toBe(true);
+  } finally {
+    await secondReviewer.close();
+  }
+
+  await forceRerun.click();
+  await expect(page.getByTestId("rerun-discovery-error")).toHaveText(
+    RERUN_STALE_CONFIRMATION,
+    { timeout: 15_000 }
+  );
+  await expect(forceRerun).toHaveCount(0);
+  await expect(momentItems.first().getByTestId("moment-status")).toHaveText(
+    "Shortlisted",
+    { timeout: 15_000 }
+  );
+  const [runAfterStaleConfirmation] = await queryRows<{
+    attempts: string;
+    status: string;
+  }>("SELECT status, attempts FROM moment_discovery_run WHERE source_id = $1", [
+    sourceId,
+  ]);
+  expect(runAfterStaleConfirmation.status).toBe("ready");
+  expect(Number(runAfterStaleConfirmation.attempts)).toBe(
+    Number(runAfterRefusal.attempts)
+  );
+
+  // A fresh first click obtains the new version. Only that fresh
+  // confirmation may replace the candidates and spend the discovery run.
+  await page.getByTestId("rerun-discovery").click();
+  await expect(page.getByTestId("rerun-discovery-error")).toHaveText(
+    RERUN_REFUSAL,
+    { timeout: 15_000 }
+  );
+  await expect(forceRerun).toBeVisible();
+  await forceRerun.click();
+  await expect
+    .poll(
+      async () => {
+        const [rerun] = await queryRows<{
+          attempts: string;
+          status: string;
+        }>(
+          "SELECT status, attempts FROM moment_discovery_run WHERE source_id = $1",
+          [sourceId]
+        );
+        return (
+          rerun?.status === "ready" &&
+          Number(rerun.attempts) > Number(runAfterRefusal.attempts)
+        );
+      },
+      { timeout: 60_000 }
+    )
+    .toBe(true);
+
+  const replacementCandidates = await queryRows<{
+    adjusted_end_ms: string | null;
+    adjusted_start_ms: string | null;
+    id: string;
+    status: string;
+  }>(
+    `SELECT id, status, adjusted_start_ms, adjusted_end_ms
+      FROM moment_candidate WHERE source_id = $1 ORDER BY rank`,
+    [sourceId]
+  );
+  expect(replacementCandidates.length).toBeGreaterThan(0);
+  expect(
+    replacementCandidates.every(
+      (candidate) =>
+        candidate.status === "proposed" &&
+        candidate.adjusted_start_ms === null &&
+        candidate.adjusted_end_ms === null
+    )
+  ).toBe(true);
+  const originalCandidateIds = new Set(
+    candidateRows.map((candidate) => candidate.id)
+  );
+  expect(
+    replacementCandidates.every(
+      (candidate) => !originalCandidateIds.has(candidate.id)
+    )
+  ).toBe(true);
+
+  const forcedRerunAudits = await queryRows<{
+    metadata: { force?: boolean } | null;
+  }>(
+    `SELECT metadata FROM audit_log
+      WHERE action = 'moment_discovery.rerun' AND entity_id = $1`,
+    [runAfterRefusal.id]
+  );
+  expect(
+    forcedRerunAudits.some((entry) => entry.metadata?.force === true)
+  ).toBe(true);
+  const [replacementAudit] = await queryRows<{
+    metadata: {
+      discardedBoundaryEditCount?: number;
+      discardedCandidateCount?: number;
+      discardedDecisionCount?: number;
+    } | null;
+  }>(
+    `SELECT metadata FROM audit_log
+      WHERE action = 'moment_discovery.replaced' AND entity_id = $1
+      ORDER BY created_at DESC LIMIT 1`,
+    [runAfterRefusal.id]
+  );
+  expect(replacementAudit.metadata).toMatchObject({
+    discardedBoundaryEditCount: 1,
+    discardedCandidateCount: candidateRows.length,
+    discardedDecisionCount: 2,
+  });
+  const [readyMomentFacts] = await queryRows<{
+    counts: {
+      flagged: number;
+      grounded: number;
+      proposed: number;
+      reviewed: number;
+      revised: number;
+      suppressed: number;
+    };
+  }>("SELECT counts FROM moment_discovery_run WHERE source_id = $1", [
+    sourceId,
+  ]);
+
+  // A failed refresh must leave the last committed moment set usable, not
+  // merely undeleted in the database. Make the transcript temporarily
+  // unavailable so the in-process worker fails before producing rows.
+  await queryRows(
+    "UPDATE transcript SET status = 'failed' WHERE source_id = $1",
+    [sourceId]
+  );
+  try {
+    await expect(page.getByTestId("rerun-discovery")).toBeVisible({
+      timeout: 15_000,
+    });
+    await page.getByTestId("rerun-discovery").click();
+    await expect
+      .poll(
+        async () => {
+          const [failedRefresh] = await queryRows<{
+            error: string | null;
+            status: string;
+          }>(
+            "SELECT status, error FROM moment_discovery_run WHERE source_id = $1",
+            [sourceId]
+          );
+          return failedRefresh?.status === "ready" && failedRefresh.error
+            ? failedRefresh.error
+            : null;
+        },
+        { timeout: 30_000 }
+      )
+      .toMatch(NO_READY_TRANSCRIPT);
+    await expect(page.getByTestId("moment-rerun-preserved")).toContainText(
+      "previous moments and reviews are unchanged",
+      { timeout: 15_000 }
+    );
+    const candidatesAfterFailedRefresh = await queryRows<{ id: string }>(
+      "SELECT id FROM moment_candidate WHERE source_id = $1 ORDER BY rank",
+      [sourceId]
+    );
+    expect(candidatesAfterFailedRefresh.map(({ id }) => id)).toEqual(
+      replacementCandidates.map(({ id }) => id)
+    );
+    const [preservedMomentFacts] = await queryRows<{
+      counts: Record<string, unknown>;
+    }>("SELECT counts FROM moment_discovery_run WHERE source_id = $1", [
+      sourceId,
+    ]);
+    expect(preservedMomentFacts.counts).toMatchObject({
+      flagged: readyMomentFacts.counts.flagged,
+      grounded: readyMomentFacts.counts.grounded,
+      proposed: readyMomentFacts.counts.proposed,
+      reviewed: readyMomentFacts.counts.reviewed,
+      revised: readyMomentFacts.counts.revised,
+      suppressed: readyMomentFacts.counts.suppressed,
+    });
+  } finally {
+    await queryRows(
+      "UPDATE transcript SET status = 'ready' WHERE source_id = $1",
+      [sourceId]
+    );
+  }
 
   // ---- Segment clips (S6.5): the coverage lane ----
   // Planning is a button, never a chain: the missing state carries the

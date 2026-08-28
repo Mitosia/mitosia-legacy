@@ -282,7 +282,12 @@ export const momentDiscoveryRun = pgTable(
     ),
     // {proposed, grounded, suppressed} — run-level facts for stats/UI
     counts: jsonb("counts"),
+    // Every human review or boundary adjustment increments this. A
+    // destructive re-run confirmation is valid only for the exact version
+    // the user reviewed, so a second editor cannot lose newer work.
+    editVersion: integer("edit_version").default(0).notNull(),
     error: text("error"),
+    humanEditedAt: timestamp("human_edited_at"),
     id: uuid("id").primaryKey().default(sql`uuidv7()`),
     // {"moment-discovery.candidates": {model, provider}}
     models: jsonb("models"),

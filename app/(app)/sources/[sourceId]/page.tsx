@@ -287,7 +287,10 @@ function workspaceMoments(data: {
   candidates: MomentCandidateView[];
   currentRevision: { revision: number } | null;
   discoveryRun: {
+    attempts: number;
+    editVersion: number;
     error: string | null;
+    id: string;
     revision: number | null;
     status: string;
   } | null;
@@ -297,14 +300,24 @@ function workspaceMoments(data: {
     return data.extractionRun?.status === "ready"
       ? {
           candidates: [],
-          run: { error: null, stale: false, status: "missing" },
+          run: {
+            attempts: 0,
+            editVersion: 0,
+            error: null,
+            id: null,
+            stale: false,
+            status: "missing",
+          },
         }
       : null;
   }
   return {
     candidates: data.candidates,
     run: {
+      attempts: data.discoveryRun.attempts,
+      editVersion: data.discoveryRun.editVersion,
       error: data.discoveryRun.error,
+      id: data.discoveryRun.id,
       stale:
         data.discoveryRun.status === "ready" &&
         data.currentRevision !== null &&
@@ -528,7 +541,10 @@ export default async function SourceDetailPage(
 
     const [discoveryRunRow] = await tx
       .select({
+        attempts: momentDiscoveryRun.attempts,
+        editVersion: momentDiscoveryRun.editVersion,
         error: momentDiscoveryRun.error,
+        id: momentDiscoveryRun.id,
         revision: momentDiscoveryRun.revision,
         stalled: sql<boolean>`(${isStalledDiscovery})`,
         status: momentDiscoveryRun.status,
