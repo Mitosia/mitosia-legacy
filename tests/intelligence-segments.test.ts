@@ -195,6 +195,62 @@ describe("buildSegmentRows", () => {
     expect(rows[0]?.kind).toBe("keep");
   });
 
+  it("merges a trailing proposal whose cut lands at the final word's end", () => {
+    // The staging shape (Brett Lee, 2026-08-26): Deepgram rounds
+    // sub-centisecond words to equal start/end ms, and the model's last
+    // proposal cut exactly at the final word's end — the tail slot spanned
+    // zero time and rendered as a "57:58–57:58" drop row with nothing to
+    // review. The vacuous proposal must merge into its neighbor instead.
+    const tailMs = lastEnd + 400;
+    const words: TranscriptWord[] = [
+      ...THREE_SENTENCES,
+      {
+        confidence: 0.95,
+        endMs: tailMs,
+        speaker: "0",
+        startMs: tailMs,
+        text: "Bye.",
+      },
+    ];
+    const rows = buildSegmentRows(
+      [
+        keepItem(0, s2End, "One two three"),
+        dropItem(s3Start, tailMs),
+        dropItem(tailMs, tailMs),
+      ],
+      words,
+      tailMs + 200,
+      []
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.endMs > row.startMs)).toBe(true);
+    expect(rows.at(-1)?.kind).toBe("drop");
+    expect(rows.at(-1)?.flags).toContain("merged_neighbor");
+    // The zero-duration word still ends the plan — tiling holds.
+    expect(rows.at(-1)?.endMs).toBe(tailMs);
+    expect(checkPartition(rows, words).ok).toBe(true);
+  });
+
+  it("folds zero-duration lead-in words into the first slot", () => {
+    const words: TranscriptWord[] = [
+      { confidence: 0.95, endMs: 150, speaker: "0", startMs: 150, text: "Uh." },
+      ...THREE_SENTENCES,
+    ];
+    const rows = buildSegmentRows(
+      [keepItem(THREE_SENTENCES[0].startMs, lastEnd, "One two three")],
+      words,
+      DURATION,
+      []
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("keep");
+    expect(rows[0]?.flags).not.toContain("gap_fill");
+    expect(rows.every((row) => row.endMs > row.startMs)).toBe(true);
+    // The plan still starts at the first word — tiling holds.
+    expect(rows[0]?.startMs).toBe(150);
+    expect(checkPartition(rows, words).ok).toBe(true);
+  });
+
   it("flags the twice-told story on both tellings via chunk vectors", () => {
     const rows = buildSegmentRows(
       [

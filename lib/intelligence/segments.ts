@@ -25,7 +25,8 @@ import {
 // startMs is its first word's start and its endMs is its last word's end,
 // so adjacent segments share boundaries modulo inter-word silence. The
 // model's proposals map onto slots in order; leading uncovered words
-// become a synthesized drop; collapsed cuts merge neighbors with a flag.
+// become a synthesized drop; collapsed cuts and zero-time spans merge
+// neighbors with a flag — no row is ever zero-length.
 //
 // Constraint policy (2026-08-26): NO numeric editorial enforcement.
 // Duration/count outliers are detected RELATIVELY (against the plan's own
@@ -96,9 +97,24 @@ interface Slot {
   startWord: number;
 }
 
+// A collapsed proposal joins an existing slot: flagged for the reviewer,
+// keeping the more content-bearing identity.
+function absorbItem(slot: Slot, item: RawSegmentItem): void {
+  slot.merged = true;
+  if (slot.item?.kind !== "keep" && item.kind === "keep") {
+    slot.item = item;
+  }
+}
+
 // Partition the word range into slots from the proposed items' snapped
 // starts. Items map to slots in order; a collapsed cut (two proposals
 // snapping to one point) merges neighbors, preferring the keep's identity.
+// A slot whose words span zero time merges the same way: Deepgram rounds
+// sub-centisecond words to equal start/end ms, so a proposal cutting
+// exactly at the final word's end would otherwise stand as a zero-length
+// row with nothing a reviewer can play. Merging (never filtering) is what
+// keeps the tiling invariant — the plan must still start at the first
+// word's start and end at the last word's end.
 function buildSlots(
   items: readonly RawSegmentItem[],
   words: readonly TranscriptWord[]
@@ -108,11 +124,16 @@ function buildSlots(
   if (!head) {
     return [];
   }
+  const spanMs = (startWord: number, endWord: number): number =>
+    (words[endWord]?.endMs ?? 0) - (words[startWord]?.startMs ?? 0);
 
   const slots: Slot[] = [];
   const leadIndex = snapCutIndex(words, head.startMs);
-  if (leadIndex > 0) {
-    // Words before the first proposal: a synthesized drop, never silence.
+  // Words before the first proposal: a synthesized drop, never silence —
+  // unless they span zero time, in which case they fold into the first
+  // proposal's slot instead of standing as an unplayable gap row.
+  const leadIsAudible = leadIndex > 0 && spanMs(0, leadIndex - 1) > 0;
+  if (leadIsAudible) {
     slots.push({
       endWord: leadIndex - 1,
       item: null,
@@ -121,21 +142,29 @@ function buildSlots(
     });
   }
 
-  let cursor = leadIndex;
+  let cursor = leadIsAudible ? leadIndex : 0;
   for (const [position, item] of sorted.entries()) {
     const nextItem = sorted[position + 1];
     const nextCut = nextItem
       ? snapCutIndex(words, nextItem.startMs)
       : words.length;
+    const current = slots.at(-1);
     if (nextCut <= cursor) {
-      // The next proposal's cut collapsed into this slot: merge, keeping
-      // the more content-bearing identity.
-      const current = slots.at(-1);
+      // The next proposal's cut collapsed into this slot: merge.
       if (current) {
-        current.merged = true;
-        if (current.item?.kind !== "keep" && item.kind === "keep") {
-          current.item = item;
-        }
+        absorbItem(current, item);
+      }
+      continue;
+    }
+    if (spanMs(cursor, nextCut - 1) <= 0) {
+      // Zero-length slot: its words are inaudible, so the previous slot
+      // absorbs both them and the proposal's identity. With no previous
+      // slot the words fold forward into the next one instead (cursor
+      // stays) and the vacuous proposal is discarded.
+      if (current) {
+        absorbItem(current, item);
+        current.endWord = nextCut - 1;
+        cursor = nextCut;
       }
       continue;
     }
