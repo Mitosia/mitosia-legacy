@@ -80,10 +80,10 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   await page.waitForURL(SOURCE_PAGE_URL, { timeout: 60_000 });
   const sourceId = new URL(page.url()).pathname.split("/").pop() ?? "";
 
-  // The follow-on chain lands while the poller refreshes the page.
-  await expect(page.getByTestId("highlights-panel")).toBeVisible({
-    timeout: 60_000,
-  });
+  // The follow-on chain lands while the poller refreshes the page; the
+  // sidebar grows its Highlights tab once analysis is ready.
+  await page.getByTestId("workspace-tab-highlights").click({ timeout: 60_000 });
+  await expect(page.getByTestId("highlights-panel")).toBeVisible();
   await expect(page.getByTestId("highlight-item").first()).toBeVisible({
     timeout: 60_000,
   });
@@ -248,6 +248,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   );
 
   // ---- Moments review UI (S6) ----
+  await page.getByTestId("workspace-tab-moments").click({ timeout: 60_000 });
   const momentsPanel = page.getByTestId("moments-panel");
   await expect(momentsPanel).toBeVisible({ timeout: 60_000 });
   const momentItems = page.getByTestId("moment-item");
@@ -285,6 +286,22 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     },
     Math.max(0, thirdStartMs - 3000) / 1000,
     { timeout: 10_000 }
+  );
+  // …and playback PAUSES at the moment's out-point instead of running to
+  // the end of the recording (the range-playback contract).
+  const thirdEndMs = Number(
+    await thirdCard.getByTestId("moment-card").getAttribute("data-end-ms")
+  );
+  expect(thirdEndMs).toBeGreaterThan(thirdStartMs);
+  await page.waitForFunction(
+    (expected) => {
+      const video = document.querySelector("video");
+      return Boolean(
+        video?.paused && Math.abs(video.currentTime - expected) < 0.35
+      );
+    },
+    thirdEndMs / 1000,
+    { timeout: 20_000 }
   );
 
   // Boundary nudge: the in-point walks to the previous sentence start,
@@ -397,6 +414,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   // ---- Segment clips (S6.5): the coverage lane ----
   // Planning is a button, never a chain: the missing state carries the
   // CTA, and the mock plan tiles the fixture as keep/drop/keep.
+  await page.getByTestId("workspace-tab-segments").click({ timeout: 15_000 });
   await expect(page.getByTestId("segments-panel")).toBeVisible({
     timeout: 15_000,
   });
@@ -458,6 +476,26 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     "low_energy"
   );
   await expect(page.getByTestId("segment-review-flag")).toHaveCount(1);
+
+  // Range playback with a mid-media out-point: the first chapter's end is
+  // strictly inside the recording (the drop follows it), so a paused video
+  // sitting there PROVES the stop fired — it cannot be the media ending.
+  const firstKeep = segItems.nth(0);
+  await firstKeep.getByTestId("segment-card").click();
+  const firstKeepEndMs = Number(
+    await firstKeep.getByTestId("segment-card").getAttribute("data-end-ms")
+  );
+  expect(firstKeepEndMs).toBeLessThan(FIXTURE_SECONDS * 1000);
+  await page.waitForFunction(
+    (expected) => {
+      const video = document.querySelector("video");
+      return Boolean(
+        video?.paused && Math.abs(video.currentTime - expected) < 0.35
+      );
+    },
+    firstKeepEndMs / 1000,
+    { timeout: 20_000 }
+  );
 
   // Playback contract on the second chapter: play-from-in-point hits the
   // exact in, a card click applies the 3s pre-roll (clamped to 0 here).
@@ -544,6 +582,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
 
   // Park the player deep again — the Ask section below asserts its
   // citation click performs a real, observable seek.
+  await page.getByTestId("workspace-tab-highlights").click();
   await allItems.last().click();
   await page.waitForFunction(
     (expected) => {
@@ -555,6 +594,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   );
 
   // ---- Ask & search (retrieval index + mock QA) ----
+  await page.getByTestId("workspace-tab-ask").click({ timeout: 60_000 });
   const askPanel = page.getByTestId("ask-panel");
   await expect(askPanel).toBeVisible({ timeout: 60_000 });
 
@@ -634,6 +674,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     sourceId,
   ]);
   await page.reload();
+  await page.getByTestId("workspace-tab-highlights").click({ timeout: 15_000 });
   const findButton = page.getByTestId("rerun-extraction");
   await expect(findButton).toBeVisible({ timeout: 15_000 });
   await expect(findButton).toHaveText(FIND_HIGHLIGHTS);
@@ -651,6 +692,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     [sourceId]
   );
   await page.reload();
+  await page.getByTestId("workspace-tab-ask").click({ timeout: 15_000 });
   const indexCard = page.getByTestId("index-status-card");
   await expect(indexCard).toBeVisible({ timeout: 15_000 });
   await expect(page.getByTestId("index-error")).toHaveText(INDEX_FAILURE);

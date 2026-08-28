@@ -20,6 +20,7 @@ import {
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { rerunExtractionAction } from "@/lib/actions/intelligence";
 import { speakerDisplayName } from "@/lib/transcription/paragraphs";
+import type { RangePlayback } from "./use-range-playback";
 
 // Highlights v1 (S5): the grounded extraction rows rendered as one
 // filterable list — quotes, stories, claims, Q&A exchanges — each a seek
@@ -139,16 +140,16 @@ export function RerunExtractionButton({
 
 export function HighlightsPanel({
   extractions,
+  playback,
   run,
   sourceId,
   speakerLabels,
-  video,
 }: {
   extractions: HighlightExtraction[];
+  playback: RangePlayback;
   run: HighlightsRun;
   sourceId: string;
   speakerLabels: Record<string, string> | null;
-  video: HTMLVideoElement | null;
 }) {
   const [filter, setFilter] = useState<HighlightKind | "all">("all");
 
@@ -168,14 +169,17 @@ export function HighlightsPanel({
     [extractions, filter]
   );
 
+  // Play the grounded span and pause at its out-point — a highlight is an
+  // exact range, so the reviewer hears precisely what was extracted.
   const seekTo = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       const startMs = Number(event.currentTarget.dataset.startMs);
-      if (video && Number.isFinite(startMs)) {
-        video.currentTime = startMs / 1000;
+      const endMs = Number(event.currentTarget.dataset.endMs);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+        playback.playRange(startMs, endMs);
       }
     },
-    [video]
+    [playback]
   );
 
   const onFilterChange = useCallback((groupValue: unknown[]) => {
@@ -285,6 +289,7 @@ export function HighlightsPanel({
               <li key={extraction.id}>
                 <button
                   className="flex w-full cursor-pointer items-baseline gap-3 rounded-md px-2 py-1.5 text-left hover:bg-muted"
+                  data-end-ms={extraction.endMs}
                   data-start-ms={extraction.startMs}
                   data-testid="highlight-item"
                   onClick={seekTo}

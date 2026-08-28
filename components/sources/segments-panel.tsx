@@ -36,6 +36,7 @@ import {
   sentenceStartTimes,
 } from "@/lib/intelligence/moments";
 import type { TranscriptData } from "@/lib/transcription/types";
+import type { RangePlayback } from "./use-range-playback";
 
 // Segment plan review (S6.5): the episode's keep/drop partition rendered
 // chronologically — every second accounted for. Keep cards play with
@@ -182,7 +183,7 @@ function SegmentNudges({
   segment,
   words,
 }: {
-  onPlayFrom: (ms: number) => void;
+  onPlayFrom: (startMs: number, endMs: number) => void;
   segment: SegmentView;
   words: TranscriptData["words"] | null;
 }) {
@@ -258,8 +259,8 @@ function SegmentNudges({
     [targets, segment.id, formAction]
   );
   const playFromIn = useCallback(() => {
-    onPlayFrom(inMs);
-  }, [onPlayFrom, inMs]);
+    onPlayFrom(inMs, outMs);
+  }, [onPlayFrom, inMs, outMs]);
 
   const deltaIn = inMs - segment.startMs;
   const deltaOut = outMs - segment.endMs;
@@ -487,7 +488,7 @@ function KeepCard({
   words,
 }: {
   onPlay: (event: React.MouseEvent<HTMLButtonElement>) => void;
-  onPlayFrom: (ms: number) => void;
+  onPlayFrom: (startMs: number, endMs: number) => void;
   position: number;
   segment: SegmentView;
   words: TranscriptData["words"] | null;
@@ -503,6 +504,7 @@ function KeepCard({
     >
       <button
         className="flex w-full cursor-pointer flex-col items-start gap-1 text-left"
+        data-end-ms={outMs}
         data-start-ms={inMs}
         data-testid="segment-card"
         onClick={onPlay}
@@ -597,17 +599,17 @@ function SegmentsStateCard({
 }
 
 export function SegmentsPanel({
+  playback,
   run,
   segments,
   sourceId,
   transcriptUrl,
-  video,
 }: {
+  playback: RangePlayback;
   run: SegmentsRun;
   segments: SegmentView[];
   sourceId: string;
   transcriptUrl: string | null;
-  video: HTMLVideoElement | null;
 }) {
   if (run.status === "missing") {
     return (
@@ -639,27 +641,27 @@ export function SegmentsPanel({
   }
   return (
     <SegmentsReady
+      playback={playback}
       segments={segments}
       sourceId={sourceId}
       stale={run.stale}
       transcriptUrl={transcriptUrl}
-      video={video}
     />
   );
 }
 
 function SegmentsReady({
+  playback,
   segments,
   sourceId,
   stale,
   transcriptUrl,
-  video,
 }: {
+  playback: RangePlayback;
   segments: SegmentView[];
   sourceId: string;
   stale: boolean;
   transcriptUrl: string | null;
-  video: HTMLVideoElement | null;
 }) {
   const [words, setWords] = useState<TranscriptData["words"] | null>(null);
 
@@ -689,28 +691,23 @@ function SegmentsReady({
     };
   }, [transcriptUrl]);
 
+  // Card clicks play the chapter with 3s of lead-in and pause at the
+  // out-point; play-from-in-point skips the lead-in but keeps the stop.
   const onPlay = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       const startMs = Number(event.currentTarget.dataset.startMs);
-      if (video && Number.isFinite(startMs)) {
-        video.currentTime = Math.max(0, startMs - PLAY_PREROLL_MS) / 1000;
-        video.play().catch(() => {
-          // Autoplay policies can refuse; the seek alone still lands
-        });
+      const endMs = Number(event.currentTarget.dataset.endMs);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+        playback.playRange(Math.max(0, startMs - PLAY_PREROLL_MS), endMs);
       }
     },
-    [video]
+    [playback]
   );
   const onPlayFrom = useCallback(
-    (ms: number) => {
-      if (video) {
-        video.currentTime = ms / 1000;
-        video.play().catch(() => {
-          // Autoplay policies can refuse; the seek alone still lands
-        });
-      }
+    (startMs: number, endMs: number) => {
+      playback.playRange(startMs, endMs);
     },
-    [video]
+    [playback]
   );
 
   const ordered = useMemo(
