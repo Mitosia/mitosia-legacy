@@ -36,6 +36,7 @@ import {
   sentenceStartTimes,
 } from "@/lib/intelligence/moments";
 import type { TranscriptData } from "@/lib/transcription/types";
+import type { RangePlayback } from "./use-range-playback";
 
 // Moments review (S6): the discovery candidates rendered for the Gate M1
 // workflow — play each with context, adjust boundaries on the sentence
@@ -179,7 +180,7 @@ export function RerunDiscoveryButton({
 
 interface NudgeControlsProps {
   candidate: MomentCandidateView;
-  onPlayFrom: (ms: number) => void;
+  onPlayFrom: (startMs: number, endMs: number) => void;
   words: TranscriptData["words"] | null;
 }
 
@@ -261,8 +262,8 @@ function NudgeControls({ candidate, onPlayFrom, words }: NudgeControlsProps) {
   );
 
   const playFromIn = useCallback(() => {
-    onPlayFrom(inMs);
-  }, [onPlayFrom, inMs]);
+    onPlayFrom(inMs, outMs);
+  }, [onPlayFrom, inMs, outMs]);
 
   const deltaIn = inMs - candidate.startMs;
   const deltaOut = outMs - candidate.endMs;
@@ -458,7 +459,7 @@ function DecisionControls({ candidate }: { candidate: MomentCandidateView }) {
 interface MomentCardProps {
   candidate: MomentCandidateView;
   onPlay: (event: React.MouseEvent<HTMLButtonElement>) => void;
-  onPlayFrom: (ms: number) => void;
+  onPlayFrom: (startMs: number, endMs: number) => void;
   words: TranscriptData["words"] | null;
 }
 
@@ -476,6 +477,7 @@ function MomentCard({ candidate, onPlay, onPlayFrom, words }: MomentCardProps) {
     >
       <button
         className="flex w-full cursor-pointer flex-col items-start gap-1 text-left"
+        data-end-ms={outMs}
         data-start-ms={inMs}
         data-testid="moment-card"
         onClick={onPlay}
@@ -582,16 +584,16 @@ function MomentsStateCard({
 
 export function MomentsPanel({
   candidates,
+  playback,
   run,
   sourceId,
   transcriptUrl,
-  video,
 }: {
   candidates: MomentCandidateView[];
+  playback: RangePlayback;
   run: MomentsRun;
   sourceId: string;
   transcriptUrl: string | null;
-  video: HTMLVideoElement | null;
 }) {
   if (run.status === "missing") {
     return (
@@ -624,26 +626,26 @@ export function MomentsPanel({
   return (
     <MomentsReady
       candidates={candidates}
+      playback={playback}
       sourceId={sourceId}
       stale={run.stale}
       transcriptUrl={transcriptUrl}
-      video={video}
     />
   );
 }
 
 function MomentsReady({
   candidates,
+  playback,
   sourceId,
   stale,
   transcriptUrl,
-  video,
 }: {
   candidates: MomentCandidateView[];
+  playback: RangePlayback;
   sourceId: string;
   stale: boolean;
   transcriptUrl: string | null;
-  video: HTMLVideoElement | null;
 }) {
   const [showAll, setShowAll] = useState(false);
   const [view, setView] = useState<"rejected" | "top">("top");
@@ -677,28 +679,24 @@ function MomentsReady({
     };
   }, [transcriptUrl]);
 
+  // Card clicks play the span with 3s of lead-in and pause at the
+  // out-point; play-from-in-point skips the lead-in but keeps the stop —
+  // both exist to answer "where does this clip start and end".
   const onPlay = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       const startMs = Number(event.currentTarget.dataset.startMs);
-      if (video && Number.isFinite(startMs)) {
-        video.currentTime = Math.max(0, startMs - PLAY_PREROLL_MS) / 1000;
-        video.play().catch(() => {
-          // Autoplay policies can refuse; the seek alone still lands
-        });
+      const endMs = Number(event.currentTarget.dataset.endMs);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+        playback.playRange(Math.max(0, startMs - PLAY_PREROLL_MS), endMs);
       }
     },
-    [video]
+    [playback]
   );
   const onPlayFrom = useCallback(
-    (ms: number) => {
-      if (video) {
-        video.currentTime = ms / 1000;
-        video.play().catch(() => {
-          // Autoplay policies can refuse; the seek alone still lands
-        });
-      }
+    (startMs: number, endMs: number) => {
+      playback.playRange(startMs, endMs);
     },
-    [video]
+    [playback]
   );
   const onViewChange = useCallback((groupValue: unknown[]) => {
     const next = groupValue.at(0);

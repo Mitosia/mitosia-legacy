@@ -76,10 +76,11 @@ test("the transcript panel seeks, searches, and highlights", async ({
   await page.waitForURL(SOURCE_PAGE_URL, { timeout: 60_000 });
   const sourceId = new URL(page.url()).pathname.split("/").pop() ?? "";
 
-  // The mock transcription settles moments after ready; the poller swaps
-  // the status card for the panel.
+  // The mock transcription settles moments after ready; the poller grows
+  // the sidebar's Transcript tab.
+  await page.getByTestId("workspace-tab-transcript").click({ timeout: 30_000 });
   const panel = page.getByTestId("transcript-panel");
-  await expect(panel).toBeVisible({ timeout: 30_000 });
+  await expect(panel).toBeVisible();
 
   // Deterministic mock content rendered with speaker chips. The full
   // spaced sentence is the assertion on purpose: words are individual
@@ -163,8 +164,9 @@ test("the transcript panel seeks, searches, and highlights", async ({
   expect(analysis.context_snapshot_id).not.toBeNull();
   expect(Array.isArray(analysis.speaker_suggestions)).toBe(true);
 
-  // Source map UI: the poller swaps the page once analysis lands — chapters
-  // render and clicking one seeks the media element.
+  // Source map UI: the poller grows the Overview tab once analysis lands —
+  // chapters render and clicking one seeks the always-visible player.
+  await page.getByTestId("workspace-tab-overview").click({ timeout: 15_000 });
   const sourceMap = page.getByTestId("source-map");
   await expect(sourceMap).toBeVisible({ timeout: 15_000 });
   const chapterItems = sourceMap.getByTestId("chapter-item");
@@ -193,6 +195,7 @@ test("the transcript panel seeks, searches, and highlights", async ({
   await expect(banner).toBeVisible();
   await page.getByTestId("apply-speaker-suggestions").click();
   await expect(banner).toBeHidden({ timeout: 15_000 });
+  await page.getByTestId("workspace-tab-transcript").click();
   await expect(page.getByTestId("transcript-speaker").first()).toHaveText(
     "Mock Host",
     { timeout: 15_000 }

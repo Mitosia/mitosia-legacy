@@ -19,6 +19,7 @@ import {
   searchSourceAction,
 } from "@/lib/actions/intelligence";
 import type { QuestionHistoryItem } from "@/lib/intelligence/qa";
+import type { RangePlayback } from "./use-range-playback";
 
 // Ask & search (S5): one card, two modes over the same retrieval index.
 // Ask synthesizes an answer with VERIFIED citations — each chip seeks and
@@ -74,6 +75,7 @@ function AnswerBlock({
           {citations.map((citation) => (
             <button
               className="flex max-w-full cursor-pointer items-baseline gap-1.5 rounded-md border px-2 py-1 text-left hover:bg-muted"
+              data-end-ms={citation.endMs}
               data-start-ms={citation.startMs}
               data-testid="qa-citation"
               key={`${citation.startMs}-${citation.endMs}`}
@@ -242,6 +244,7 @@ function SearchMode({
             <li key={`${result.startMs}-${result.endMs}`}>
               <button
                 className="flex w-full cursor-pointer items-baseline gap-3 rounded-md px-2 py-1.5 text-left hover:bg-muted"
+                data-end-ms={result.endMs}
                 data-start-ms={result.startMs}
                 data-testid="search-result"
                 onClick={onPlay}
@@ -264,26 +267,26 @@ function SearchMode({
 
 export function AskPanel({
   history,
+  playback,
   sourceId,
-  video,
 }: {
   history: QuestionHistoryItem[];
+  playback: RangePlayback;
   sourceId: string;
-  video: HTMLVideoElement | null;
 }) {
   const [mode, setMode] = useState<Mode>("ask");
 
+  // Citations and search results are exact chunk ranges: play the span and
+  // pause at its out-point so the evidence ends where the evidence ends.
   const onPlay = useCallback<PlayHandler>(
     (event) => {
       const startMs = Number(event.currentTarget.dataset.startMs);
-      if (video && Number.isFinite(startMs)) {
-        video.currentTime = startMs / 1000;
-        video.play().catch(() => {
-          // Autoplay policies can refuse; the seek alone still lands
-        });
+      const endMs = Number(event.currentTarget.dataset.endMs);
+      if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+        playback.playRange(startMs, endMs);
       }
     },
-    [video]
+    [playback]
   );
 
   const onModeChange = useCallback((groupValue: unknown[]) => {
