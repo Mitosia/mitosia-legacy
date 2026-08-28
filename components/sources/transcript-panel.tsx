@@ -389,7 +389,10 @@ export function TranscriptPanel({
 
   return (
     <div className="flex flex-col gap-3" data-testid="transcript-panel">
-      <div className="flex items-center gap-2">
+      {/* flex-wrap: in the workspace sidebar this toolbar is narrower than
+          its buttons row — without wrapping it overflows the card and the
+          search input collapses to nothing. */}
+      <div className="flex flex-wrap items-center gap-2">
         <Input
           className="max-w-xs"
           data-testid="transcript-search"

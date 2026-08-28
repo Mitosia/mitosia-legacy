@@ -277,7 +277,7 @@ function WorkspaceSidebar({
       </TabsList>
       {sections.map((section) => (
         <TabsContent
-          className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:[&>*]:min-h-full"
+          className="lg:min-h-0 lg:flex-1 lg:overflow-y-auto lg:p-px lg:[&>*]:min-h-full"
           keepMounted
           key={section.tab}
           value={section.tab}
@@ -310,7 +310,10 @@ export function SourceWorkspace(props: SourceWorkspaceProps) {
 
   return (
     <div className="flex flex-col gap-6 lg:grid lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] lg:items-start">
-      <div className="flex flex-col gap-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
+      {/* p-px on both scroll containers: a card border sitting exactly on
+          the overflow clip edge disappears; one pixel of inset keeps every
+          border visible. */}
+      <div className="flex flex-col gap-4 lg:sticky lg:top-4 lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto lg:p-px">
         <SourcePlayer
           hlsUrl={hlsUrl}
           onVideoElement={setVideo}
