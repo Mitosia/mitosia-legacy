@@ -1,7 +1,12 @@
 import { getSessionCookie } from "better-auth/cookies";
 import { type NextRequest, NextResponse } from "next/server";
 
-const AUTH_PAGES = new Set(["/sign-in", "/sign-up"]);
+const AUTH_PAGES = new Set([
+  "/forgot-password",
+  "/reset-password",
+  "/sign-in",
+  "/sign-up",
+]);
 
 // Optimistic redirect only — real session validation happens in server
 // components and route handlers. Do not add authorization logic here.
@@ -29,7 +34,9 @@ export const config = {
     "/dashboard/:path*",
     "/onboarding",
     "/projects/:path*",
+    "/reset-password",
     "/settings/:path*",
+    "/forgot-password",
     "/sign-in",
     "/sign-up",
   ],
