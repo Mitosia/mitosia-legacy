@@ -36,7 +36,7 @@
 ### S0 — Platform bootstrap
 **Goal:** Deploy-on-merge to a real environment before any product code.
 - Hostinger VPS provisioned; Dokploy installed; Cloudflare in front (DNS, CDN, WAF)
-- GitHub Actions pipeline: checks → Docker image → GHCR → Dokploy staging/production
+- Protected validation pipeline → Dokploy staging/production deployment
 - Neon Postgres + Drizzle baseline; Better Auth skeleton; monorepo layout per tech-stack §15
 - App shell: navigation frame, design tokens, dark mode, empty states
 - Langfuse and Infisical containers running on Dokploy
@@ -47,7 +47,7 @@
 **Goal:** The canonical object model exists and is isolated.
 - Organizations, members, invitations; roles v1 (owner, admin, member; contractor stub)
 - Clients → brands → campaigns → projects CRUD with the context switcher
-- RLS policies on every table; first automated cross-tenant isolation tests in CI
+- RLS policies on every table; first automated cross-tenant isolation tests in the required PR gate
 - Audit log table and event writer for sensitive actions
 
 **Exit:** Two seeded organizations demonstrably cannot see each other's data through any UI or query path.
@@ -252,7 +252,7 @@
 
 ### S22 — Hardening
 **Goal:** Boring under stress.
-- Security pass: isolation suite green in CI, audit coverage review, signed-URL and rights-blocking audit, rate limits
+- Security pass: isolation suite green in the required PR gate, audit coverage review, signed-URL and rights-blocking audit, rate limits
 - Load tests on ingest, render, and publish paths; cost-per-source-hour review against targets
 - Incident runbooks, status page, alerting SLOs; backup restore drill
 

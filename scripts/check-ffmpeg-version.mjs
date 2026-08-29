@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
 // The one place that says which ffmpeg the ingest pipeline is written
-// against. Every environment that runs `lib/media/` — a dev machine, the CI
-// e2e job, the deployed container — must agree on this minor, because an
+// against. Every environment that runs `lib/media/` — a dev/local-gate
+// machine, the Trigger worker, the deployed container — must agree on this minor, because an
 // ffmpeg option that does not exist is a hard failure: ffmpeg refuses to
 // start and the ingest dies, it is not a warning that degrades gracefully.
 //
@@ -23,7 +23,7 @@ import { execFileSync } from "node:child_process";
 const EXPECTED_MINOR = "8.1";
 
 // Version lines vary by build. Alpine/Homebrew: "ffmpeg version 8.1.2 …".
-// The BtbN-built static builds CI uses (mirrored per scripts/ffmpeg-pin.mjs)
+// The BtbN-built static build Trigger uses (mirrored per scripts/ffmpeg-pin.mjs)
 // report the branch git-describe: "ffmpeg version n8.1.2-44-g7c533d0f86-…".
 // Git master builds report "N-126039-g…" with no version at all, and are
 // rejected — an untagged build is not a version we can pin against.

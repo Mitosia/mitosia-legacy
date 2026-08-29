@@ -9,6 +9,8 @@
     "check:abort-rule": "esbuild scripts/check-multipart-abort-rule.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --outfile=scripts/.check-multipart-abort-rule.cjs && node --env-file-if-exists=.env scripts/.check-multipart-abort-rule.cjs",
     "check:ffmpeg": "node scripts/check-ffmpeg-version.mjs",
     "check:traefik": "node scripts/check-traefik-config.mjs",
+    "ci:attest": "node scripts/verified-pr.mjs attest",
+    "ci:local": "node scripts/local-ci.mjs",
     "db:auth:generate": "pnpm dlx @better-auth/cli@latest generate --config lib/auth.ts --output lib/db/schema/auth.ts --yes",
     "db:generate": "drizzle-kit generate",
     "db:latency": "node --env-file-if-exists=.env scripts/db-latency.mjs",
@@ -22,6 +24,9 @@
     "fix": "ultracite fix",
     "lint": "ultracite check",
     "moments:metrics": "esbuild scripts/moment-metrics.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --alias:@=. --outfile=scripts/.moment-metrics.cjs && node --env-file-if-exists=.env scripts/.moment-metrics.cjs",
+    "pr:verified": "node scripts/verified-pr.mjs pr",
+    "prepare": "node scripts/install-git-hooks.mjs",
+    "push:verified": "node scripts/verified-pr.mjs push",
     "start": "next start",
     "test": "vitest run",
     "typecheck": "next typegen && tsc --noEmit"

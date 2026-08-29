@@ -1,6 +1,6 @@
 // Specs that assert on database state need the connection strings in their
 // own process; only the dev server would otherwise get them. Existing
-// environment variables win, so CI's job env is unaffected.
+// environment variables win, so the exact-commit gate's isolated env is unaffected.
 import "dotenv/config";
 import { defineConfig, devices } from "@playwright/test";
 
@@ -17,20 +17,22 @@ const BASE_URL = `http://localhost:${PORT}`;
 export default defineConfig({
   forbidOnly: !!process.env.CI,
   // Parallelism is per spec FILE (fullyParallel stays false), so each file's
-  // beforeAll fixture generation runs once, in one worker. CI runs 2 workers:
+  // beforeAll fixture generation runs once, in one worker. The local gate sets
+  // CI=1 and runs 2 workers against a disposable database and bucket:
   // every test provisions its own account + organization, so RLS org-scoping
   // keeps concurrent writers invisible to each other, storage keys are
   // org-prefixed, and Better Auth's rate limiter is off in dev mode. Two, not
-  // more — the standard GitHub runner has 2 vCPUs, and 3 workers piling
-  // ingest pipelines on it blew serial-tuned timeouts (PR #62's first run).
-  // Local runs stay serial — the shared dev DB also holds the developer's
-  // own data.
+  // more — 3 workers piling ingest pipelines together already blew
+  // serial-tuned timeouts (PR #62's first run). Ordinary local runs stay
+  // serial because the shared dev DB also holds the developer's own data.
   fullyParallel: false,
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  // `github` annotates PR failures; `list` prints per-test durations so the
-  // CI log shows where the time goes.
+  // Keep the former CI reporter shape in gate mode: `list` prints per-test
+  // durations and `github` emits concise annotation syntax in captured logs.
   reporter: process.env.CI ? [["github"], ["list"]] : "list",
-  retries: process.env.CI ? 1 : 0,
+  // A first-attempt failure blocks local attestation. The former hosted CI
+  // kept one retry for traces, but a solo gate must not certify a flaky SHA.
+  retries: process.env.CI && !process.env.LOCAL_CI ? 1 : 0,
   testDir: "./e2e",
   use: {
     baseURL: BASE_URL,

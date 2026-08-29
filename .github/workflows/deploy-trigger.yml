@@ -24,9 +24,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Main is protected by strict, admin-enforced PR checks, so the tree arriving
-  # here has already passed CI. Starting immediately avoids rerunning the same
-  # 6-minute suite before updating the worker.
+  # Main is protected by strict, admin-enforced local validation proof, so the
+  # tree arriving here has already passed the exact-commit gate. Starting
+  # immediately avoids rerunning the full suite before updating the worker.
   deploy-trigger:
     runs-on: ubuntu-latest
     if: vars.TRIGGER_PROJECT_REF != ''

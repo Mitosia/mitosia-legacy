@@ -132,7 +132,7 @@ from the in-process fallback to `tasks.trigger("ingest-source", …)`.
 Automatic (preferred): `.github/workflows/deploy-trigger.yml` deploys the
 tasks immediately after a protected merge to `main` when Trigger entrypoints,
 their broad `lib/**` dependency tree, build inputs, database contract, or
-dependencies changed. PR CI has already passed before the protected merge;
+dependencies changed. The exact-commit local gate has already passed before the protected merge;
 UI-only and docs-only merges do not rebuild an identical worker.
 It is **skipped until two repository settings exist** (Settings → Secrets and
 variables → Actions):
@@ -156,14 +156,14 @@ TRIGGER_PROJECT_REF=proj_… npx trigger.dev@4.5.12 deploy
 
 `trigger.config.ts` includes the custom **`pinnedFfmpeg` build extension**
 (not the bundled `ffmpeg()`, which installs Debian's 5.1.x), so the cloud
-image gets the same checksummed 8.1.x static build CI uses — mirrored on
+image gets the checksummed 8.1.x static build the local gate requires — mirrored on
 this repo's own `ffmpeg-static/*` GitHub release (see the ffmpeg rules in
 AGENTS.md and `scripts/ffmpeg-pin.mjs`).
 
 > **Deploys need GitHub auth on the deploying machine.** Config-eval
 > downloads the pinned archive from the private repo's release and ships
 > it to Trigger's builders inside the image build context — the builders
-> themselves can't reach a private release. The CI job passes
+> themselves can't reach a private release. The deploy workflow passes
 > `GH_TOKEN: ${{ github.token }}`; for a manual deploy, an authenticated
 > `gh` (`gh auth status`) is enough. Without it the deploy aborts at
 > config-eval with instructions, before anything is uploaded.
