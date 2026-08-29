@@ -795,6 +795,13 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     );
   }
 
+  // The failed re-plan refreshed the route while the transcript was marked
+  // failed, so that render intentionally has no transcript URL and keeps
+  // sentence-boundary nudges disabled. Refresh after restoring the fixture's
+  // ready state before exercising those controls.
+  await page.reload();
+  await page.getByTestId("workspace-tab-segments").click({ timeout: 15_000 });
+
   // Range playback with a mid-media out-point: the first chapter's end is
   // strictly inside the recording (the drop follows it), so a paused video
   // sitting there PROVES the stop fired — it cannot be the media ending.
@@ -834,7 +841,9 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
 
   // Nudge the first chapter's out-point into the adjacent dropped span. The
   // shared cut persists on both physical rows, including across keep/drop.
-  await firstKeep.getByTestId("segment-nudge-out-next").click();
+  const nudgeOutNext = firstKeep.getByTestId("segment-nudge-out-next");
+  await expect(nudgeOutNext).toBeEnabled({ timeout: 15_000 });
+  await nudgeOutNext.click();
   await expect(firstKeep.getByTestId("segment-nudge-delta")).toBeVisible();
   await expect
     .poll(
