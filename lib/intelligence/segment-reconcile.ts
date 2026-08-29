@@ -6,8 +6,6 @@ import type { RawSegmentItem } from "@/lib/ai/capabilities/segment-plan";
 // false boundary without giving it authority to reorder, omit, or invent
 // material.
 
-export const SEGMENT_PLAN_ARCHITECTURE_VERSION = 2;
-
 export interface SegmentAtom extends RawSegmentItem {
   atomId: string;
 }

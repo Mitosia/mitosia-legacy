@@ -78,6 +78,11 @@ export interface SegmentView {
 
 export interface SegmentsRun {
   error: string | null;
+  publisherHumanEdited?: boolean;
+  publisherOperationCount?: number;
+  publisherRevised?: boolean;
+  publisherStatus?: string | null;
+  publisherWarnings?: number;
   stale: boolean;
   status: string;
 }
@@ -961,6 +966,11 @@ export function SegmentsPanel({
     <SegmentsReady
       error={run.error}
       playback={playback}
+      publisherHumanEdited={run.publisherHumanEdited ?? false}
+      publisherOperationCount={run.publisherOperationCount ?? 0}
+      publisherRevised={run.publisherRevised ?? false}
+      publisherStatus={run.publisherStatus ?? null}
+      publisherWarnings={run.publisherWarnings ?? 0}
       segments={segments}
       sourceId={sourceId}
       stale={run.stale}
@@ -972,6 +982,11 @@ export function SegmentsPanel({
 function SegmentsReady({
   error,
   playback,
+  publisherHumanEdited,
+  publisherOperationCount,
+  publisherRevised,
+  publisherStatus,
+  publisherWarnings,
   segments,
   sourceId,
   stale,
@@ -979,6 +994,11 @@ function SegmentsReady({
 }: {
   error: string | null;
   playback: RangePlayback;
+  publisherHumanEdited: boolean;
+  publisherOperationCount: number;
+  publisherRevised: boolean;
+  publisherStatus: string | null;
+  publisherWarnings: number;
   segments: SegmentView[];
   sourceId: string;
   stale: boolean;
@@ -1074,6 +1094,32 @@ function SegmentsReady({
           <div className="flex flex-wrap items-center gap-2 text-muted-foreground text-sm">
             <span>This chapter plan is out of date for this source.</span>
             <PlanSegmentsButton sourceId={sourceId} />
+          </div>
+        ) : null}
+        {publisherStatus === "passed" ? (
+          <div
+            className="rounded-md border bg-muted/35 p-3"
+            data-testid="segment-publisher-status"
+          >
+            <p className="font-medium text-sm">
+              {publisherHumanEdited
+                ? "Publisher Editor verified the generated baseline."
+                : "Publisher Editor verified this chapter plan."}
+            </p>
+            <p className="mt-1 text-muted-foreground text-xs">
+              {publisherOperationCount === 0
+                ? "The complete draft passed without an editorial change."
+                : `${publisherOperationCount} automatic editorial ${publisherOperationCount === 1 ? "operation" : "operations"} applied.`}
+              {publisherRevised
+                ? " The independent verifier requested a second editorial pass and then approved it."
+                : " The independent verifier approved it on the first pass."}
+              {publisherWarnings > 0
+                ? ` ${publisherWarnings} non-blocking ${publisherWarnings === 1 ? "note remains" : "notes remain"}.`
+                : ""}
+              {publisherHumanEdited
+                ? " Human edits have been applied since AI verification and remain the publisher's authority."
+                : ""}
+            </p>
           </div>
         ) : null}
         <ol className="flex flex-col gap-2">

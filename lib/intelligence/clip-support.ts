@@ -2,8 +2,10 @@ import { and, eq } from "drizzle-orm";
 import {
   type ClipPrefixInput,
   type EpisodeBrief,
+  episodeBriefSchema,
   runEpisodeBriefPass,
   validateClipProposalMode,
+  validateEpisodeBriefGrid,
 } from "@/lib/ai/capabilities/episode-clips";
 import type { StructuredUsage } from "@/lib/ai/generate";
 import { episodeBrief, sourceArtifact } from "@/lib/db/schema";
@@ -14,8 +16,9 @@ import { getObject } from "@/lib/storage";
 
 // Shared plumbing for the cutting room's pipelines (docs/
 // clip-cut-architecture.md §4): the persisted Director brief and the
-// shot-change grid. Both degrade to absence — a missing shots artifact
-// (pre-cutting-room sources) or a failed Director pass never fails a run.
+// shot-change grid. Both can be returned as absent here; each caller owns the
+// policy. Missing shots remain optional, while v3 segment publication treats
+// a failed Director pass as fatal because it removes global coverage intent.
 
 interface ClipJobPayload {
   organizationId: string;
@@ -87,10 +90,10 @@ function mockBrief(input: ClipPrefixInput): EpisodeBrief {
 }
 
 // The Director's brief, persisted per source + transcript revision
-// (§4 Pass 1): reused when fresh, recomposed when the revision moved,
-// never a reason a clip run fails. Segment planning is a button that may
-// run hours after discovery — this row is the durable cross-run memory
-// the prompt cache cannot be.
+// (§4 Pass 1): reused when fresh, recomposed when the revision moved. Moment
+// discovery may still degrade without it; Architecture v3 segment planning
+// explicitly treats a missing brief as a publication-gate failure. This row
+// is the durable cross-run memory the prompt cache cannot be.
 export async function ensureEpisodeBrief(
   payload: ClipJobPayload,
   input: ClipPrefixInput,
@@ -108,7 +111,14 @@ export async function ensureEpisodeBrief(
     return row ?? null;
   });
   if (existing && existing.revision === transcriptRevision) {
-    return { brief: existing.brief as EpisodeBrief, usage: null };
+    const parsed = episodeBriefSchema.safeParse(existing.brief);
+    if (
+      parsed.success &&
+      validateEpisodeBriefGrid(parsed.data, input.grid).length === 0
+    ) {
+      return { brief: parsed.data, usage: null };
+    }
+    console.warn("[clips] stored episode brief failed current validation");
   }
 
   let brief: EpisodeBrief | null = null;

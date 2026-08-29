@@ -5,11 +5,13 @@ import {
   clipProposalTransportSchema,
   segmentPlanTransportSchema,
   validateClipProposalMode,
+  validateEpisodeBriefGrid,
 } from "@/lib/ai/capabilities/episode-clips";
 import {
   runSegmentPlan,
   validateSegmentRoughPlan,
 } from "@/lib/ai/capabilities/segment-plan";
+import { buildCutGrid } from "@/lib/intelligence/grid";
 
 const keep = {
   anchorText: "A verbatim phrase",
@@ -157,6 +159,64 @@ describe("clip proposal transport boundary", () => {
         ...envelope,
       }).success
     ).toBe(false);
+  });
+});
+
+describe("validateEpisodeBriefGrid", () => {
+  const grid = buildCutGrid([
+    {
+      confidence: 1,
+      endMs: 900,
+      speaker: "0",
+      startMs: 0,
+      text: "First topic.",
+    },
+    {
+      confidence: 1,
+      endMs: 1900,
+      speaker: "1",
+      startMs: 1000,
+      text: "Second topic.",
+    },
+  ]);
+
+  it("requires a full spine and valid marquee/drop ranges", () => {
+    expect(
+      validateEpisodeBriefGrid(
+        {
+          dropZones: [],
+          marqueeArcs: [
+            { endP: 0, note: "Complete.", startP: 0, title: "First" },
+          ],
+          spine: [
+            { endP: 0, startP: 0, topic: "First" },
+            { endP: 1, startP: 1, topic: "Second" },
+          ],
+          tone: "Focused.",
+        },
+        grid
+      )
+    ).toEqual([]);
+
+    expect(
+      validateEpisodeBriefGrid(
+        {
+          dropZones: [{ endP: 1, reason: "thin", startP: 2 }],
+          marqueeArcs: [
+            { endP: 9, note: "Missing.", startP: 9, title: "Unknown" },
+          ],
+          spine: [{ endP: 0, startP: 0, topic: "Incomplete" }],
+          tone: "Focused.",
+        },
+        grid
+      )
+    ).toEqual(
+      expect.arrayContaining([
+        "the brief spine must cover the full paragraph grid",
+        "marquee arc 0 has an invalid paragraph range P9-P9",
+        "drop zone 0 has an invalid paragraph range P2-P1",
+      ])
+    );
   });
 });
 

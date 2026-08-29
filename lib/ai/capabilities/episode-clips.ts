@@ -50,8 +50,8 @@ const briefDropZoneSchema = z
 
 export const episodeBriefSchema = z
   .object({ tone: z.string().min(1).max(240) })
-  .extend({ spine: z.array(briefSpineSchema).max(40) })
-  .extend({ marqueeArcs: z.array(briefArcSchema).max(12) })
+  .extend({ spine: z.array(briefSpineSchema).min(1).max(40) })
+  .extend({ marqueeArcs: z.array(briefArcSchema).min(1).max(12) })
   .extend({ dropZones: z.array(briefDropZoneSchema).max(24) });
 
 export type EpisodeBrief = z.infer<typeof episodeBriefSchema>;
@@ -361,6 +361,57 @@ export function validateClipProposalMode(
     };
   }
   return { issues: [], proposal: parsed.data };
+}
+
+export function validateEpisodeBriefGrid(
+  brief: EpisodeBrief,
+  grid: CutGrid
+): string[] {
+  const paragraphPosition = new Map(
+    grid.paragraphs.map((paragraph, position) => [paragraph.id, position])
+  );
+  const issues: string[] = [];
+  const rangePositions = (
+    label: string,
+    startP: number,
+    endP: number
+  ): { end: number; start: number } | null => {
+    const start = paragraphPosition.get(startP);
+    const end = paragraphPosition.get(endP);
+    if (start === undefined || end === undefined || start > end) {
+      issues.push(
+        `${label} has an invalid paragraph range P${startP}-P${endP}`
+      );
+      return null;
+    }
+    return { end, start };
+  };
+
+  let spineCursor = 0;
+  for (const [index, entry] of brief.spine.entries()) {
+    const range = rangePositions(
+      `spine entry ${index}`,
+      entry.startP,
+      entry.endP
+    );
+    if (!range) {
+      continue;
+    }
+    if (range.start !== spineCursor) {
+      issues.push(`spine entry ${index} does not continue the exact cover`);
+    }
+    spineCursor = range.end + 1;
+  }
+  if (spineCursor !== grid.paragraphs.length) {
+    issues.push("the brief spine must cover the full paragraph grid");
+  }
+  for (const [index, arc] of brief.marqueeArcs.entries()) {
+    rangePositions(`marquee arc ${index}`, arc.startP, arc.endP);
+  }
+  for (const [index, zone] of brief.dropZones.entries()) {
+    rangePositions(`drop zone ${index}`, zone.startP, zone.endP);
+  }
+  return issues.slice(0, MAX_VALIDATION_ISSUES);
 }
 
 function assertClipProposalMode(
@@ -707,6 +758,11 @@ export async function runEpisodeBriefPass(
       outputStrategy: "strictJsonSchema",
       validateOutput: (output) => {
         assertClipProposalMode(output, "brief");
+        const brief = episodeBriefSchema.parse(output.brief);
+        const issues = validateEpisodeBriefGrid(brief, input.grid);
+        if (issues.length > 0) {
+          throw new Error(`brief grid integrity: ${issues.join("; ")}`);
+        }
         return output;
       },
     }
