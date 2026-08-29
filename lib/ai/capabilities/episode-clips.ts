@@ -8,7 +8,7 @@ import { generateStructured, type StructuredResult } from "../generate";
 // (docs/clip-cut-architecture.md §4): the Director's brief and both rough
 // cuts and the global Reconciler read ONE cached prefix (context +
 // inventories + the coarse
-// paragraph-ID transcript) under ONE system string and ONE union schema —
+// paragraph-ID transcript) under ONE system string and ONE transport schema —
 // the S5 cache-key rule: tools/schema and system precede messages in the
 // Anthropic cache key, so any per-mode difference there would bust the
 // cache that makes four Opus passes affordable. Only the post-breakpoint
@@ -113,10 +113,10 @@ const segmentPlanSchema = z
 
 export type SegmentRoughPlan = z.infer<typeof segmentPlanSchema>;
 
-// The global chapter Reconciler is deliberately part of the SAME union
-// schema as the Director and rough Editors. Anthropic's cache key includes
-// the output schema, so a separate schema would throw away the full-episode
-// cache just before the pass that most needs the Director's view.
+// The global chapter Reconciler remains part of the SAME semantic envelope
+// as the Director and rough Editors. The compact provider transport below is
+// byte-identical across them, preserving the full-episode cache just before
+// the pass that most needs the Director's view.
 const segmentGroupSchema = z
   .object({ reasoning: z.string().min(1).max(REASONING_MAX) })
   .extend({
@@ -137,9 +137,9 @@ const segmentReconciliationSchema = z.object({
 
 export type SegmentReconciliation = z.infer<typeof segmentReconciliationSchema>;
 
-// ONE schema for all four modes: exactly one branch is non-null, named by
-// `mode`. Array bounds are output-budget ceilings, never targets — the
-// instructions name no counts (the count-anchoring rule).
+// ONE exact semantic schema for all four modes: exactly one branch is
+// non-null, named by `mode`. Array bounds are output-budget ceilings, never
+// targets — the instructions name no counts (the count-anchoring rule).
 const clipProposalBaseSchema = z
   .object({
     mode: z.enum(["brief", "moments", "segments", "segment_reconcile"]),
@@ -182,6 +182,87 @@ export const clipProposalSchema = clipProposalBaseSchema.superRefine(
 );
 
 export type ClipProposal = z.infer<typeof clipProposalSchema>;
+
+// Provider transport is intentionally much smaller and more permissive than
+// the semantic schema above. Anthropic compiles native output schemas into a
+// grammar and the former four-mode semantic union exceeded that compiler's
+// limit on the Karma episode. Other providers also omit several Zod
+// refinements (transforms, lengths and cross-field rules) from their grammar,
+// then AI SDK rejects the otherwise parseable JSON before our deterministic
+// repair loops can inspect it.
+//
+// Keep this byte-identical across the four episode passes for prompt-cache
+// reuse. The instructions describe each selected payload; code below applies
+// the exact schema and mode relationship after transport succeeds.
+export const clipProposalTransportSchema = z.object({
+  brief: z.unknown().optional(),
+  candidates: z.unknown().optional(),
+  mode: z.string().optional(),
+  plan: z.unknown().optional(),
+  reconciliation: z.unknown().optional(),
+});
+
+export type ClipProposalTransport = z.infer<typeof clipProposalTransportSchema>;
+export type ClipProposalMode = keyof typeof MODE_BRANCH;
+
+export interface ClipProposalValidation {
+  issues: string[];
+  proposal: ClipProposal | null;
+}
+
+const MAX_VALIDATION_ISSUES = 16;
+const MAX_VALIDATION_ISSUE_LENGTH = 240;
+
+function proposalIssue(path: PropertyKey[], message: string): string {
+  const location = path.length > 0 ? path.join(".") : "output";
+  return `${location}: ${message}`.slice(0, MAX_VALIDATION_ISSUE_LENGTH);
+}
+
+export function validateClipProposalMode(
+  transport: ClipProposalTransport,
+  expectedMode: ClipProposalMode
+): ClipProposalValidation {
+  const normalized = {
+    brief: null,
+    candidates: null,
+    plan: null,
+    reconciliation: null,
+    ...transport,
+  };
+  const parsed = clipProposalSchema.safeParse(normalized);
+  if (!parsed.success) {
+    return {
+      issues: parsed.error.issues
+        .slice(0, MAX_VALIDATION_ISSUES)
+        .map((issue) => proposalIssue(issue.path, issue.message)),
+      proposal: null,
+    };
+  }
+  if (parsed.data.mode !== expectedMode) {
+    return {
+      issues: [
+        proposalIssue(
+          ["mode"],
+          `expected ${expectedMode}, received ${parsed.data.mode}`
+        ),
+      ],
+      proposal: null,
+    };
+  }
+  return { issues: [], proposal: parsed.data };
+}
+
+function assertClipProposalMode(
+  transport: ClipProposalTransport,
+  expectedMode: ClipProposalMode
+): void {
+  const validated = validateClipProposalMode(transport, expectedMode);
+  if (!validated.proposal) {
+    throw new Error(
+      `${expectedMode} output failed integrity: ${validated.issues.join("; ")}`
+    );
+  }
+}
 
 // ---- Shared system + prefix ----------------------------------------------
 
@@ -301,6 +382,11 @@ const BRIEF_INSTRUCTIONS = `Your job: MODE "brief". Watch the whole episode firs
   warmup chatter, dead stretches), each with its reason.
 - tone: two sentences on the episode's register and audience.
 
+The brief object has this exact shape:
+{ tone, spine: [{ topic, startP, endP }], marqueeArcs:
+[{ title, startP, endP, note }], dropZones:
+[{ startP, endP, reason }] }.
+
 Set mode to "brief", fill only "brief"; candidates, plan, and
 reconciliation are null.`;
 
@@ -329,6 +415,10 @@ For each candidate emit:
 - seedIds: ids from the highlight inventory you drew on (empty if none).
 - scores: comprehensibility, hook, insight, relevance, risk — 0-1,
   honestly. risk flags sensitive material; flag it, never censor it.
+
+Each candidates item has this exact shape:
+{ reasoning, startP, endP, anchorText, title, hook, summary, seedIds,
+scores: { comprehensibility, hook, insight, relevance, risk } }.
 
 Rank best first; prefer distinct moments over near-duplicates of one
 beat. Set mode to "moments", fill only "candidates"; brief, plan, and
@@ -366,6 +456,11 @@ THEN emit the partition:
 - DROP what earns no chapter — housekeeping, sponsor reads, warmup
   chatter, low-energy stretches, the weaker telling of a story told twice
   — each with its reason. Dropping is a first-class editorial decision.
+
+The plan object has this exact shape:
+{ tableOfContents: [string], segments: [{ startP, endP,
+kind: "keep" | "drop", anchorText, title, hook, summary, dropReason }] }.
+Use null for a field that the rules say does not apply.
 
 Set mode to "segments", fill only "plan"; brief, candidates, and
 reconciliation are null.`;
@@ -459,6 +554,10 @@ Your output is an EXACT ORDERED COVER of the atoms:
 - The final table of contents is derived by code from these KEEP groups, so
   do not output another TOC.
 
+The reconciliation object has this exact shape:
+{ groups: [{ reasoning, atomIds, kind: "keep" | "drop", title, hook,
+summary, dropReason }] }. Use null for fields that do not apply.
+
 ROUGH TABLE OF CONTENTS:
 ${toc || "(empty)"}
 
@@ -488,26 +587,38 @@ export { briefToPromptText };
 
 export async function runEpisodeBriefPass(
   input: ClipPrefixInput
-): Promise<StructuredResult<ClipProposal>> {
+): Promise<StructuredResult<ClipProposalTransport>> {
   return await generateStructured(
     "episode-brief.compose",
     CLIP_SYSTEM,
     BRIEF_INSTRUCTIONS,
-    clipProposalSchema,
-    { cachedPrefix: buildClipPrefix(input) }
+    clipProposalTransportSchema,
+    {
+      anthropicStructuredOutputMode: "jsonTool",
+      cachedPrefix: buildClipPrefix(input),
+      validateOutput: (output) => {
+        assertClipProposalMode(output, "brief");
+      },
+    }
   );
 }
 
 export async function runMomentRoughPass(
   input: ClipPrefixInput,
   brief: EpisodeBrief | null
-): Promise<StructuredResult<ClipProposal>> {
+): Promise<StructuredResult<ClipProposalTransport>> {
   return await generateStructured(
     "moment-discovery.candidates",
     CLIP_SYSTEM,
     momentsInstructions(brief ? briefToPromptText(brief) : null),
-    clipProposalSchema,
-    { cachedPrefix: buildClipPrefix(input) }
+    clipProposalTransportSchema,
+    {
+      anthropicStructuredOutputMode: "jsonTool",
+      cachedPrefix: buildClipPrefix(input),
+      validateOutput: (output) => {
+        assertClipProposalMode(output, "moments");
+      },
+    }
   );
 }
 
@@ -517,7 +628,7 @@ export async function runSegmentRoughPass(
   momentInventory: readonly ClipInventoryItem[],
   validationIssues: readonly string[] = [],
   previousPlan: SegmentRoughPlan | null = null
-): Promise<StructuredResult<ClipProposal>> {
+): Promise<StructuredResult<ClipProposalTransport>> {
   const inventory = inventoryPreamble(
     "KNOWN PEAK MOMENTS (coverage evidence only — never chapter boundaries or a target count)",
     momentInventory
@@ -537,8 +648,11 @@ export async function runSegmentRoughPass(
     "segment-plan.partition",
     CLIP_SYSTEM,
     `${segmentsInstructions(brief ? briefToPromptText(brief) : null)}${inventory}${repair}`,
-    clipProposalSchema,
-    { cachedPrefix: buildClipPrefix(input) }
+    clipProposalTransportSchema,
+    {
+      anthropicStructuredOutputMode: "jsonTool",
+      cachedPrefix: buildClipPrefix(input),
+    }
   );
 }
 
@@ -549,7 +663,7 @@ export async function runSegmentReconcilePass(
   atoms: readonly SegmentReconcileAtomInput[],
   validationIssues: readonly string[] = [],
   previousGroups: SegmentReconciliation["groups"] = []
-): Promise<StructuredResult<ClipProposal>> {
+): Promise<StructuredResult<ClipProposalTransport>> {
   return await generateStructured(
     "segment-plan.reconcile",
     CLIP_SYSTEM,
@@ -561,7 +675,10 @@ export async function runSegmentReconcilePass(
       previousGroups,
       input.grid
     ),
-    clipProposalSchema,
-    { cachedPrefix: buildClipPrefix(input) }
+    clipProposalTransportSchema,
+    {
+      anthropicStructuredOutputMode: "jsonTool",
+      cachedPrefix: buildClipPrefix(input),
+    }
   );
 }

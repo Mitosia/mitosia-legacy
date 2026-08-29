@@ -734,6 +734,67 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
   });
   await expect(page.getByTestId("segment-review-flag")).toHaveCount(1);
 
+  // A failed re-plan must keep the previous chapter set usable, including
+  // its reviewer output and run-level architecture facts. Make the source
+  // temporarily unplannable so the worker fails before replacement.
+  const originalSegmentIds = await queryRows<{ id: string }>(
+    "SELECT id FROM segment_clip WHERE source_id = $1 ORDER BY idx",
+    [sourceId]
+  );
+  await queryRows(
+    "UPDATE transcript SET status = 'failed' WHERE source_id = $1",
+    [sourceId]
+  );
+  try {
+    await page.getByTestId("rerun-segments").click();
+    await expect
+      .poll(
+        async () => {
+          const [failedRefresh] = await queryRows<{
+            error: string | null;
+            status: string;
+          }>(
+            "SELECT status, error FROM segment_plan_run WHERE source_id = $1",
+            [sourceId]
+          );
+          return failedRefresh?.status === "ready" && failedRefresh.error
+            ? failedRefresh.error
+            : null;
+        },
+        { timeout: 30_000 }
+      )
+      .toMatch(NO_READY_TRANSCRIPT);
+    await expect(page.getByTestId("segment-rerun-preserved")).toContainText(
+      "previous segments and reviews are unchanged",
+      { timeout: 15_000 }
+    );
+    await expect(page.getByTestId("segment-rerun-preserved")).toHaveAttribute(
+      "aria-live",
+      "polite"
+    );
+    const preservedSegments = await queryRows<{ id: string }>(
+      "SELECT id FROM segment_clip WHERE source_id = $1 ORDER BY idx",
+      [sourceId]
+    );
+    expect(preservedSegments.map(({ id }) => id)).toEqual(
+      originalSegmentIds.map(({ id }) => id)
+    );
+    const [preservedPlanFacts] = await queryRows<{
+      counts: Record<string, unknown>;
+    }>("SELECT counts FROM segment_plan_run WHERE source_id = $1", [sourceId]);
+    expect(preservedPlanFacts.counts).toMatchObject({
+      architectureVersion: 2,
+      reconcileStatus: "skipped",
+      segments: 3,
+      toc: ["Mock chapter one", "Mock chapter two"],
+    });
+  } finally {
+    await queryRows(
+      "UPDATE transcript SET status = 'ready' WHERE source_id = $1",
+      [sourceId]
+    );
+  }
+
   // Range playback with a mid-media out-point: the first chapter's end is
   // strictly inside the recording (the drop follows it), so a paused video
   // sitting there PROVES the stop fired — it cannot be the media ending.

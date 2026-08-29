@@ -1,3 +1,4 @@
+import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -23,11 +24,12 @@ import {
 interface RunRow {
   id: string;
   sourceId: string;
-  status: "failed" | "pending" | "processing";
+  status: "failed" | "pending" | "processing" | "ready";
 }
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const updateSets: unknown[] = [];
 
 interface FakeTransaction {
   select: () => ReturnType<typeof selectBuilder>;
@@ -46,10 +48,21 @@ function selectBuilder(rows: readonly RunRow[]) {
 function updateBuilder(rows: readonly { id: string }[]) {
   const builder = {
     returning: async () => rows,
-    set: () => builder,
+    set: (values: unknown) => {
+      updateSets.push(values);
+      return builder;
+    },
     where: () => builder,
   };
   return builder;
+}
+
+function countsSqlAt(index: number): string {
+  const values = updateSets[index] as { counts?: SQL } | undefined;
+  if (!values?.counts) {
+    throw new Error(`expected counts SQL in update ${index}`);
+  }
+  return new PgDialect().sqlToQuery(values.counts).sql;
 }
 
 function fakeTransaction(
@@ -84,6 +97,7 @@ function auditActions(): string[] {
 describe("reapStalledSegmentPlans", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    updateSets.length = 0;
     mocks.recordAudit.mockResolvedValue(undefined);
   });
 
@@ -131,6 +145,10 @@ describe("reapStalledSegmentPlans", () => {
       organizationId: "org-1",
       sourceId: pending.sourceId,
     });
+    expect(countsSqlAt(1)).toContain("COALESCE");
+    expect(countsSqlAt(1)).toContain("jsonb_build_object");
+    expect(countsSqlAt(2)).toContain("COALESCE");
+    expect(countsSqlAt(2)).toContain("jsonb_build_object");
     expect(auditActions()).toEqual([
       "segment_plan.stalled",
       "segment_plan.redispatch_scheduled",
@@ -153,6 +171,23 @@ describe("reapStalledSegmentPlans", () => {
     expect(mocks.dispatchSegmentPlan).not.toHaveBeenCalled();
     expect(mocks.recordAudit).not.toHaveBeenCalled();
     expect(mocks.withOrgScope).toHaveBeenCalledOnce();
+  });
+
+  it("restores a stalled refresh when committed segments still exist", async () => {
+    const processing: RunRow = {
+      id: "processing-run",
+      sourceId: "processing-source",
+      status: "processing",
+    };
+    const preserved: RunRow = { ...processing, status: "ready" };
+    mocks.withOrgScope.mockImplementationOnce(
+      useTransaction(fakeTransaction([processing], [[preserved], []]))
+    );
+
+    await expect(reapStalledSegmentPlans("org-1")).resolves.toBe(1);
+
+    expect(mocks.dispatchSegmentPlan).not.toHaveBeenCalled();
+    expect(auditActions()).toEqual(["segment_plan.refresh_stalled_preserved"]);
   });
 
   it("fails only a still-pending winner when redispatch rejects", async () => {
@@ -217,5 +252,27 @@ describe("reapStalledSegmentPlans", () => {
     await expect(reapStalledSegmentPlans("org-1")).resolves.toBe(1);
 
     expect(auditActions()).toEqual(["segment_plan.redispatch_scheduled"]);
+  });
+
+  it("preserves committed segments when pending redispatch fails", async () => {
+    const pending: RunRow = {
+      id: "pending-run",
+      sourceId: "pending-source",
+      status: "pending",
+    };
+    const claimTransaction = fakeTransaction([pending], [[], [pending]]);
+    const preserved: RunRow = { ...pending, status: "ready" };
+    const failureTransaction = fakeTransaction([], [[preserved]]);
+    mocks.withOrgScope
+      .mockImplementationOnce(useTransaction(claimTransaction))
+      .mockImplementationOnce(useTransaction(failureTransaction));
+    mocks.dispatchSegmentPlan.mockRejectedValue(new Error("queue offline"));
+
+    await expect(reapStalledSegmentPlans("org-1")).resolves.toBe(1);
+
+    expect(auditActions()).toEqual([
+      "segment_plan.redispatch_scheduled",
+      "segment_plan.redispatch_failed_preserved",
+    ]);
   });
 });

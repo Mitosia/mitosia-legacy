@@ -8,15 +8,16 @@ import {
 } from "./config";
 import { getModelCandidates } from "./provider";
 
-// Structured generation through the seam: AI SDK generateObject — NATIVE
-// single-pass structured output — with ordered provider failover and usage
-// accounting. Deliberately not Mastra's agent.generate({structuredOutput}):
+// Structured generation through the seam: AI SDK generateObject — one model
+// call producing a structured object — with ordered provider failover and
+// usage accounting. Native output format is the default; callers whose
+// shared schema exceeds Anthropic's grammar budget can select its JSON
+// response tool. Deliberately not Mastra's agent.generate({structuredOutput}):
 // that path runs a second-pass "structuring agent" that re-extracts the
 // first pass's free text into the schema, and on staging (2026-08-23,
 // Karma source) it silently filled unmappable fields with literal
-// "placeholder" strings that passed schema validation. Native structured
-// output is one model call: cheaper, deterministic, and it either returns
-// the schema or throws.
+// "placeholder" strings that passed schema validation. Both supported modes
+// are one model call: cheaper, deterministic, and locally validated.
 //
 // Telemetry: per-call experimental_telemetry lights up the OTel spans the
 // LangfuseSpanProcessor (lib/ai/telemetry.ts) is registered for.
@@ -61,7 +62,11 @@ export interface StructuredResult<T> {
   usage: StructuredUsage;
 }
 
-export interface GenerateStructuredOptions {
+export interface GenerateStructuredOptions<T = unknown> {
+  // Anthropic's native output-format compiler has a finite grammar budget.
+  // Large, shared episode schemas may deliberately use the JSON response
+  // tool instead; callers still validate the returned object locally.
+  anthropicStructuredOutputMode?: "auto" | "jsonTool" | "outputFormat";
   // A shared prefix (context + transcript) cached across sibling calls via
   // an Anthropic cache breakpoint. Callers making several passes over the
   // same long document put the document here and only the per-pass
@@ -71,7 +76,14 @@ export interface GenerateStructuredOptions {
   // with one awaited call, then run the rest of that model's group in
   // parallel. Ignored by non-Anthropic candidates.
   cachedPrefix?: string;
+  // Optional exact validation after the provider-safe transport schema.
+  // A failure participates in the same bounded provider retry/failover as a
+  // native schema miss. Segment topology lanes omit this callback because
+  // their callers feed the issues into a corrective semantic prompt.
+  validateOutput?: (output: T) => void;
 }
+
+class StructuredOutputValidationError extends Error {}
 
 function buildMessages(cachedPrefix: string, prompt: string) {
   return [
@@ -102,7 +114,9 @@ const SCHEMA_MISS_RETRIES = 1;
 
 function isRetryableSchemaMiss(error: unknown): boolean {
   return (
-    NoObjectGeneratedError.isInstance(error) && error.finishReason !== "length"
+    (NoObjectGeneratedError.isInstance(error) &&
+      error.finishReason !== "length") ||
+    error instanceof StructuredOutputValidationError
   );
 }
 
@@ -129,12 +143,42 @@ function candidateCostUsd(
     : openRouterCostUsd(providerMetadata);
 }
 
+function anthropicGenerationOptions(
+  route: ReturnType<typeof routeForTask>,
+  structuredOutputMode?: GenerateStructuredOptions["anthropicStructuredOutputMode"]
+) {
+  return {
+    ...(route.effort && EFFORT_TIERS.has(route.tier)
+      ? { effort: route.effort }
+      : {}),
+    ...(structuredOutputMode ? { structuredOutputMode } : {}),
+  };
+}
+
+function validateStructuredOutput<T>(
+  output: T,
+  validateOutput?: (output: T) => void
+): T {
+  if (!validateOutput) {
+    return output;
+  }
+  try {
+    validateOutput(output);
+    return output;
+  } catch (error) {
+    throw new StructuredOutputValidationError(
+      error instanceof Error ? error.message : "Output failed validation",
+      { cause: error }
+    );
+  }
+}
+
 export async function generateStructured<T>(
   task: AiTask,
   system: string,
   prompt: string,
   schema: z.ZodType<T>,
-  options?: GenerateStructuredOptions
+  options?: GenerateStructuredOptions<T>
 ): Promise<StructuredResult<T>> {
   const route = routeForTask(task);
   const candidates = await getModelCandidates(task);
@@ -159,6 +203,10 @@ export async function generateStructured<T>(
       continue;
     }
     try {
+      const anthropicOptions = anthropicGenerationOptions(
+        route,
+        options?.anthropicStructuredOutputMode
+      );
       // biome-ignore lint/performance/noAwaitInLoops: candidates are tried strictly in order
       const result = await generateObject({
         experimental_telemetry: {
@@ -174,8 +222,8 @@ export async function generateStructured<T>(
         // tiers that accept it (haiku-4-5 rejects the parameter with a
         // hard API error; staging 2026-08-24). Ignored by non-Anthropic
         // candidates — providerOptions are per-provider.
-        ...(route.effort && EFFORT_TIERS.has(route.tier)
-          ? { providerOptions: { anthropic: { effort: route.effort } } }
+        ...(Object.keys(anthropicOptions).length > 0
+          ? { providerOptions: { anthropic: anthropicOptions } }
           : {}),
         ...(options?.cachedPrefix
           ? { messages: buildMessages(options.cachedPrefix, prompt) }
@@ -183,8 +231,12 @@ export async function generateStructured<T>(
       });
       const inputTokens = result.usage.inputTokens ?? 0;
       const outputTokens = result.usage.outputTokens ?? 0;
+      const output = validateStructuredOutput(
+        schema.parse(result.object),
+        options?.validateOutput
+      );
       return {
-        output: schema.parse(result.object),
+        output,
         usage: {
           costUsd: candidateCostUsd(
             candidate,

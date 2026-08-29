@@ -5,6 +5,7 @@ import { recordAudit } from "@/lib/audit";
 import { segmentPlanRun } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
 import { dispatchSegmentPlan } from "./segment-enqueue";
+import { terminalSegmentFailureStatus } from "./segment-state";
 import { SEGMENT_STALL_TTL_MINUTES } from "./window";
 
 const REAP_BATCH_SIZE = 50;
@@ -29,6 +30,15 @@ export const isStalledSegmentPlan = or(
   )
 );
 
+function stalledAuditAction(status: string): string {
+  if (status === "pending") {
+    return "segment_plan.redispatch_scheduled";
+  }
+  return status === "ready"
+    ? "segment_plan.refresh_stalled_preserved"
+    : "segment_plan.stalled";
+}
+
 export async function reapStalledSegmentPlans(
   organizationId: string
 ): Promise<number> {
@@ -49,7 +59,7 @@ export async function reapStalledSegmentPlans(
     const candidateIds = candidates.map((row) => row.id);
     const processing = await tx
       .update(segmentPlanRun)
-      .set({ error: STALLED_ERROR, status: "failed" })
+      .set({ error: STALLED_ERROR, status: terminalSegmentFailureStatus })
       .where(
         and(
           eq(segmentPlanRun.status, "processing"),
@@ -64,7 +74,15 @@ export async function reapStalledSegmentPlans(
       });
     const pending = await tx
       .update(segmentPlanRun)
-      .set({ counts: { dispatchLease, dispatchState: "pending" } })
+      .set({
+        counts: sql`(
+          COALESCE(${segmentPlanRun.counts}, '{}'::jsonb)
+          - 'stage' - 'dispatchId' - 'dispatchedAt'
+        ) || jsonb_build_object(
+          'dispatchLease', ${dispatchLease}::text,
+          'dispatchState', 'pending'
+        )`,
+      })
       .where(
         and(
           eq(segmentPlanRun.status, "pending"),
@@ -80,10 +98,7 @@ export async function reapStalledSegmentPlans(
     await Promise.all(
       [...processing, ...pending].map((row) =>
         recordAudit(tx, {
-          action:
-            row.status === "pending"
-              ? "segment_plan.redispatch_scheduled"
-              : "segment_plan.stalled",
+          action: stalledAuditAction(row.status),
           actorUserId: null,
           entityId: row.id,
           entityType: "segment_plan_run",
@@ -131,12 +146,12 @@ export async function reapStalledSegmentPlans(
           const [updated] = await tx
             .update(segmentPlanRun)
             .set({
-              counts: {
-                dispatchedAt: new Date().toISOString(),
-                dispatchId,
-                dispatchLease: row.dispatchLease,
-                dispatchState: "confirmed",
-              },
+              counts: sql`COALESCE(${segmentPlanRun.counts}, '{}'::jsonb) || jsonb_build_object(
+                'dispatchedAt', ${new Date().toISOString()}::text,
+                'dispatchId', ${dispatchId}::text,
+                'dispatchLease', ${row.dispatchLease}::text,
+                'dispatchState', 'confirmed'
+              )`,
             })
             .where(
               and(
@@ -163,7 +178,10 @@ export async function reapStalledSegmentPlans(
       }
       const failed = await tx
         .update(segmentPlanRun)
-        .set({ error: REDISPATCH_ERROR, status: "failed" })
+        .set({
+          error: REDISPATCH_ERROR,
+          status: terminalSegmentFailureStatus,
+        })
         .where(
           and(
             eq(segmentPlanRun.status, "pending"),
@@ -171,11 +189,17 @@ export async function reapStalledSegmentPlans(
             inArray(segmentPlanRun.id, failedIds)
           )
         )
-        .returning({ id: segmentPlanRun.id });
+        .returning({
+          id: segmentPlanRun.id,
+          status: segmentPlanRun.status,
+        });
       await Promise.all(
-        failed.map(({ id }) =>
+        failed.map(({ id, status }) =>
           recordAudit(tx, {
-            action: "segment_plan.redispatch_failed",
+            action:
+              status === "ready"
+                ? "segment_plan.redispatch_failed_preserved"
+                : "segment_plan.redispatch_failed",
             actorUserId: null,
             entityId: id,
             entityType: "segment_plan_run",

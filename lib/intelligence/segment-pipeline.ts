@@ -6,6 +6,7 @@ import {
 import {
   type EpisodeBrief,
   runSegmentReconcilePass,
+  validateClipProposalMode,
 } from "@/lib/ai/capabilities/episode-clips";
 import {
   clipPrefixInput,
@@ -28,6 +29,7 @@ import {
   type SourceContextPack,
 } from "@/lib/ai/context";
 import type { StructuredUsage } from "@/lib/ai/generate";
+import { recordAudit } from "@/lib/audit";
 import {
   brand,
   campaign,
@@ -65,6 +67,7 @@ import {
   SEGMENT_PLAN_ARCHITECTURE_VERSION,
   type SegmentGrouping,
 } from "./segment-reconcile";
+import { terminalSegmentFailureStatus } from "./segment-state";
 import { buildSegmentRows, checkPartition, type SegmentRow } from "./segments";
 
 // The S6.5 segment-plan workflow, the discover-pipeline clone one lane
@@ -155,12 +158,16 @@ async function recordRunFailure(
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown segment-plan failure";
-  await withOrgScope(payload.organizationId, (tx) =>
-    tx
+  const safeMessage = sanitizeIngestError(message).slice(
+    0,
+    SEGMENT_ERROR_MAX_CHARS
+  );
+  await withOrgScope(payload.organizationId, async (tx) => {
+    const [updated] = await tx
       .update(segmentPlanRun)
       .set({
-        error: sanitizeIngestError(message).slice(0, SEGMENT_ERROR_MAX_CHARS),
-        status: finalAttempt ? "failed" : "pending",
+        error: safeMessage,
+        status: finalAttempt ? terminalSegmentFailureStatus : "pending",
       })
       .where(
         and(
@@ -169,7 +176,18 @@ async function recordRunFailure(
           eq(segmentPlanRun.status, "processing")
         )
       )
-  );
+      .returning({ id: segmentPlanRun.id, status: segmentPlanRun.status });
+    if (updated?.status === "ready") {
+      await recordAudit(tx, {
+        action: "segment_plan.refresh_failed_preserved",
+        actorUserId: null,
+        entityId: updated.id,
+        entityType: "segment_plan_run",
+        metadata: { attempt: claimed.attempt, sourceId: payload.sourceId },
+        organizationId: payload.organizationId,
+      });
+    }
+  });
 }
 
 async function heartbeatSegmentRun(
@@ -504,7 +522,15 @@ async function writeStage(
   const active = await withOrgScope(payload.organizationId, async (tx) => {
     const [updated] = await tx
       .update(segmentPlanRun)
-      .set({ counts: { dispatchLease: payload.dispatchLease, stage } })
+      .set({
+        counts: sql`(
+          COALESCE(${segmentPlanRun.counts}, '{}'::jsonb)
+          - 'dispatchState' - 'dispatchId' - 'dispatchedAt'
+        ) || jsonb_build_object(
+          'dispatchLease', ${payload.dispatchLease}::text,
+          'stage', ${stage}::text
+        )`,
+      })
       .where(
         and(
           eq(segmentPlanRun.id, claimed.runId),
@@ -737,7 +763,16 @@ async function reconcileSegmentPlan(
         previousGroups
       );
       usages.push(run.usage);
-      previousGroups = run.output.reconciliation?.groups ?? [];
+      const validated = validateClipProposalMode(
+        run.output,
+        "segment_reconcile"
+      );
+      if (!validated.proposal) {
+        validationIssues = validated.issues;
+        previousGroups = [];
+        continue;
+      }
+      previousGroups = validated.proposal.reconciliation?.groups ?? [];
       const applied = applySegmentGrouping(
         atoms,
         previousGroups,

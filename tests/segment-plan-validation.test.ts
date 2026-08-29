@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { clipProposalSchema } from "@/lib/ai/capabilities/episode-clips";
+import {
+  clipProposalSchema,
+  clipProposalTransportSchema,
+  validateClipProposalMode,
+} from "@/lib/ai/capabilities/episode-clips";
 import {
   runSegmentPlan,
   validateSegmentRoughPlan,
@@ -89,6 +93,54 @@ describe("clipProposalSchema mode branches", () => {
         plan: { ...validPlan, tableOfContents: ["   "] },
       }).success
     ).toBe(false);
+  });
+});
+
+describe("clip proposal transport boundary", () => {
+  const envelope = {
+    mode: "segments",
+    plan: validPlan,
+  };
+
+  it("lets a null plan reach the strict validator for a repairable issue", () => {
+    const transport = clipProposalTransportSchema.parse({
+      ...envelope,
+      plan: null,
+    });
+
+    expect(validateClipProposalMode(transport, "segments")).toEqual({
+      issues: ["plan: segments output must fill plan"],
+      proposal: null,
+    });
+  });
+
+  it("keeps provider-omitted length constraints behind strict validation", () => {
+    const transport = clipProposalTransportSchema.parse({
+      ...envelope,
+      plan: {
+        ...validPlan,
+        segments: [{ ...keep, title: "x".repeat(121) }, drop],
+      },
+    });
+    const validated = validateClipProposalMode(transport, "segments");
+
+    expect(validated.proposal).toBeNull();
+    expect(validated.issues).toEqual([
+      "plan.segments.0.title: Too big: expected string to have <=120 characters",
+    ]);
+  });
+
+  it("rejects a whitespace-only TOC entry after permissive transport", () => {
+    const transport = clipProposalTransportSchema.parse({
+      ...envelope,
+      plan: { ...validPlan, tableOfContents: ["   "] },
+    });
+    const validated = validateClipProposalMode(transport, "segments");
+
+    expect(validated.proposal).toBeNull();
+    expect(validated.issues).toEqual([
+      "plan.tableOfContents.0: Too small: expected string to have >=1 characters",
+    ]);
   });
 });
 
