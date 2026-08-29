@@ -34,29 +34,44 @@ describe("provider-neutral model profiles", () => {
     }
   });
 
-  it("orders all four requested frontier families in the editorial profile", () => {
+  it("orders four ZDR-reachable families in the editorial profile", () => {
     expect(MODEL_PROFILES.editorial).toEqual([
       "anthropic/claude-opus-5",
-      "openai/gpt-5.6-sol",
       "google/gemini-3.1-pro-preview",
+      "deepseek/deepseek-v4-pro",
       "moonshotai/kimi-k3",
     ]);
     expect(
       MODEL_PROFILES.editorial.map(
         (modelId) => modelDefinitionFor(modelId)?.family
       )
-    ).toEqual(["anthropic", "openai", "google", "moonshot"]);
+    ).toEqual(["anthropic", "google", "deepseek", "moonshot"]);
   });
 
   it("starts the independent critic in a different family from the editor", () => {
     expect(MODEL_PROFILES.critic).toEqual([
-      "openai/gpt-5.6-sol",
       "google/gemini-3.1-pro-preview",
+      "deepseek/deepseek-v4-pro",
       "anthropic/claude-opus-5",
       "moonshotai/kimi-k3",
     ]);
     expect(routeForTask("segment-publisher.edit").profile).toBe("editorial");
     expect(routeForTask("segment-publisher.verify").profile).toBe("critic");
+  });
+
+  it("keeps ZDR-unreachable vendors out of every default pool", () => {
+    // Measured 2026-08-30: `zdr: true` + `require_parameters: true` leaves
+    // zero eligible endpoints for these vendors — every pool slot they hold
+    // is a guaranteed instant 404. Re-probe the full request shape (see the
+    // OPENROUTER_MODELS comment) before removing a vendor from this list.
+    const zdrDeadVendors = ["openai/", "qwen/"];
+    for (const profile of Object.values(MODEL_PROFILES)) {
+      for (const modelId of profile) {
+        for (const vendor of zdrDeadVendors) {
+          expect(modelId.startsWith(vendor)).toBe(false);
+        }
+      }
+    }
   });
 
   it("resolves registered and override slugs to a verifier family", () => {
@@ -87,8 +102,8 @@ describe("provider-neutral model profiles", () => {
     expect(efficient.profile).toBe("efficient");
     expect(efficient.modelIds).toEqual([
       OPENROUTER_MODELS.claudeHaiku.id,
+      OPENROUTER_MODELS.gemini37Flash.id,
       OPENROUTER_MODELS.geminiPro.id,
-      OPENROUTER_MODELS.gptSol.id,
       OPENROUTER_MODELS.kimiK3.id,
     ]);
   });

@@ -112,13 +112,24 @@ export async function ensureEpisodeBrief(
   });
   if (existing && existing.revision === transcriptRevision) {
     const parsed = episodeBriefSchema.safeParse(existing.brief);
-    if (
-      parsed.success &&
-      validateEpisodeBriefGrid(parsed.data, input.grid).length === 0
-    ) {
+    const gridIssues = parsed.success
+      ? validateEpisodeBriefGrid(parsed.data, input.grid)
+      : [];
+    if (parsed.success && gridIssues.length === 0) {
       return { brief: parsed.data, usage: null };
     }
-    console.warn("[clips] stored episode brief failed current validation");
+    // Name the reason: an undiagnosable warn here is how the 2026-08-30
+    // recompose-every-run spend hid. Issue strings are paragraph IDs and
+    // schema paths, never transcript content.
+    console.warn(
+      "[clips] stored episode brief failed current validation:",
+      parsed.success
+        ? gridIssues.join("; ")
+        : parsed.error.issues
+            .slice(0, 8)
+            .map((issue) => `${issue.path.join(".")}: ${issue.code}`)
+            .join("; ")
+    );
   }
 
   let brief: EpisodeBrief | null = null;
