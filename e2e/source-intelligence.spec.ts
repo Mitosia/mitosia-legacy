@@ -30,6 +30,8 @@ const RERUN_STALE_CONFIRMATION = /moment reviews changed/;
 const NO_READY_TRANSCRIPT = /no ready transcript/;
 const SEGMENT_RERUN_REFUSAL = /human review or edits/;
 const REVIEW_TRIM_END = /Reviewer: trim end/;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
+const PUBLISHER_BLOCK_FAILURE = /Publisher Verifier blocked the final plan/;
 
 test.beforeAll(() => {
   if (existsSync(FIXTURE)) {
@@ -726,24 +728,87 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
     [sourceId]
   );
   expect(planFacts.counts).toMatchObject({
-    architectureVersion: 2,
+    architectureVersion: 3,
+    publisherEditCalls: 1,
+    publisherOperationCount: 0,
+    publisherRevisionRequested: false,
+    publisherStatus: "passed",
+    publisherVerifyCalls: 1,
     reconcileCalls: 0,
     reconcileStatus: "skipped",
     segments: 3,
     toc: ["Mock chapter one", "Mock chapter two"],
   });
+  const [publisherAudit] = await queryRows<{
+    metadata: {
+      finalDossierHash?: string;
+      finalVerification?: {
+        coverageVerdicts?: unknown[];
+        publishable?: boolean;
+      };
+      finalVerificationMap?: {
+        boundaries?: unknown[];
+        coverage?: unknown[];
+        segments?: unknown[];
+      };
+      iterations?: Array<{
+        inputPlanHash?: string;
+        inputSources?: unknown[];
+        outputPlanHash?: string;
+        slices?: unknown[];
+      }>;
+      verifierModels?: unknown[];
+    };
+  }>(
+    `SELECT metadata FROM audit_log
+      WHERE action = 'segment_plan.publisher_review_applied'
+        AND entity_id = (
+          SELECT id::text FROM segment_plan_run WHERE source_id = $1
+        )
+      ORDER BY created_at DESC LIMIT 1`,
+    [sourceId]
+  );
+  expect(publisherAudit.metadata.finalDossierHash).toMatch(SHA256_HEX);
+  expect(publisherAudit.metadata.finalVerification).toMatchObject({
+    coverageVerdicts: [expect.objectContaining({ verdict: "pass" })],
+    publishable: true,
+  });
+  expect(publisherAudit.metadata.finalVerificationMap).toMatchObject({
+    boundaries: expect.any(Array),
+    coverage: expect.any(Array),
+    segments: expect.any(Array),
+  });
+  expect(publisherAudit.metadata.iterations).toEqual([
+    expect.objectContaining({
+      inputPlanHash: expect.stringMatching(SHA256_HEX),
+      inputSources: expect.any(Array),
+      outputPlanHash: expect.stringMatching(SHA256_HEX),
+      slices: expect.any(Array),
+    }),
+  ]);
+  expect(publisherAudit.metadata.verifierModels).toEqual([null]);
+  await expect(page.getByTestId("segment-publisher-status")).toContainText(
+    "Publisher Editor verified this chapter plan"
+  );
   await expect(page.getByTestId("segment-review-flag")).toHaveCount(1);
 
-  // A failed re-plan must keep the previous chapter set usable, including
-  // its reviewer output and run-level architecture facts. Make the source
-  // temporarily unplannable so the worker fails before replacement.
+  // A failure inside the REQUIRED Publisher gate must keep the previous
+  // verified chapter set usable, including its reviewer output and run-level
+  // architecture facts. The mock verifier's explicit marker blocks both the
+  // first verdict and the single bounded editorial repair.
   const originalSegmentIds = await queryRows<{ id: string }>(
     "SELECT id FROM segment_clip WHERE source_id = $1 ORDER BY idx",
     [sourceId]
   );
-  await queryRows(
-    "UPDATE transcript SET status = 'failed' WHERE source_id = $1",
+  const [storedBrief] = await queryRows<{ brief: unknown }>(
+    "SELECT brief FROM episode_brief WHERE source_id = $1",
     [sourceId]
+  );
+  await queryRows(
+    `UPDATE episode_brief
+       SET brief = jsonb_set(brief, '{tone}', to_jsonb($2::text))
+     WHERE source_id = $1`,
+    [sourceId, "[[mock:publisher-block]]"]
   );
   try {
     await page.getByTestId("rerun-segments").click();
@@ -763,7 +828,7 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
         },
         { timeout: 30_000 }
       )
-      .toMatch(NO_READY_TRANSCRIPT);
+      .toMatch(PUBLISHER_BLOCK_FAILURE);
     await expect(page.getByTestId("segment-rerun-preserved")).toContainText(
       "previous segments and reviews are unchanged",
       { timeout: 15_000 }
@@ -783,22 +848,21 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
       counts: Record<string, unknown>;
     }>("SELECT counts FROM segment_plan_run WHERE source_id = $1", [sourceId]);
     expect(preservedPlanFacts.counts).toMatchObject({
-      architectureVersion: 2,
+      architectureVersion: 3,
+      publisherStatus: "passed",
       reconcileStatus: "skipped",
       segments: 3,
       toc: ["Mock chapter one", "Mock chapter two"],
     });
   } finally {
     await queryRows(
-      "UPDATE transcript SET status = 'ready' WHERE source_id = $1",
-      [sourceId]
+      "UPDATE episode_brief SET brief = $2::jsonb WHERE source_id = $1",
+      [sourceId, JSON.stringify(storedBrief.brief)]
     );
   }
 
-  // The failed re-plan refreshed the route while the transcript was marked
-  // failed, so that render intentionally has no transcript URL and keeps
-  // sentence-boundary nudges disabled. Refresh after restoring the fixture's
-  // ready state before exercising those controls.
+  // The failed re-plan refreshed the route while the Publisher marker was
+  // active. Refresh after restoring the valid brief before exercising edits.
   await page.reload();
   await page.getByTestId("workspace-tab-segments").click({ timeout: 15_000 });
 
@@ -862,6 +926,14 @@ test("highlights extract, filter, and seek the player", async ({ page }) => {
       { timeout: 15_000 }
     )
     .not.toBeNull();
+  await expect(page.getByTestId("segment-publisher-status")).toContainText(
+    "Publisher Editor verified the generated baseline",
+    { timeout: 15_000 }
+  );
+  await expect(page.getByTestId("segment-publisher-status")).toContainText(
+    "Human edits have been applied since AI verification",
+    { timeout: 15_000 }
+  );
 
   // Decisions: accept the first chapter, reject the second through the
   // reason menu (interactive UI — the menu must open).

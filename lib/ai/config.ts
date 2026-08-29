@@ -5,6 +5,7 @@
 
 export type ReasoningEffort = "high" | "low" | "medium";
 export type PromptCachingMode = "automatic" | "explicit" | "none";
+export type ModelFamily = "anthropic" | "google" | "moonshot" | "openai";
 
 export interface ModelCapabilities {
   promptCaching: PromptCachingMode;
@@ -14,7 +15,7 @@ export interface ModelCapabilities {
 
 export interface ModelDefinition {
   capabilities: ModelCapabilities;
-  family: "anthropic" | "google" | "moonshot" | "openai";
+  family: ModelFamily;
   id: string;
 }
 
@@ -84,6 +85,16 @@ export const MODEL_PROFILES = {
     OPENROUTER_MODELS.claudeSonnet.id,
     OPENROUTER_MODELS.gptSol.id,
     OPENROUTER_MODELS.geminiPro.id,
+    OPENROUTER_MODELS.kimiK3.id,
+  ],
+  // Independent publishing critic. The supervising Editor starts with
+  // Claude; the verifier deliberately starts in another model family. The
+  // pipeline additionally excludes the winning Editor's whole family, so a
+  // fallback Editor still never grades its own work.
+  critic: [
+    OPENROUTER_MODELS.gptSol.id,
+    OPENROUTER_MODELS.geminiPro.id,
+    OPENROUTER_MODELS.claudeOpus.id,
     OPENROUTER_MODELS.kimiK3.id,
   ],
   editorial: [
@@ -215,6 +226,22 @@ export const TASK_ROUTES = {
     profile: "editorial",
     requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
+  // Final whole-episode Publisher Editor. It receives the complete compiled
+  // draft at sentence-ID resolution and may merge, split, redistribute,
+  // reclassify, or repackage it as one coherent replacement partition.
+  "segment-publisher.edit": {
+    maxOutputTokens: 32_000,
+    profile: "editorial",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
+  },
+  // Independent whole-plan verifier. It starts with GPT and the caller
+  // excludes the Editor winner's entire family. A verifier emits verdicts,
+  // never a new cut, so 24k leaves ample reasoning and payload headroom.
+  "segment-publisher.verify": {
+    maxOutputTokens: 24_000,
+    profile: "critic",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
+  },
   // Chapters/topics over a full transcript: broad, structured, cheap.
   // No effort: haiku rejects the parameter (see EFFORT_TIERS).
   "source-analysis.chapters": {
@@ -319,6 +346,14 @@ const MODEL_OVERRIDE_ENV: Partial<Record<AiTask, ModelOverrideEnv>> = {
     candidates: "SEGMENT_PLAN_MODELS",
     legacyTier: "SEGMENT_PLAN_TIER",
   },
+  "segment-publisher.edit": {
+    candidates: "SEGMENT_PUBLISHER_EDITOR_MODELS",
+    legacyTier: "SEGMENT_PUBLISHER_EDITOR_TIER",
+  },
+  "segment-publisher.verify": {
+    candidates: "SEGMENT_PUBLISHER_VERIFIER_MODELS",
+    legacyTier: "SEGMENT_PUBLISHER_VERIFIER_TIER",
+  },
 };
 
 function isModelTier(value: string): value is ModelTier {
@@ -362,6 +397,28 @@ export function modelDefinitionFor(
   modelId: string
 ): ModelDefinition | undefined {
   return MODEL_BY_ID.get(modelId);
+}
+
+// Explicit deployment overrides may name a newer model that is not yet in
+// the curated registry. OpenRouter's vendor prefix is still a safe family
+// boundary, so an Anthropic override cannot accidentally be reviewed by a
+// different Anthropic model. Unknown vendors get their own stable namespace.
+export function modelFamilyFor(modelId: string): string {
+  const definition = MODEL_BY_ID.get(modelId);
+  if (definition !== undefined) {
+    return definition.family;
+  }
+  const vendor = modelId.split("/", 1)[0]?.trim().toLowerCase();
+  if (!vendor) {
+    return `model:${modelId}`;
+  }
+  if (vendor === "moonshotai") {
+    return "moonshot";
+  }
+  if (["anthropic", "google", "openai"].includes(vendor)) {
+    return vendor;
+  }
+  return `openrouter-vendor:${vendor}`;
 }
 
 export type ResolvedRoute = TaskRoute & {

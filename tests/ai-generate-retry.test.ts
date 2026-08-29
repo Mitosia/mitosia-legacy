@@ -146,12 +146,15 @@ function refusalMiss(): NoObjectGeneratedError {
   });
 }
 
-function gatewayError(statusCode: number): APICallError {
+function gatewayError(
+  statusCode: number,
+  responseBody = '{"error":"account failure"}'
+): APICallError {
   return new APICallError({
     isRetryable: false,
     message: `gateway rejected ${statusCode}`,
     requestBodyValues: { privateTranscript: "must never escape" },
-    responseBody: '{"error":"account failure"}',
+    responseBody,
     statusCode,
     url: "https://openrouter.ai/api/v1/chat/completions",
   });
@@ -466,7 +469,7 @@ describe("generateStructured schema-miss retry", () => {
     expect(captured[1]).toMatchObject({ attempts: 2, model: "mock-model" });
   });
 
-  it("never retries budget exhaustion — that is a sizing bug, kept loud", async () => {
+  it("keeps single-candidate budget exhaustion loud without same-model repair", async () => {
     mockGenerate.mockRejectedValue(budgetMiss());
 
     await expect(
@@ -506,7 +509,27 @@ describe("generateStructured schema-miss retry", () => {
     expect(mockGenerate).toHaveBeenCalledTimes(1);
   });
 
-  it("does not hide output-budget exhaustion behind model fallback", async () => {
+  it("tries the next model after candidate-specific output exhaustion", async () => {
+    mockGetModelCandidates.mockResolvedValue([
+      candidate("anthropic/claude-opus"),
+      candidate("openai/gpt-sol", "automatic"),
+    ]);
+    mockGenerate
+      .mockRejectedValueOnce(budgetMiss())
+      .mockResolvedValueOnce(success);
+
+    const result = await generateStructured(
+      "evals.judge",
+      "system",
+      "prompt",
+      schema
+    );
+
+    expect(result.usage.model).toBe("openai/gpt-sol");
+    expect(mockGenerate).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports budget exhaustion when every eligible model truncates", async () => {
     mockGetModelCandidates.mockResolvedValue([
       candidate("anthropic/claude-opus"),
       candidate("openai/gpt-sol", "automatic"),
@@ -516,10 +539,10 @@ describe("generateStructured schema-miss retry", () => {
     await expect(
       generateStructured("evals.judge", "system", "prompt", schema)
     ).rejects.toThrow(BUDGET_ERROR);
-    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    expect(mockGenerate).toHaveBeenCalledTimes(2);
   });
 
-  it.each([401, 402, 403])(
+  it.each([401, 402])(
     "fails fast on gateway-wide status %s",
     async (statusCode) => {
       mockGetModelCandidates.mockResolvedValue([
@@ -534,6 +557,64 @@ describe("generateStructured schema-miss retry", () => {
       expect(mockGenerate).toHaveBeenCalledTimes(1);
     }
   );
+
+  it("fails over after a model- or provider-specific 403", async () => {
+    mockGetModelCandidates.mockResolvedValue([
+      candidate("anthropic/claude-opus"),
+      candidate("openai/gpt-sol", "automatic"),
+    ]);
+    mockGenerate
+      .mockRejectedValueOnce(
+        gatewayError(
+          403,
+          '{"error":{"message":"BYOK provider permission denied"}}'
+        )
+      )
+      .mockResolvedValueOnce(success);
+
+    const result = await generateStructured(
+      "evals.judge",
+      "system",
+      "prompt",
+      schema
+    );
+
+    expect(result.usage.model).toBe("openai/gpt-sol");
+    expect(mockGenerate).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not route around an OpenRouter guardrail 403", async () => {
+    mockGetModelCandidates.mockResolvedValue([
+      candidate("anthropic/claude-opus"),
+      candidate("openai/gpt-sol", "automatic"),
+    ]);
+    mockGenerate.mockRejectedValue(
+      gatewayError(
+        403,
+        '{"error":{"message":"Request blocked by content filter"}}'
+      )
+    );
+
+    await expect(
+      generateStructured("evals.judge", "system", "prompt", schema)
+    ).rejects.toThrow("statusCode=403");
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails closed on unknown moderation-style 403 wording", async () => {
+    mockGetModelCandidates.mockResolvedValue([
+      candidate("anthropic/claude-opus"),
+      candidate("openai/gpt-sol", "automatic"),
+    ]);
+    mockGenerate.mockRejectedValue(
+      gatewayError(403, '{"error":{"message":"Moderation flag"}}')
+    );
+
+    await expect(
+      generateStructured("evals.judge", "system", "prompt", schema)
+    ).rejects.toThrow("statusCode=403");
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+  });
 
   it("fails over to the next model after a non-schema provider error", async () => {
     mockGetModelCandidates.mockResolvedValue([
@@ -558,6 +639,59 @@ describe("generateStructured schema-miss retry", () => {
     );
     expect(mockGenerate.mock.calls[1]?.[0]).toEqual(
       expect.objectContaining({ model: { id: "openai/gpt-sol" } })
+    );
+  });
+
+  it("excludes the editor model from an independent verification call", async () => {
+    mockGetModelCandidates.mockResolvedValue([
+      candidate("anthropic/claude-opus"),
+      candidate("openai/gpt-sol", "automatic"),
+    ]);
+    mockGenerate.mockResolvedValueOnce(success);
+
+    const result = await generateStructured(
+      "evals.judge",
+      "system",
+      "prompt",
+      schema,
+      { excludeModelIds: ["anthropic/claude-opus"] }
+    );
+
+    expect(result.usage.model).toBe("openai/gpt-sol");
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    expect(mockGenerate).toHaveBeenCalledWith(
+      expect.objectContaining({ model: { id: "openai/gpt-sol" } })
+    );
+  });
+
+  it("fails before generation when every candidate is excluded", async () => {
+    await expect(
+      generateStructured("evals.judge", "system", "prompt", schema, {
+        excludeModelIds: ["mock-model"],
+      })
+    ).rejects.toThrow("No independent AI model candidate configured");
+    expect(mockGenerate).not.toHaveBeenCalled();
+  });
+
+  it("excludes an override model by OpenRouter vendor family", async () => {
+    mockGetModelCandidates.mockResolvedValue([
+      candidate("anthropic/claude-future-9"),
+      candidate("google/gemini-pro", "automatic"),
+    ]);
+    mockGenerate.mockResolvedValueOnce(success);
+
+    const result = await generateStructured(
+      "evals.judge",
+      "system",
+      "prompt",
+      schema,
+      { excludeModelFamilies: ["anthropic"] }
+    );
+
+    expect(result.usage.model).toBe("google/gemini-pro");
+    expect(mockGenerate).toHaveBeenCalledOnce();
+    expect(mockGenerate).toHaveBeenCalledWith(
+      expect.objectContaining({ model: { id: "google/gemini-pro" } })
     );
   });
 });

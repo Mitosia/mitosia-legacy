@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   MODEL_PROFILES,
   modelDefinitionFor,
+  modelFamilyFor,
   OPENROUTER_MODELS,
   routeForTask,
   TASK_ROUTES,
@@ -12,6 +13,10 @@ const OVERRIDE_ENV_VARS = [
   "MOMENT_DISCOVERY_TIER",
   "SEGMENT_PLAN_MODELS",
   "SEGMENT_PLAN_TIER",
+  "SEGMENT_PUBLISHER_EDITOR_MODELS",
+  "SEGMENT_PUBLISHER_EDITOR_TIER",
+  "SEGMENT_PUBLISHER_VERIFIER_MODELS",
+  "SEGMENT_PUBLISHER_VERIFIER_TIER",
 ] as const;
 
 afterEach(() => {
@@ -43,6 +48,26 @@ describe("provider-neutral model profiles", () => {
     ).toEqual(["anthropic", "openai", "google", "moonshot"]);
   });
 
+  it("starts the independent critic in a different family from the editor", () => {
+    expect(MODEL_PROFILES.critic).toEqual([
+      "openai/gpt-5.6-sol",
+      "google/gemini-3.1-pro-preview",
+      "anthropic/claude-opus-5",
+      "moonshotai/kimi-k3",
+    ]);
+    expect(routeForTask("segment-publisher.edit").profile).toBe("editorial");
+    expect(routeForTask("segment-publisher.verify").profile).toBe("critic");
+  });
+
+  it("resolves registered and override slugs to a verifier family", () => {
+    expect(modelFamilyFor("anthropic/claude-opus-5")).toBe("anthropic");
+    expect(modelFamilyFor("anthropic/claude-future-9")).toBe("anthropic");
+    expect(modelFamilyFor("moonshotai/kimi-future")).toBe("moonshot");
+    expect(modelFamilyFor("vendor/custom-model-v1")).toBe(
+      "openrouter-vendor:vendor"
+    );
+  });
+
   it("contains only explicit model ids, never a moving router alias", () => {
     for (const model of Object.values(OPENROUTER_MODELS)) {
       expect(model.id).toContain("/");
@@ -70,6 +95,22 @@ describe("provider-neutral model profiles", () => {
 });
 
 describe("model overrides", () => {
+  it("lets editor and verifier use independent explicit candidate pools", () => {
+    process.env.SEGMENT_PUBLISHER_EDITOR_MODELS =
+      "anthropic/claude-opus-5,google/gemini-3.1-pro-preview";
+    process.env.SEGMENT_PUBLISHER_VERIFIER_MODELS =
+      "openai/gpt-5.6-sol,moonshotai/kimi-k3";
+
+    expect(routeForTask("segment-publisher.edit").modelIds).toEqual([
+      "anthropic/claude-opus-5",
+      "google/gemini-3.1-pro-preview",
+    ]);
+    expect(routeForTask("segment-publisher.verify").modelIds).toEqual([
+      "openai/gpt-5.6-sol",
+      "moonshotai/kimi-k3",
+    ]);
+  });
+
   it("accepts one explicit model through the preferred models variable", () => {
     process.env.MOMENT_DISCOVERY_MODELS = "moonshotai/kimi-k3";
     expect(routeForTask("moment-discovery.candidates").modelIds).toEqual([

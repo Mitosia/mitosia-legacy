@@ -7,6 +7,10 @@ import {
   segmentReconciliationTransportSchema,
 } from "@/lib/ai/capabilities/episode-clips";
 import {
+  segmentPublisherEditTransportSchema,
+  segmentPublisherVerifyTransportSchema,
+} from "@/lib/ai/capabilities/segment-publisher";
+import {
   portableJsonSchema,
   portableOutputSchema,
 } from "@/lib/ai/portable-schema";
@@ -19,6 +23,8 @@ import {
 const schemas = {
   brief: episodeBriefTransportSchema,
   moments: momentProposalTransportSchema,
+  publisherEdit: segmentPublisherEditTransportSchema,
+  publisherVerify: segmentPublisherVerifyTransportSchema,
   reconcile: segmentReconciliationTransportSchema,
   segments: segmentPlanTransportSchema,
 };

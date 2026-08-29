@@ -1,9 +1,11 @@
+import { createHash } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import {
   fineCutSegmentBoundary,
   isSegmentBoundaryRefinable,
 } from "@/lib/ai/capabilities/clip-fine-cut";
 import {
+  briefToPromptText,
   type EpisodeBrief,
   runSegmentReconcilePass,
   validateClipProposalMode,
@@ -23,6 +25,16 @@ import {
   runSegmentPlan,
   type SegmentPlanInput,
 } from "@/lib/ai/capabilities/segment-plan";
+import {
+  type PublisherDraftDossier,
+  type PublisherReviewEvidence,
+  runSegmentPublisherEdit,
+  runSegmentPublisherVerify,
+  type SegmentPublisherEdit,
+  type SegmentPublisherVerification,
+  validateSegmentPublisherVerification,
+} from "@/lib/ai/capabilities/segment-publisher";
+import { modelFamilyFor } from "@/lib/ai/config";
 import {
   canonicalJson,
   hashContextPack,
@@ -66,21 +78,30 @@ import {
 import { buildCutGrid, type CutGrid, cutterWindow } from "./grid";
 import { alignExtraction, tokenizeWords } from "./grounding";
 import { type DedupeChunk, spanText } from "./moments";
+import { SEGMENT_PLAN_ARCHITECTURE_VERSION } from "./segment-architecture";
 import { applySegmentCutProposals } from "./segment-cuts";
+import {
+  compilePublisherPlan,
+  numberPublisherDraftSegments,
+  type PublisherPlanCompileResult,
+  type PublisherPlanOperation,
+  validatePublisherKeepCoverage,
+} from "./segment-publisher";
 import {
   applySegmentGrouping,
   numberSegmentAtoms,
-  SEGMENT_PLAN_ARCHITECTURE_VERSION,
   type SegmentGrouping,
 } from "./segment-reconcile";
 import { terminalSegmentFailureStatus } from "./segment-state";
 import { buildSegmentRows, checkPartition, type SegmentRow } from "./segments";
 
 // The S6.5 segment-plan workflow, the discover-pipeline clone one lane
-// over: claim → assemble context + inventories → ONE partition pass →
-// global chapter reconciliation → deterministic tiling gauntlet
-// (lib/intelligence/segments.ts) → cold reviewer over the keeps → persist
-// rows + metering. NOT chained from any
+// over: claim → context + rough partition → coarse reconciliation → Cutter →
+// deterministic draft → cold screen → required whole-plan Publisher Editor →
+// deterministic exact-cover compiler → different-family Publisher Verifier →
+// at most one bounded editorial revision → atomic persistence. The cold
+// per-clip reviewer stays an independent lens, but only the global Publisher
+// gate can make a plan ready. NOT chained from any
 // job — planning is a human's button (it leads toward spend-gated
 // rendering), so the only entries are the action and the rerun action.
 
@@ -93,6 +114,8 @@ const SEGMENT_USAGE_SUFFIXES: Partial<Record<StructuredUsage["task"], string>> =
     "moment-review.verdict": ":review",
     "segment-plan.partition": "",
     "segment-plan.reconcile": ":reconcile",
+    "segment-publisher.edit": ":publisher-edit",
+    "segment-publisher.verify": ":publisher-verify",
   };
 
 function segmentUsageCorrelation(
@@ -461,17 +484,33 @@ async function loadDedupeChunks(
 }
 
 interface ReviewOutcome {
+  bySignature: Map<string, MomentReviewVerdict>;
   usage: StructuredUsage | null;
   verdicts: Map<number, MomentReviewVerdict>;
 }
 
-const EMPTY_REVIEW: ReviewOutcome = { usage: null, verdicts: new Map() };
+const EMPTY_REVIEW: ReviewOutcome = {
+  bySignature: new Map(),
+  usage: null,
+  verdicts: new Map(),
+};
+
+function reviewSignature(row: SegmentRow): string {
+  return canonicalJson({
+    endMs: row.endMs,
+    hook: row.hook,
+    kind: row.kind,
+    startMs: row.startMs,
+    title: row.title,
+  });
+}
 
 // Cold reviewer over the KEEP segments — the same agent, same flag, same
 // never-a-gate contract as the moments lane.
 async function reviewKeeps(
   rows: readonly SegmentRow[],
-  words: readonly TranscriptWord[]
+  words: readonly TranscriptWord[],
+  reusable: ReadonlyMap<string, MomentReviewVerdict> = EMPTY_REVIEW.bySignature
 ): Promise<ReviewOutcome> {
   if (!reviewerEnabled()) {
     return EMPTY_REVIEW;
@@ -483,8 +522,19 @@ async function reviewKeeps(
     if (reviewable.length === 0) {
       return EMPTY_REVIEW;
     }
+    const verdicts = new Map<number, MomentReviewVerdict>();
+    const bySignature = new Map<string, MomentReviewVerdict>();
+    const missing = reviewable.filter(({ index, row }) => {
+      const verdict = reusable.get(reviewSignature(row));
+      if (!verdict) {
+        return true;
+      }
+      verdicts.set(index, verdict);
+      bySignature.set(reviewSignature(row), verdict);
+      return false;
+    });
     const result = await reviewMoments(
-      reviewable.map(({ index, row }) => ({
+      missing.map(({ index, row }) => ({
         hook: row.hook ?? "",
         id: String(index),
         lane: "chapter" as const,
@@ -492,11 +542,20 @@ async function reviewKeeps(
         title: row.title ?? "",
       }))
     );
-    const verdicts = new Map<number, MomentReviewVerdict>();
     for (const [key, verdict] of result.verdicts) {
-      verdicts.set(Number(key), verdict);
+      const index = Number(key);
+      const row = rows[index];
+      if (!row) {
+        continue;
+      }
+      verdicts.set(index, verdict);
+      bySignature.set(reviewSignature(row), verdict);
     }
-    return { usage: sumStructuredUsage(result.usage), verdicts };
+    return {
+      bySignature,
+      usage: sumStructuredUsage(result.usage),
+      verdicts,
+    };
   } catch (error) {
     console.error("[segments] reviewer pass failed:", error);
     return EMPTY_REVIEW;
@@ -527,6 +586,478 @@ function finalTableOfContents(rows: readonly SegmentRow[]): string[] {
       chapter += 1;
       return row.title?.trim() || `Untitled chapter ${chapter}`;
     });
+}
+
+const PUBLISHER_EDGE_WORDS = 24;
+const PUBLISHER_SEMANTIC_ATTEMPTS = 2;
+const PUBLISHER_WHITESPACE = /\s+/u;
+
+function edgeWords(
+  words: readonly TranscriptWord[],
+  row: SegmentRow,
+  edge: "close" | "open"
+): string {
+  const tokens = spanText(words, row)
+    .split(PUBLISHER_WHITESPACE)
+    .filter(Boolean);
+  return edge === "open"
+    ? tokens.slice(0, PUBLISHER_EDGE_WORDS).join(" ")
+    : tokens.slice(Math.max(0, tokens.length - PUBLISHER_EDGE_WORDS)).join(" ");
+}
+
+function publisherReviewEvidence(
+  verdict: MomentReviewVerdict | undefined
+): PublisherReviewEvidence[] {
+  if (!verdict) {
+    return [];
+  }
+  const minimum = Math.min(
+    verdict.opensCold,
+    verdict.resolves,
+    verdict.standsAlone,
+    verdict.titleTruthful
+  );
+  let severity: PublisherReviewEvidence["severity"] = "pass";
+  if (minimum === 0) {
+    severity = "blocker";
+  } else if (minimum < 2 || verdict.suggestedFix !== "none") {
+    severity = "warning";
+  }
+  return [
+    {
+      code: `cold_${verdict.suggestedFix}`,
+      note: `opens=${verdict.opensCold}/2 resolves=${verdict.resolves}/2 standalone=${verdict.standsAlone}/2 title=${verdict.titleTruthful}/2. ${verdict.notes}`,
+      severity,
+    },
+  ];
+}
+
+function publisherDossier(
+  rows: readonly SegmentRow[],
+  words: readonly TranscriptWord[],
+  grid: CutGrid,
+  brief: EpisodeBrief | null,
+  review: ReviewOutcome
+): PublisherDraftDossier {
+  const numbered = numberPublisherDraftSegments(rows, grid);
+  if (numbered.issues.length > 0) {
+    throw new Error(
+      `Publisher draft failed integrity: ${numbered.issues.map((issue) => issue.message).join("; ")}`
+    );
+  }
+  const segments = numbered.segments.map((segment) => ({
+    anchorText: segment.anchorText,
+    closesOn: edgeWords(words, segment, "close"),
+    dropReason: segment.dropReason,
+    durationMs: Math.max(0, segment.endMs - segment.startMs),
+    endSentenceId: segment.endSentenceId,
+    hook: segment.hook,
+    id: segment.id,
+    kind: segment.kind,
+    opensOn: edgeWords(words, segment, "open"),
+    reviewEvidence: publisherReviewEvidence(
+      review.bySignature.get(reviewSignature(segment))
+    ),
+    startSentenceId: segment.startSentenceId,
+    summary: segment.summary,
+    title: segment.title,
+  }));
+  const boundaries = segments.slice(1).map((right, index) => {
+    const left = segments[index];
+    if (!left) {
+      throw new Error("Publisher boundary is missing its left segment");
+    }
+    return {
+      afterText: right.opensOn,
+      beforeText: left.closesOn,
+      id: `B${String(index + 1).padStart(3, "0")}`,
+      leftSegmentId: left.id,
+      rightSegmentId: right.id,
+    };
+  });
+  const coverage = publisherCoverage(brief, grid);
+  return {
+    boundaries,
+    brief: brief ? briefToPromptText(brief) : null,
+    coverage,
+    editorialFlags: numbered.segments.flatMap((segment) =>
+      segment.flags.map((flag) => `${segment.id}:${flag}`)
+    ),
+    segments,
+    tableOfContents: finalTableOfContents(rows),
+  };
+}
+
+function publisherCoverage(
+  brief: EpisodeBrief | null,
+  grid: CutGrid
+): PublisherDraftDossier["coverage"] {
+  return (brief?.marqueeArcs ?? []).flatMap((arc, index) => {
+    const start = grid.paragraphs.find(
+      (paragraph) => paragraph.id === arc.startP
+    );
+    const end = grid.paragraphs.find((paragraph) => paragraph.id === arc.endP);
+    if (!(start && end) || start.startSentence > end.endSentence) {
+      throw new Error(
+        `Publisher coverage ${arc.title} references an invalid paragraph range`
+      );
+    }
+    return [
+      {
+        endSentenceId: end.endSentence,
+        id: `ARC${String(index).padStart(3, "0")}`,
+        label: arc.title,
+        note: arc.note,
+        startSentenceId: start.startSentence,
+      },
+    ];
+  });
+}
+
+function publisherCompileIssues(
+  compiled: PublisherPlanCompileResult,
+  rows: readonly SegmentRow[],
+  words: readonly TranscriptWord[],
+  grid: CutGrid,
+  brief: EpisodeBrief | null
+): string[] {
+  const issues = compiled.issues.map(
+    (issue) =>
+      `[${issue.code}]${issue.sliceIndex === undefined ? "" : ` slice ${issue.sliceIndex}`}: ${issue.message}`
+  );
+  if (!compiled.ok) {
+    return issues;
+  }
+  const partition = checkPartition(rows, words);
+  issues.push(...partition.issues.map((issue) => `[partition] ${issue}`));
+  if (rows.length !== compiled.items.length) {
+    issues.push(
+      `[collapsed_slice] compiled ${compiled.items.length} slices but the deterministic gauntlet produced ${rows.length} rows`
+    );
+  }
+  const numbered = numberPublisherDraftSegments(rows, grid);
+  issues.push(
+    ...numbered.issues.map((issue) => `[${issue.code}] ${issue.message}`)
+  );
+  for (const segment of numbered.segments) {
+    if (segment.kind === "keep" && !segment.grounded) {
+      issues.push(
+        `[ungrounded_anchor] ${segment.id} anchorText is not verbatim inside its final span`
+      );
+    }
+  }
+  issues.push(
+    ...validatePublisherKeepCoverage(
+      numbered.segments,
+      grid,
+      publisherCoverage(brief, grid)
+    ).map((issue) => `[${issue.code}] ${issue.message}`)
+  );
+  return issues;
+}
+
+interface CompiledPublisherEdit {
+  calls: number;
+  compile: PublisherPlanCompileResult;
+  dossier: PublisherDraftDossier;
+  editorModel: string | null;
+  output: SegmentPublisherEdit;
+  rows: SegmentRow[];
+}
+
+async function compilePublisherEdit({
+  brief,
+  chunks,
+  draftRows,
+  grid,
+  prefixInput,
+  review,
+  verifierIssues = null,
+  words,
+}: {
+  brief: EpisodeBrief | null;
+  chunks: readonly DedupeChunk[];
+  draftRows: readonly SegmentRow[];
+  grid: CutGrid;
+  prefixInput: Parameters<typeof runSegmentPublisherEdit>[0];
+  review: ReviewOutcome;
+  verifierIssues?: SegmentPublisherVerification | null;
+  words: readonly TranscriptWord[];
+}): Promise<CompiledPublisherEdit> {
+  const dossier = publisherDossier(draftRows, words, grid, brief, review);
+  let previousOutput: SegmentPublisherEdit | null = null;
+  let validatorIssues: string[] = [];
+  for (let attempt = 0; attempt < PUBLISHER_SEMANTIC_ATTEMPTS; attempt += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: the second pass is a bounded semantic correction using exact deterministic errors
+    const result = await runSegmentPublisherEdit(prefixInput, dossier, {
+      previousOutput,
+      validatorIssues,
+      verifierIssues,
+    });
+    const compiled = compilePublisherPlan(
+      draftRows,
+      grid,
+      result.output.slices
+    );
+    const rows = compiled.ok
+      ? buildSegmentRows(
+          compiled.items,
+          words,
+          words.at(-1)?.endMs ?? 0,
+          chunks
+        )
+      : [];
+    validatorIssues = publisherCompileIssues(
+      compiled,
+      rows,
+      words,
+      grid,
+      brief
+    );
+    if (validatorIssues.length === 0) {
+      return {
+        calls: attempt + 1,
+        compile: compiled,
+        dossier,
+        editorModel: result.usage === null ? null : result.usage.model,
+        output: result.output,
+        rows,
+      };
+    }
+    previousOutput = result.output;
+  }
+  throw new Error(
+    `Publisher Editor output failed integrity: ${validatorIssues.join("; ")}`
+  );
+}
+
+interface PublisherVerificationOutcome {
+  calls: number;
+  output: SegmentPublisherVerification;
+  verifierModel: string | null;
+}
+
+async function verifyPublisherPlan({
+  dossier,
+  editorModel,
+  prefixInput,
+}: {
+  dossier: PublisherDraftDossier;
+  editorModel: string | null;
+  prefixInput: Parameters<typeof runSegmentPublisherVerify>[0];
+}): Promise<PublisherVerificationOutcome> {
+  const excludeModelFamilies = editorModel ? [modelFamilyFor(editorModel)] : [];
+  let previousOutput: SegmentPublisherVerification | null = null;
+  let validatorIssues: string[] = [];
+  for (let attempt = 0; attempt < PUBLISHER_SEMANTIC_ATTEMPTS; attempt += 1) {
+    // biome-ignore lint/performance/noAwaitInLoops: the second pass repairs verifier coverage/consistency using exact local errors
+    const result = await runSegmentPublisherVerify(prefixInput, dossier, {
+      excludeModelFamilies,
+      previousOutput,
+      validatorIssues,
+    });
+    validatorIssues = validateSegmentPublisherVerification(
+      result.output,
+      dossier
+    );
+    if (validatorIssues.length === 0) {
+      return {
+        calls: attempt + 1,
+        output: result.output,
+        verifierModel: result.usage === null ? null : result.usage.model,
+      };
+    }
+    previousOutput = result.output;
+  }
+  throw new Error(
+    `Publisher Verifier output failed integrity: ${validatorIssues.join("; ")}`
+  );
+}
+
+function publisherBlockerCodes(
+  verification: SegmentPublisherVerification
+): string[] {
+  return [
+    ...verification.segmentVerdicts.flatMap((verdict) =>
+      verdict.verdict === "pass"
+        ? []
+        : [`segment:${verdict.segmentId}:${verdict.issueCode}`]
+    ),
+    ...verification.boundaryVerdicts.flatMap((verdict) =>
+      verdict.verdict === "pass"
+        ? []
+        : [`boundary:${verdict.boundaryId}:${verdict.issueCode}`]
+    ),
+    ...verification.coverageVerdicts.flatMap((coverage) =>
+      coverage.verdict === "pass" ? [] : [`coverage:${coverage.coverageId}`]
+    ),
+  ];
+}
+
+function publisherArtifactHash(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+interface PublisherEditorialIteration {
+  editorModel: string | null;
+  inputPlanHash: string;
+  inputSources: Array<{
+    endSentenceId: number;
+    id: string;
+    kind: "drop" | "keep";
+    startSentenceId: number;
+    title: string | null;
+  }>;
+  iteration: number;
+  operations: PublisherPlanOperation[];
+  outputPlanHash: string;
+  revisionReason: string;
+  slices: SegmentPublisherEdit["slices"];
+}
+
+function publisherEditorialIteration(
+  iteration: number,
+  compiled: CompiledPublisherEdit
+): PublisherEditorialIteration {
+  return {
+    editorModel: compiled.editorModel,
+    inputPlanHash: publisherArtifactHash(compiled.dossier),
+    inputSources: compiled.dossier.segments.map((segment) => ({
+      endSentenceId: segment.endSentenceId,
+      id: segment.id,
+      kind: segment.kind,
+      startSentenceId: segment.startSentenceId,
+      title: segment.title,
+    })),
+    iteration,
+    operations: compiled.compile.operations,
+    outputPlanHash: publisherArtifactHash(compiled.output.slices),
+    revisionReason: compiled.output.revisionReason,
+    slices: compiled.output.slices,
+  };
+}
+
+interface PublisherWorkflowOutcome {
+  editCalls: number;
+  finalDossierHash: string;
+  iterations: PublisherEditorialIteration[];
+  operations: Array<{
+    iteration: number;
+    operation: PublisherPlanOperation;
+  }>;
+  review: ReviewOutcome;
+  revisionReasons: string[];
+  revisionRequested: boolean;
+  rows: SegmentRow[];
+  verification: SegmentPublisherVerification;
+  verificationMap: Pick<
+    PublisherDraftDossier,
+    "boundaries" | "coverage" | "segments"
+  >;
+  verifierModels: Array<string | null>;
+  verifyCalls: number;
+}
+
+async function runPublisherWorkflow({
+  brief,
+  chunks,
+  draftRows,
+  grid,
+  prefixInput,
+  words,
+}: {
+  brief: EpisodeBrief | null;
+  chunks: readonly DedupeChunk[];
+  draftRows: readonly SegmentRow[];
+  grid: CutGrid;
+  prefixInput: Parameters<typeof runSegmentPublisherEdit>[0];
+  words: readonly TranscriptWord[];
+}): Promise<PublisherWorkflowOutcome> {
+  const draftReview = await reviewKeeps(draftRows, words);
+  const initial = await compilePublisherEdit({
+    brief,
+    chunks,
+    draftRows,
+    grid,
+    prefixInput,
+    review: draftReview,
+    words,
+  });
+  let current = initial;
+  let review = await reviewKeeps(current.rows, words, draftReview.bySignature);
+  let dossier = publisherDossier(current.rows, words, grid, brief, review);
+  let verified = await verifyPublisherPlan({
+    dossier,
+    editorModel: current.editorModel,
+    prefixInput,
+  });
+  const operations = current.compile.operations.map((operation) => ({
+    iteration: 0,
+    operation,
+  }));
+  const iterations = [publisherEditorialIteration(0, current)];
+  const verifierModels = [verified.verifierModel];
+  const revisionReasons = [current.output.revisionReason];
+  let editCalls = current.calls;
+  let verifyCalls = verified.calls;
+  let revisionRequested = false;
+
+  if (!verified.output.publishable) {
+    revisionRequested = true;
+    const revision = await compilePublisherEdit({
+      brief,
+      chunks,
+      draftRows: current.rows,
+      grid,
+      prefixInput,
+      review,
+      verifierIssues: verified.output,
+      words,
+    });
+    current = revision;
+    iterations.push(publisherEditorialIteration(1, revision));
+    operations.push(
+      ...revision.compile.operations.map((operation) => ({
+        iteration: 1,
+        operation,
+      }))
+    );
+    revisionReasons.push(revision.output.revisionReason);
+    editCalls += revision.calls;
+    review = await reviewKeeps(current.rows, words, review.bySignature);
+    dossier = publisherDossier(current.rows, words, grid, brief, review);
+    verified = await verifyPublisherPlan({
+      dossier,
+      editorModel: current.editorModel,
+      prefixInput,
+    });
+    verifierModels.push(verified.verifierModel);
+    verifyCalls += verified.calls;
+  }
+
+  if (!verified.output.publishable) {
+    throw new Error(
+      `Publisher Verifier blocked the final plan: ${publisherBlockerCodes(verified.output).join(", ") || "unspecified editorial defect"}`
+    );
+  }
+  return {
+    editCalls,
+    finalDossierHash: publisherArtifactHash(dossier),
+    iterations,
+    operations,
+    review,
+    revisionReasons,
+    revisionRequested,
+    rows: current.rows,
+    verification: verified.output,
+    verificationMap: {
+      boundaries: dossier.boundaries,
+      coverage: dossier.coverage,
+      segments: dossier.segments,
+    },
+    verifierModels,
+    verifyCalls,
+  };
 }
 
 async function writeStage(
@@ -882,6 +1413,11 @@ export async function runSegmentPlanPipeline(
         prefixInput,
         transcript.revision
       );
+      if (!ensured.brief) {
+        throw new Error(
+          "Segment planning requires a valid episode brief from the Director"
+        );
+      }
 
       await writeStage(payload, claimed, "rough");
       const result = await runSegmentPlan(
@@ -911,20 +1447,28 @@ export async function runSegmentPlanPipeline(
       );
 
       const chunks = await loadDedupeChunks(payload);
-      const rows = buildSegmentRows(
+      const draftRows = buildSegmentRows(
         refinement.items,
         transcript.data.words,
         durationMs,
         chunks
       );
-      const partition = checkPartition(rows, transcript.data.words);
+      const partition = checkPartition(draftRows, transcript.data.words);
       if (!partition.ok) {
         throw new Error(
           `Segment partition failed integrity: ${partition.issues.join("; ")}`
         );
       }
-      await writeStage(payload, claimed, "review");
-      const review = await reviewKeeps(rows, transcript.data.words);
+      await writeStage(payload, claimed, "publisher");
+      const publisher = await runPublisherWorkflow({
+        brief: ensured.brief,
+        chunks,
+        draftRows,
+        grid,
+        prefixInput,
+        words: transcript.data.words,
+      });
+      const { review, rows } = publisher;
       const meteredUsage = summarizeStructuredUsages(capturedUsage).filter(
         (usage) =>
           usage.task !== "episode-brief.compose" || ensured.usage === null
@@ -963,6 +1507,28 @@ export async function runSegmentPlanPipeline(
           );
         }
 
+        await recordAudit(tx, {
+          action: "segment_plan.publisher_review_applied",
+          actorUserId: null,
+          entityId: claimed.runId,
+          entityType: "segment_plan_run",
+          metadata: {
+            attempt: claimed.attempt,
+            editCalls: publisher.editCalls,
+            finalDossierHash: publisher.finalDossierHash,
+            finalVerification: publisher.verification,
+            finalVerificationMap: publisher.verificationMap,
+            iterations: publisher.iterations,
+            operations: publisher.operations,
+            revisionReasons: publisher.revisionReasons,
+            revisionRequested: publisher.revisionRequested,
+            sourceId: payload.sourceId,
+            verifierModels: publisher.verifierModels,
+            verifyCalls: publisher.verifyCalls,
+          },
+          organizationId: payload.organizationId,
+        });
+
         const [finalized] = await tx
           .update(segmentPlanRun)
           .set({
@@ -977,6 +1543,31 @@ export async function runSegmentPlanPipeline(
               grounded: rows.filter((row) => row.grounded).length,
               kept: rows.filter((row) => row.kind === "keep").length,
               mergedBoundaries: reconciliation.mergedBoundaries,
+              prePublisherToc: finalTableOfContents(draftRows),
+              publisherEditCalls: publisher.editCalls,
+              publisherOperationCount: publisher.operations.length,
+              publisherOperations: Object.fromEntries(
+                [
+                  "merge",
+                  "move_boundary",
+                  "repackage",
+                  "set_disposition",
+                  "split",
+                ].map((type) => [
+                  type,
+                  publisher.operations.filter(
+                    ({ operation }) => operation.type === type
+                  ).length,
+                ])
+              ),
+              publisherRevisionRequested: publisher.revisionRequested,
+              publisherStatus: "passed",
+              publisherVerifyCalls: publisher.verifyCalls,
+              publisherWarnings: [
+                ...publisher.verification.segmentVerdicts,
+                ...publisher.verification.boundaryVerdicts,
+                ...publisher.verification.coverageVerdicts,
+              ].filter((verdict) => verdict.verdict === "warning").length,
               reconcileCalls: reconciliation.calls,
               reconciledToc: reconciliation.tableOfContents,
               reconcileIssues: reconciliation.issues,

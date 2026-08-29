@@ -65,11 +65,11 @@ import {
   scheduleSourceIndexReap,
 } from "@/lib/intelligence/index-reaper";
 import { listRecentQuestions } from "@/lib/intelligence/qa";
+import { SEGMENT_PLAN_ARCHITECTURE_VERSION } from "@/lib/intelligence/segment-architecture";
 import {
   isStalledSegmentPlan,
   scheduleSegmentPlanReap,
 } from "@/lib/intelligence/segment-reaper";
-import { SEGMENT_PLAN_ARCHITECTURE_VERSION } from "@/lib/intelligence/segment-reconcile";
 import { requireOrg } from "@/lib/org";
 import {
   isStalledTranscription,
@@ -334,6 +334,7 @@ function workspaceSegments(data: {
   extractionRun: { status: string } | null;
   segmentRun: {
     counts: unknown;
+    editVersion: number;
     error: string | null;
     revision: number | null;
     status: string;
@@ -345,18 +346,27 @@ function workspaceSegments(data: {
       ? { run: { error: null, stale: false, status: "missing" }, segments: [] }
       : null;
   }
+  const counts = (data.segmentRun.counts ?? {}) as {
+    architectureVersion?: number;
+    publisherOperationCount?: number;
+    publisherRevisionRequested?: boolean;
+    publisherStatus?: string;
+    publisherWarnings?: number;
+  };
   return {
     run: {
       error: data.segmentRun.error,
+      publisherHumanEdited: data.segmentRun.editVersion > 0,
+      publisherOperationCount: counts.publisherOperationCount ?? 0,
+      publisherRevised: counts.publisherRevisionRequested ?? false,
+      publisherStatus: counts.publisherStatus ?? null,
+      publisherWarnings: counts.publisherWarnings ?? 0,
       stale:
         data.segmentRun.status === "ready" &&
         ((data.currentRevision !== null &&
           (data.segmentRun.revision ?? 0) < data.currentRevision.revision) ||
-          ((
-            (data.segmentRun.counts ?? {}) as {
-              architectureVersion?: number;
-            }
-          ).architectureVersion ?? 1) < SEGMENT_PLAN_ARCHITECTURE_VERSION),
+          (counts.architectureVersion ?? 1) <
+            SEGMENT_PLAN_ARCHITECTURE_VERSION),
       status: data.segmentRun.status,
     },
     segments: data.segments,
@@ -613,6 +623,7 @@ export default async function SourceDetailPage(
     const [segmentRunRow] = await tx
       .select({
         counts: segmentPlanRun.counts,
+        editVersion: segmentPlanRun.editVersion,
         error: segmentPlanRun.error,
         revision: segmentPlanRun.revision,
         stalled: sql<boolean>`(${isStalledSegmentPlan})`,

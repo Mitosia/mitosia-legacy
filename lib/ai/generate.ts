@@ -7,7 +7,7 @@ import {
   type Schema,
 } from "ai";
 import type { z } from "zod";
-import { type AiTask, routeForTask } from "./config";
+import { type AiTask, modelFamilyFor, routeForTask } from "./config";
 import { portableOutputSchema } from "./portable-schema";
 import { getModelCandidates, type ModelCandidate } from "./provider";
 
@@ -93,6 +93,14 @@ export interface GenerateStructuredOptions<Wire = unknown, Output = Wire> {
   // never sent: the runner hashes this value before putting it on the wire.
   // When omitted, the cached prefix itself supplies the stable hash input.
   cacheSessionKey?: string;
+  // Family exclusion is stronger than an explicit id list for deployment
+  // overrides: a newly configured Anthropic model is still Anthropic even
+  // before it is added to the curated registry.
+  excludeModelFamilies?: readonly string[];
+  // Keep an independent judge out of the model (or model family) that
+  // produced the artifact it is reviewing. Callers resolve families to
+  // explicit model ids so this seam stays provider-neutral.
+  excludeModelIds?: readonly string[];
   // Provider-neutral output policy. Every current candidate is constructed
   // with strict JSON Schema enabled; the option makes that contract explicit
   // at capability call sites and leaves room for future gateway adapters to
@@ -168,6 +176,8 @@ const MAX_REPAIR_ISSUE_CHARS = 2000;
 const MAX_REPAIR_OUTPUT_CHARS = 6000;
 const SHORT_ATTEMPT_TIMEOUT_MS = 3 * 60 * 1000;
 const MEDIUM_ATTEMPT_TIMEOUT_MS = 10 * 60 * 1000;
+const CANDIDATE_SPECIFIC_FORBIDDEN =
+  /byok|provider permission|model permission|model allowlist|provider allowlist|model access|not available in (?:your )?region|geographic restriction/iu;
 // 32k is an allowance rather than an expected payload. Slow frontier routes
 // can legitimately need well over ten minutes; every long-running pipeline
 // now heartbeats independently, so the request timeout protects genuinely
@@ -646,34 +656,78 @@ function isProviderRefusal(error: unknown): boolean {
   );
 }
 
+function isCandidateSpecificForbidden(error: unknown): boolean {
+  if (!(APICallError.isInstance(error) && error.statusCode === 403)) {
+    return false;
+  }
+  const body =
+    typeof error.responseBody === "string"
+      ? error.responseBody
+      : JSON.stringify(error.responseBody ?? "");
+  // OpenRouter also uses 403 for model/provider/BYOK permissions, where the
+  // next candidate may work. Unknown 403 wording stays terminal: availability
+  // must never route around moderation, policy, or account guardrails.
+  return CANDIDATE_SPECIFIC_FORBIDDEN.test(`${error.message}\n${body}`);
+}
+
+function independentCandidates(
+  candidates: readonly ModelCandidate[],
+  options:
+    | Pick<
+        GenerateStructuredOptions,
+        "excludeModelFamilies" | "excludeModelIds"
+      >
+    | undefined
+): { candidates: ModelCandidate[]; exclusionConfigured: boolean } {
+  const excludedModelIds = new Set(options?.excludeModelIds ?? []);
+  const excludedModelFamilies = new Set(options?.excludeModelFamilies ?? []);
+  return {
+    candidates: candidates.filter(
+      (candidate) =>
+        !(
+          excludedModelIds.has(candidate.modelId) ||
+          excludedModelFamilies.has(modelFamilyFor(candidate.modelId))
+        )
+    ),
+    exclusionConfigured:
+      excludedModelIds.size > 0 || excludedModelFamilies.size > 0,
+  };
+}
+
 function terminalGenerationError(
   task: AiTask,
-  maxOutputTokens: number,
   error: unknown,
   usage: StructuredUsage | null
 ): StructuredGenerationError | null {
   if (
     APICallError.isInstance(error) &&
     error.statusCode !== undefined &&
-    [401, 402, 403].includes(error.statusCode)
+    ([401, 402].includes(error.statusCode) ||
+      (error.statusCode === 403 && !isCandidateSpecificForbidden(error)))
   ) {
     return new StructuredGenerationError(
       `${task} gateway request was rejected (statusCode=${error.statusCode})`,
       usage
     );
   }
-  if (
-    NoObjectGeneratedError.isInstance(error) &&
-    error.finishReason === "length"
-  ) {
-    return new StructuredGenerationError(
-      `${task} exhausted its output budget (maxOutputTokens=${maxOutputTokens}, thinking counts against it)`,
-      usage
-    );
-  }
   return isProviderRefusal(error)
     ? new StructuredGenerationError(
         `${task} output was blocked by provider safety policy`,
+        usage
+      )
+    : null;
+}
+
+function outputBudgetError(
+  task: AiTask,
+  maxOutputTokens: number,
+  error: unknown,
+  usage: StructuredUsage | null
+): StructuredGenerationError | null {
+  return NoObjectGeneratedError.isInstance(error) &&
+    error.finishReason === "length"
+    ? new StructuredGenerationError(
+        `${task} exhausted its output budget across every eligible candidate (maxOutputTokens=${maxOutputTokens}, thinking counts against it)`,
         usage
       )
     : null;
@@ -791,9 +845,17 @@ export async function generateStructured<Wire, Output = Wire>(
   options?: GenerateStructuredOptions<Wire, Output>
 ): Promise<StructuredResult<Output>> {
   const route = routeForTask(task);
-  const candidates = await getModelCandidates(task);
+  const selection = independentCandidates(
+    await getModelCandidates(task),
+    options
+  );
+  const { candidates } = selection;
   if (candidates.length === 0) {
-    throw new Error("No AI provider configured");
+    throw new Error(
+      selection.exclusionConfigured
+        ? "No independent AI model candidate configured"
+        : "No AI provider configured"
+    );
   }
 
   logTelemetryStateOnce();
@@ -847,11 +909,11 @@ export async function generateStructured<Wire, Output = Wire>(
         safeErrorLog(error)
       );
 
-      // Truncation is a task-sizing error and a content-filter result is a
-      // safety decision. Neither may be hidden by trying a different model.
+      // Safety/account failures are terminal. Truncation is candidate-specific
+      // across a heterogeneous model pool, so it skips same-model repair but
+      // may fall through to the next eligible family.
       const terminalError = terminalGenerationError(
         task,
-        route.maxOutputTokens,
         error,
         aggregateUsage(task, usageEntries, attemptedModels, attemptCount)
       );
@@ -862,10 +924,14 @@ export async function generateStructured<Wire, Output = Wire>(
       lastError = error;
     }
   }
-  const failure = publicGenerationError(
+  const finalUsage = aggregateUsage(
     task,
-    lastError,
-    aggregateUsage(task, usageEntries, attemptedModels, attemptCount)
+    usageEntries,
+    attemptedModels,
+    attemptCount
   );
+  const failure =
+    outputBudgetError(task, route.maxOutputTokens, lastError, finalUsage) ??
+    publicGenerationError(task, lastError, finalUsage);
   throwStructuredGenerationError(failure);
 }
