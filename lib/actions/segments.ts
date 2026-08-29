@@ -15,6 +15,7 @@ import {
   dispatchSegmentPlan,
   segmentPlanningConfigured,
 } from "@/lib/intelligence/segment-enqueue";
+import { terminalSegmentFailureStatus } from "@/lib/intelligence/segment-state";
 import { requireOrg } from "@/lib/org";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
 
@@ -306,10 +307,13 @@ async function transitionSegmentPlan(
   await tx
     .update(segmentPlanRun)
     .set({
-      counts: {
-        dispatchLease: request.dispatchLease,
-        dispatchState: "pending",
-      },
+      counts: sql`(
+        COALESCE(${segmentPlanRun.counts}, '{}'::jsonb)
+        - 'stage' - 'dispatchId' - 'dispatchedAt'
+      ) || jsonb_build_object(
+        'dispatchLease', ${request.dispatchLease}::text,
+        'dispatchState', 'pending'
+      )`,
       error: null,
       status: "pending",
     })
@@ -397,12 +401,12 @@ export async function planSegmentsAction(
       const [confirmed] = await tx
         .update(segmentPlanRun)
         .set({
-          counts: {
-            dispatchedAt: new Date().toISOString(),
-            dispatchId,
-            dispatchLease: transition.dispatchLease,
-            dispatchState: "confirmed",
-          },
+          counts: sql`COALESCE(${segmentPlanRun.counts}, '{}'::jsonb) || jsonb_build_object(
+            'dispatchedAt', ${new Date().toISOString()}::text,
+            'dispatchId', ${dispatchId}::text,
+            'dispatchLease', ${transition.dispatchLease}::text,
+            'dispatchState', 'confirmed'
+          )`,
         })
         .where(
           and(
@@ -431,7 +435,10 @@ export async function planSegmentsAction(
     await withOrgScope(organizationId, async (tx) => {
       const [failedRun] = await tx
         .update(segmentPlanRun)
-        .set({ error: SEGMENT_DISPATCH_ERROR, status: "failed" })
+        .set({
+          error: SEGMENT_DISPATCH_ERROR,
+          status: terminalSegmentFailureStatus,
+        })
         .where(
           and(
             eq(segmentPlanRun.sourceId, parsedId.data),
@@ -439,13 +446,17 @@ export async function planSegmentsAction(
             eq(segmentPlanRun.status, "pending")
           )
         )
-        .returning({ id: segmentPlanRun.id });
+        .returning({
+          id: segmentPlanRun.id,
+          status: segmentPlanRun.status,
+        });
       if (failedRun) {
         await recordAudit(tx, {
           action: "segment_plan.dispatch_failed",
           actorUserId: userId,
           entityId: failedRun.id,
           entityType: "segment_plan_run",
+          metadata: { preservedPlan: failedRun.status === "ready" },
           organizationId,
         });
       }

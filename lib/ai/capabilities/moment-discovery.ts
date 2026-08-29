@@ -7,6 +7,7 @@ import {
   type ClipPrefixInput,
   type EpisodeBrief,
   runMomentRoughPass,
+  validateClipProposalMode,
 } from "./episode-clips";
 
 // The moments ROUGH pass (docs/clip-cut-architecture.md §4 Pass 2): one
@@ -176,18 +177,26 @@ export async function runMomentDiscovery(
     clipPrefixInput(input, grid),
     options.brief ?? null
   );
-  const items: RawMomentItem[] = (run.output.candidates ?? []).map((item) => {
-    const span = resolveParagraphSpan(grid, item.startP, item.endP);
-    return {
-      anchorText: item.anchorText,
-      endMs: span.endMs,
-      hook: item.hook,
-      scores: item.scores,
-      seedIds: item.seedIds,
-      startMs: span.startMs,
-      summary: item.summary,
-      title: item.title,
-    };
-  });
+  const validated = validateClipProposalMode(run.output, "moments");
+  if (!validated.proposal) {
+    throw new Error(
+      `Moment rough pass failed integrity: ${validated.issues.join("; ")}`
+    );
+  }
+  const items: RawMomentItem[] = (validated.proposal.candidates ?? []).map(
+    (item) => {
+      const span = resolveParagraphSpan(grid, item.startP, item.endP);
+      return {
+        anchorText: item.anchorText,
+        endMs: span.endMs,
+        hook: item.hook,
+        scores: item.scores,
+        seedIds: item.seedIds,
+        startMs: span.startMs,
+        summary: item.summary,
+        title: item.title,
+      };
+    }
+  );
   return { items, usage: [run.usage] };
 }

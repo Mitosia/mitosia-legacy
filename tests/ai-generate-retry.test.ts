@@ -89,6 +89,24 @@ beforeEach(() => {
 });
 
 describe("generateStructured schema-miss retry", () => {
+  it("forwards the Anthropic JSON-tool transport override", async () => {
+    mockGenerate.mockResolvedValueOnce(success);
+
+    await generateStructured("evals.judge", "system", "prompt", schema, {
+      anthropicStructuredOutputMode: "jsonTool",
+    });
+
+    expect(mockGenerate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerOptions: {
+          anthropic: expect.objectContaining({
+            structuredOutputMode: "jsonTool",
+          }),
+        },
+      })
+    );
+  });
+
   it("retries the same candidate once on a schema mismatch", async () => {
     mockGenerate.mockRejectedValueOnce(schemaMiss());
     mockGenerate.mockResolvedValueOnce(success);
@@ -99,6 +117,32 @@ describe("generateStructured schema-miss retry", () => {
       "prompt",
       schema
     );
+    expect(result.output).toEqual({ answer: "ok" });
+    expect(mockGenerate).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries exact validation layered after a permissive transport", async () => {
+    mockGenerate
+      .mockResolvedValueOnce({
+        ...success,
+        object: { answer: "wrong mode" },
+      })
+      .mockResolvedValueOnce(success);
+
+    const result = await generateStructured(
+      "evals.judge",
+      "system",
+      "prompt",
+      schema,
+      {
+        validateOutput: (output) => {
+          if (output.answer !== "ok") {
+            throw new Error("answer must be ok");
+          }
+        },
+      }
+    );
+
     expect(result.output).toEqual({ answer: "ok" });
     expect(mockGenerate).toHaveBeenCalledTimes(2);
   });

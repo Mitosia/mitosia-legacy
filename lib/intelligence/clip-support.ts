@@ -3,6 +3,7 @@ import {
   type ClipPrefixInput,
   type EpisodeBrief,
   runEpisodeBriefPass,
+  validateClipProposalMode,
 } from "@/lib/ai/capabilities/episode-clips";
 import type { StructuredUsage } from "@/lib/ai/generate";
 import { episodeBrief, sourceArtifact } from "@/lib/db/schema";
@@ -116,7 +117,13 @@ export async function ensureEpisodeBrief(
   } else {
     try {
       const { output, usage: passUsage } = await runEpisodeBriefPass(input);
-      ({ brief } = output);
+      const validated = validateClipProposalMode(output, "brief");
+      if (!validated.proposal) {
+        throw new Error(
+          `Episode brief failed integrity: ${validated.issues.join("; ")}`
+        );
+      }
+      ({ brief } = validated.proposal);
       usage = passUsage;
       ({ model } = passUsage);
     } catch (error) {

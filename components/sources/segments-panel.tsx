@@ -959,6 +959,7 @@ export function SegmentsPanel({
   }
   return (
     <SegmentsReady
+      error={run.error}
       playback={playback}
       segments={segments}
       sourceId={sourceId}
@@ -969,12 +970,14 @@ export function SegmentsPanel({
 }
 
 function SegmentsReady({
+  error,
   playback,
   segments,
   sourceId,
   stale,
   transcriptUrl,
 }: {
+  error: string | null;
   playback: RangePlayback;
   segments: SegmentView[];
   sourceId: string;
@@ -1051,6 +1054,22 @@ function SegmentsReady({
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
+        {error ? (
+          <div
+            aria-live="polite"
+            className="rounded-md border border-destructive/25 bg-destructive/5 p-3"
+            data-testid="segment-rerun-preserved"
+            role="status"
+          >
+            <p className="font-medium text-sm">
+              The latest planning attempt failed. Your previous segments and
+              reviews are unchanged.
+            </p>
+            <p className="mt-1 break-words text-muted-foreground text-xs">
+              {error}
+            </p>
+          </div>
+        ) : null}
         {stale ? (
           <div className="flex flex-wrap items-center gap-2 text-muted-foreground text-sm">
             <span>This chapter plan is out of date for this source.</span>

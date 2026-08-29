@@ -8,6 +8,7 @@ import {
   runSegmentRoughPass,
   type SegmentRoughItem,
   type SegmentRoughPlan,
+  validateClipProposalMode,
 } from "./episode-clips";
 import type { MomentAnalysisContext, MomentSeed } from "./moment-discovery";
 import { clipPrefixInput } from "./moment-discovery";
@@ -254,8 +255,14 @@ export async function runSegmentPlan(
       previousPlan
     );
     usage.push(run.usage);
-    previousPlan = run.output.plan;
-    issues = validateSegmentRoughPlan(previousPlan, grid.paragraphs.length);
+    const validated = validateClipProposalMode(run.output, "segments");
+    previousPlan = validated.proposal?.plan ?? null;
+    issues = [
+      ...validated.issues,
+      ...(validated.proposal
+        ? validateSegmentRoughPlan(previousPlan, grid.paragraphs.length)
+        : []),
+    ];
     if (issues.length > 0 || !previousPlan) {
       continue;
     }

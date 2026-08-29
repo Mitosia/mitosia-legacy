@@ -1,6 +1,9 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { runSegmentReconcilePass } from "@/lib/ai/capabilities/episode-clips";
+import {
+  runSegmentReconcilePass,
+  validateClipProposalMode,
+} from "@/lib/ai/capabilities/episode-clips";
 import {
   clipPrefixInput,
   runMomentDiscovery,
@@ -328,7 +331,13 @@ async function reconcileSegmentsForEval(
       previousGroups
     );
     usage.push(run.usage);
-    previousGroups = run.output.reconciliation?.groups ?? [];
+    const validated = validateClipProposalMode(run.output, "segment_reconcile");
+    if (!validated.proposal) {
+      ({ issues } = validated);
+      previousGroups = [];
+      continue;
+    }
+    previousGroups = validated.proposal.reconciliation?.groups ?? [];
     const applied = applySegmentGrouping(
       atoms,
       previousGroups,
