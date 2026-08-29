@@ -14,17 +14,24 @@ export type JudgeVerdict = z.infer<typeof judgeSchema>;
 const JUDGE_INSTRUCTIONS = `You grade executive summaries of transcripts.
 Given a transcript and a summary, score faithfulness 0-1: 1.0 = every
 claim in the summary is supported by the transcript; deduct for invented
-facts, wrong attributions, or missing the recording's main thrust. Note
-the single most important problem, or "faithful" if none.`;
+facts, wrong attributions, or missing the recording's main thrust. The
+KNOWN CONTEXT section lists production metadata (organization, client,
+brand, project, recording title) that the summarizer was given alongside
+the transcript — claims consistent with it are supported, not invented.
+Note the single most important problem, or "faithful" if none.`;
 
+// The summarizer receives the source context pack, so the judge must too:
+// grading transcript-only marked legitimate context facts ("RP Studio's
+// podcast") as inventions — a flaky gate blocks model tuning (2026-08-30).
 export async function judgeSummary(
   transcriptText: string,
-  summary: string
+  summary: string,
+  knownContext: string
 ): Promise<JudgeVerdict> {
   const result = await generateStructured(
     "evals.judge",
     JUDGE_INSTRUCTIONS,
-    `TRANSCRIPT:\n${transcriptText}\n\nSUMMARY TO GRADE:\n${summary}`,
+    `KNOWN CONTEXT:\n${knownContext}\n\nTRANSCRIPT:\n${transcriptText}\n\nSUMMARY TO GRADE:\n${summary}`,
     judgeSchema
   );
   return result.output;

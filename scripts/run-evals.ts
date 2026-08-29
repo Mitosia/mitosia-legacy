@@ -89,6 +89,21 @@ const THRESHOLDS: Record<string, number> = {
 };
 const JUDGE_THRESHOLD = 0.7;
 
+// The summarizer sees the context pack, so the judge's ground truth includes
+// it — otherwise legitimate org/brand mentions grade as "invented" and the
+// gate flakes (observed 2026-08-30).
+function judgeKnownContext(pack: SourceContextPack): string {
+  return [
+    `Organization: ${pack.organization.name}`,
+    pack.client ? `Client: ${pack.client.name}` : null,
+    pack.brand ? `Brand: ${pack.brand.name}` : null,
+    pack.project ? `Project: ${pack.project.name}` : null,
+    `Recording: "${pack.source.title}"`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 interface Fixture {
   durationMs: number;
   name: string;
@@ -498,7 +513,8 @@ async function evaluateFixture(
   if (useJudge) {
     const verdict = await judgeSummary(
       transcriptToPromptText(fixture.transcript),
-      result.editorial.summary
+      result.editorial.summary,
+      judgeKnownContext(fixture.pack)
     );
     if (
       !printScore("judge.faithfulness", verdict.faithfulness, JUDGE_THRESHOLD, [
