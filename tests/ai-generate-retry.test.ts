@@ -25,6 +25,7 @@ vi.mock("../lib/ai/provider", () => ({
 
 import { generateObject } from "ai";
 import {
+  AiBudgetExceededError,
   captureStructuredUsage,
   generateStructured,
   StructuredGenerationError,
@@ -35,6 +36,7 @@ const mockGenerate = vi.mocked(generateObject);
 
 const schema = z.object({ answer: z.string() });
 const BUDGET_ERROR = /exhausted its output budget/;
+const CONTRACT_HALT = /failed local validation on 2 independent models/;
 const GENERATION_FAILED = /AI generation failed/;
 const SESSION_ID = /^mitosia_[a-f0-9]{32}$/;
 
@@ -671,6 +673,104 @@ describe("generateStructured schema-miss retry", () => {
       })
     ).rejects.toThrow("No independent AI model candidate configured");
     expect(mockGenerate).not.toHaveBeenCalled();
+  });
+
+  it("halts failover after two models fail the same local validation", async () => {
+    // A deterministic prompt/validator contract bug (the 2026-08-30
+    // episode-brief incident) rejects EVERY model. The third candidate must
+    // never be paid for: two independent models failing local validation is
+    // evidence against the contract, not the models.
+    mockGetModelCandidates.mockResolvedValue([
+      candidate("anthropic/claude-opus"),
+      candidate("google/gemini-pro", "automatic"),
+      candidate("moonshotai/kimi-k3", "automatic"),
+    ]);
+    mockGenerate.mockResolvedValue({
+      ...success,
+      object: { answer: "fails the local gate" },
+    });
+
+    await expect(
+      generateStructured("evals.judge", "system", "prompt", schema, {
+        validateOutput: () => {
+          throw new Error("spine must cover the full paragraph grid");
+        },
+      })
+    ).rejects.toThrow(CONTRACT_HALT);
+    // 2 models × (attempt + bounded correction retry), third model untouched.
+    expect(mockGenerate).toHaveBeenCalledTimes(4);
+  });
+
+  it("still fails over past a single model's local validation failure", async () => {
+    mockGetModelCandidates.mockResolvedValue([
+      candidate("anthropic/claude-opus"),
+      candidate("google/gemini-pro", "automatic"),
+    ]);
+    mockGenerate
+      .mockResolvedValueOnce({ ...success, object: { answer: "fabricated" } })
+      .mockResolvedValueOnce({ ...success, object: { answer: "fabricated" } })
+      .mockResolvedValueOnce(success);
+
+    const result = await generateStructured(
+      "evals.judge",
+      "system",
+      "prompt",
+      schema,
+      {
+        validateOutput: (output) => {
+          if (output.answer !== "ok") {
+            throw new Error("anchor is not grounded");
+          }
+          return output;
+        },
+      }
+    );
+
+    expect(result.usage.model).toBe("google/gemini-pro");
+    expect(mockGenerate).toHaveBeenCalledTimes(3);
+  });
+
+  it("halts a capture scope at the default AI run budget", async () => {
+    const captured: StructuredUsage[] = [];
+    mockGenerate.mockResolvedValue({
+      ...success,
+      providerMetadata: {
+        openrouter: { provider: "Anthropic", usage: { cost: 11 } },
+      },
+    });
+
+    await expect(
+      captureStructuredUsage(captured, async () => {
+        await generateStructured("evals.judge", "system", "first", schema);
+        await generateStructured("evals.judge", "system", "second", schema);
+      })
+    ).rejects.toBeInstanceOf(AiBudgetExceededError);
+
+    // The second call is refused before any provider attempt is paid for.
+    expect(mockGenerate).toHaveBeenCalledTimes(1);
+    expect(captured).toHaveLength(2);
+  });
+
+  it("does not enforce a budget when AI_RUN_BUDGET_USD disables it", async () => {
+    vi.stubEnv("AI_RUN_BUDGET_USD", "0");
+    try {
+      const captured: StructuredUsage[] = [];
+      mockGenerate.mockResolvedValue({
+        ...success,
+        providerMetadata: {
+          openrouter: { provider: "Anthropic", usage: { cost: 11 } },
+        },
+      });
+
+      await captureStructuredUsage(captured, async () => {
+        await generateStructured("evals.judge", "system", "first", schema);
+        await generateStructured("evals.judge", "system", "second", schema);
+      });
+
+      expect(mockGenerate).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("excludes an override model by OpenRouter vendor family", async () => {
