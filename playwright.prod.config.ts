@@ -14,7 +14,9 @@ import { defineConfig, devices } from "@playwright/test";
 // Kept as a separate config, not another project in the main one: this
 // suite needs a `pnpm build` first, and `pnpm e2e` must stay runnable
 // without one.
-const PORT = 3002;
+// E2E_PROD_PORT lets the exact-commit local gate avoid another checkout's
+// server. An ordinary `pnpm e2e:prod` keeps the documented port 3002.
+const PORT = Number(process.env.E2E_PROD_PORT ?? 3002);
 const BASE_URL = `http://localhost:${PORT}`;
 
 export default defineConfig({
