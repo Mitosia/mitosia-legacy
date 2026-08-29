@@ -249,7 +249,7 @@ Watch-items on Dodo: the MoR fee premium over a raw gateway is the price of tax/
 | AI traces/evals | **Langfuse** (§7) | One place for prompts, traces, datasets, scores |
 | Product analytics | **PostHog** (+ feature flags + session replay) | Activation/time-to-value metrics (§44) and flags/kill-switches (§36.8) in one vendor |
 | Uptime/status | **BetterStack** status page + monitors | Client-facing incident status (§28.2) |
-| Testing | **Vitest** (unit/service), **Playwright** (E2E incl. proofing/portal flows), golden media fixtures for render determinism, promptfoo eval gates in CI | §42.6-42.7 media + AI quality harnesses |
+| Testing | **Vitest** (unit/service), **Playwright** (E2E incl. proofing/portal flows), golden media fixtures for render determinism, Langfuse eval gates | §42.6-42.7 media + AI quality harnesses |
 
 ---
 
@@ -263,7 +263,7 @@ Watch-items on Dodo: the MoR fee premium over a raw gateway is the price of tax/
 | Adjacent services on Dokploy | **Langfuse, Nango, Infisical** now; **Hocuspocus / Novu / Typesense** later as their slots mature | Big synergy: every "self-host graduation path" in §4/§12/§13 becomes a Dokploy container instead of a new vendor |
 | Jobs/media compute | **Trigger.dev cloud** + **Modal** now; self-hosted Trigger.dev on a dedicated worker VPS is the documented cost graduation | Keep heavy compute off the app box |
 | Database | **Neon stays managed** | Don't self-host the system of record — PITR, backups, and branch-per-PR are worth more than the VPS savings; revisit only at real scale |
-| CI/CD | **GitHub Actions** (typecheck, Ultracite, Vitest, Playwright, promptfoo) → Docker image → **GHCR** → Dokploy auto-deploy; Dokploy PR previews + **Neon branch-per-PR** | A Vercel-preview-like flow, self-hosted |
+| CI/CD | Solo phase: exact-commit **local gate** (Ultracite, Vitest/RLS, Next build/typecheck, Playwright) + required lightweight GitHub provenance status; GitHub Actions remains for path-filtered Trigger.dev deploys. Restore independent hosted validation before adding a committer. Dokploy auto-deploys the app from protected `main` | Avoid spending several hosted runner-minutes per solo-dev PR without allowing an untested SHA to merge |
 | Sizing & ops | Start on one KVM 8-class box (8 vCPU / 32 GB) with snapshots + off-box backups enabled; unattended-upgrades + fail2ban; add a second box for workers when queue depth demands (Dokploy multi-server) | We own patching/monitoring now — that's the trade for the bill; Dokploy + Cloudflare absorb most of it |
 | Monorepo | **pnpm workspaces + Turborepo** — adopt when the second deployable (trigger tasks / public API) lands, not before | Avoid ceremony until it pays |
 
@@ -291,7 +291,7 @@ packages/
 
 ## 16. Security & compliance baseline
 
-- **RLS everywhere** + automated cross-tenant isolation tests in CI (§34.1).
+- **RLS everywhere** + automated cross-tenant isolation tests in the required PR gate (§34.1).
 - Signed, short-lived media URLs; watermarked review renders; download controls (§34.3, §29.2).
 - Append-only audit log table (auth, permission, approval, publish, export, support-access events) with export stream; WorkOS Audit Logs at enterprise tier (§34.4).
 - AI data governance: provider allowlist per tenant, no-training flags, regional routing config, redaction pass before model calls where policy requires; embeddings/caches deleted with source (§34.7).
