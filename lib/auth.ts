@@ -3,9 +3,13 @@ import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { nextCookies } from "better-auth/next-js";
 import { organization } from "better-auth/plugins";
 import { asc, eq } from "drizzle-orm";
+import { after } from "next/server";
 import { db } from "./db";
 import * as schema from "./db/schema";
+import { sendPasswordResetEmail } from "./email/send-password-reset-email";
 import { env } from "./env";
+
+const PASSWORD_RESET_TOKEN_EXPIRES_IN_SECONDS = 60 * 60;
 
 export const auth = betterAuth({
   // Behind Cloudflare the socket address is always an edge server, so Better
@@ -21,6 +25,10 @@ export const auth = betterAuth({
   // the origin directly could set this header to whatever they liked and
   // forge the address in audit records and rate limit buckets.
   advanced: {
+    // Better Auth hands non-critical email work to Next's request lifecycle,
+    // which keeps the response timing independent of Resend latency while
+    // still allowing the Docker server to drain the task on shutdown.
+    backgroundTasks: { handler: after },
     ipAddress: {
       ipAddressHeaders: ["cf-connecting-ip", "x-forwarded-for"],
     },
@@ -36,6 +44,22 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
+    resetPasswordTokenExpiresIn: PASSWORD_RESET_TOKEN_EXPIRES_IN_SECONDS,
+    revokeSessionsOnPasswordReset: true,
+    sendResetPassword: async ({ user, url }) => {
+      try {
+        await sendPasswordResetEmail({
+          name: user.name,
+          resetUrl: url,
+          to: user.email,
+        });
+      } catch (error) {
+        // The browser always receives Better Auth's generic response for both
+        // known and unknown addresses. Surfacing delivery failures here would
+        // turn the endpoint into an account-enumeration oracle.
+        console.error("[auth] password reset email delivery failed", error);
+      }
+    },
   },
   // nextCookies must stay last so cookies set in server actions propagate
   plugins: [organization(), nextCookies()],

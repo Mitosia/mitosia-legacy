@@ -67,7 +67,15 @@ export default function SignInPage() {
               />
             </Field>
             <Field>
-              <FieldLabel htmlFor="password">Password</FieldLabel>
+              <div className="flex items-center justify-between gap-3">
+                <FieldLabel htmlFor="password">Password</FieldLabel>
+                <Link
+                  className="text-muted-foreground text-sm underline-offset-4 hover:text-foreground hover:underline"
+                  href="/forgot-password"
+                >
+                  Forgot password?
+                </Link>
+              </div>
               <Input
                 autoComplete="current-password"
                 id="password"
