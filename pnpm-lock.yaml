@@ -14,9 +14,6 @@ importers:
 
   .:
     dependencies:
-      '@ai-sdk/anthropic':
-        specifier: ^4.0.41
-        version: 4.0.41(zod@4.4.3)
       '@aws-sdk/client-s3':
         specifier: ^3.1106.0
         version: 3.1106.0
@@ -221,12 +218,6 @@ packages:
         optional: true
       express:
         optional: true
-
-  '@ai-sdk/anthropic@4.0.41':
-    resolution: {integrity: sha512-So62as8fexWMmXMIxvrWVaDLjLRe6EG2+5mmRc1KCPBoyyyFx6zbTcCvxJkViSUHhsGMBDryAm+mfs91n7Jl8g==}
-    engines: {node: '>=22'}
-    peerDependencies:
-      zod: ^3.25.76 || ^4.1.8
 
   '@ai-sdk/gateway@4.0.62':
     resolution: {integrity: sha512-zR3pustGWhw5eUZHG+fJZx/V/PBe+LxdDpc5hDFWxozG/3MB/+eY62jn+YiR+9uOH+Hx63e5zJoeKLfZfPktWQ==}
@@ -4741,12 +4732,6 @@ snapshots:
     optionalDependencies:
       '@grpc/grpc-js': 1.14.4
       express: 5.2.1
-
-  '@ai-sdk/anthropic@4.0.41(zod@4.4.3)':
-    dependencies:
-      '@ai-sdk/provider': 4.0.7
-      '@ai-sdk/provider-utils': 5.0.29(zod@4.4.3)
-      zod: 4.4.3
 
   '@ai-sdk/gateway@4.0.62(zod@4.4.3)':
     dependencies:

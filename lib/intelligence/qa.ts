@@ -6,6 +6,12 @@ import {
 } from "@/lib/ai/capabilities/source-qa";
 import { estimateEmbeddingCostUsd } from "@/lib/ai/config";
 import {
+  captureStructuredUsage,
+  type StructuredUsage,
+  structuredFailureUsages,
+} from "@/lib/ai/generate";
+import { recordStructuredUsages } from "@/lib/ai/metering";
+import {
   source,
   sourceAnalysis,
   sourceChapter,
@@ -86,131 +92,197 @@ export async function askSource(input: {
     throw new Error("This source is still being indexed. Try again shortly.");
   }
 
+  const capturedUsage: StructuredUsage[] = [];
+  let retrievalMetering: {
+    costUsd: number | null;
+    model: string;
+    tokens: number;
+  } | null = null;
   try {
-    const retrieval = await searchSourceChunks(
-      input.organizationId,
-      input.sourceId,
-      input.question,
-      RETRIEVAL_LIMIT
-    );
-    const chunks: QaChunk[] = retrieval.chunks.map((chunk) => ({
-      endMs: chunk.endMs,
-      idx: chunk.idx,
-      startMs: chunk.startMs,
-      text: chunk.text,
-    }));
-
-    const result = await runSourceQa({
-      chapters: context.chapters,
-      chunks,
-      question: input.question,
-      summary: context.summary,
-      title: context.title,
-    });
-
-    const citations = result.output.answerable
-      ? verifyCitations(result.output.citations, chunks)
-      : [];
-
-    const questionId = await withOrgScope(input.organizationId, async (tx) => {
-      const totalCostUsd = result.usage.reduce(
-        (total, usage) => total + (usage.costUsd ?? 0),
-        estimateEmbeddingCostUsd(retrieval.embedModel, retrieval.embedTokens) ??
-          0
+    return await captureStructuredUsage(capturedUsage, async () => {
+      const retrieval = await searchSourceChunks(
+        input.organizationId,
+        input.sourceId,
+        input.question,
+        RETRIEVAL_LIMIT
       );
-      const [row] = await tx
-        .insert(sourceQuestion)
-        .values({
-          answer: result.output.answer,
-          answerable: result.output.answerable,
-          citations,
-          createdBy: input.userId,
-          metadata: {
-            costUsd: totalCostUsd,
-            embedModel: retrieval.embedModel,
-            embedTokens: retrieval.embedTokens,
-            models: result.usage.map((usage) => ({
-              inputTokens: usage.inputTokens,
-              model: usage.model,
-              outputTokens: usage.outputTokens,
-              provider: usage.provider,
-            })),
-          },
-          organizationId: input.organizationId,
-          question: input.question,
-          sourceId: input.sourceId,
-          status: "ready",
-        })
-        .returning({ id: sourceQuestion.id });
-      if (!row) {
-        throw new Error("Question row was not created");
-      }
+      retrievalMetering = {
+        costUsd: estimateEmbeddingCostUsd(
+          retrieval.embedModel,
+          retrieval.embedTokens
+        ),
+        model: retrieval.embedModel,
+        tokens: retrieval.embedTokens,
+      };
+      const chunks: QaChunk[] = retrieval.chunks.map((chunk) => ({
+        endMs: chunk.endMs,
+        idx: chunk.idx,
+        startMs: chunk.startMs,
+        text: chunk.text,
+      }));
 
-      // Metering (cross-cutting rule 1): the query embedding and the
-      // answer call are both real spend.
-      if (retrieval.embedTokens > 0) {
-        await recordUsage(tx, {
-          correlationId: `qa:${row.id}:embed`,
-          entryType: "ai_tokens",
-          metadata: {
-            costUsd: estimateEmbeddingCostUsd(
+      const result = await runSourceQa({
+        chapters: context.chapters,
+        chunks,
+        question: input.question,
+        summary: context.summary,
+        title: context.title,
+      });
+
+      const citations = result.output.answerable
+        ? verifyCitations(result.output.citations, chunks)
+        : [];
+
+      const questionId = await withOrgScope(
+        input.organizationId,
+        async (tx) => {
+          const componentCosts = [
+            estimateEmbeddingCostUsd(
               retrieval.embedModel,
               retrieval.embedTokens
             ),
-            kind: "embedding",
-            model: retrieval.embedModel,
-            questionId: row.id,
-          },
-          organizationId: input.organizationId,
-          quantity: retrieval.embedTokens,
-          sourceId: input.sourceId,
-          unit: "tokens",
-        });
-      }
-      for (const usage of result.usage) {
-        // biome-ignore lint/performance/noAwaitInLoops: one entry, same tx
-        await recordUsage(tx, {
-          correlationId: `qa:${row.id}:answer`,
-          entryType: "ai_tokens",
-          metadata: {
-            costUsd: usage.costUsd,
-            inputTokens: usage.inputTokens,
-            model: usage.model,
-            outputTokens: usage.outputTokens,
-            provider: usage.provider,
-            questionId: row.id,
-            task: usage.task,
-          },
-          organizationId: input.organizationId,
-          quantity: usage.inputTokens + usage.outputTokens,
-          sourceId: input.sourceId,
-          unit: "tokens",
-        });
-      }
-      return row.id;
-    });
+            ...result.usage.map((usage) => usage.costUsd),
+          ];
+          const totalCostUsd = componentCosts.every(
+            (cost): cost is number => cost !== null
+          )
+            ? componentCosts.reduce((total, cost) => total + cost, 0)
+            : null;
+          const [row] = await tx
+            .insert(sourceQuestion)
+            .values({
+              answer: result.output.answer,
+              answerable: result.output.answerable,
+              citations,
+              createdBy: input.userId,
+              metadata: {
+                costUsd: totalCostUsd,
+                embedModel: retrieval.embedModel,
+                embedTokens: retrieval.embedTokens,
+                models: result.usage.map((usage) => ({
+                  attemptedModels: usage.attemptedModels,
+                  attempts: usage.attempts,
+                  cacheReadTokens: usage.cacheReadTokens,
+                  cacheWriteTokens: usage.cacheWriteTokens,
+                  inputTokens: usage.inputTokens,
+                  model: usage.model,
+                  outputTokens: usage.outputTokens,
+                  provider: usage.provider,
+                  upstreamProvider: usage.upstreamProvider,
+                })),
+              },
+              organizationId: input.organizationId,
+              question: input.question,
+              sourceId: input.sourceId,
+              status: "ready",
+            })
+            .returning({ id: sourceQuestion.id });
+          if (!row) {
+            throw new Error("Question row was not created");
+          }
 
-    return {
-      answer: result.output.answer,
-      answerable: result.output.answerable,
-      citations,
-      questionId,
-    };
+          // Metering (cross-cutting rule 1): the query embedding and the
+          // answer call are both real spend.
+          if (retrieval.embedTokens > 0) {
+            await recordUsage(tx, {
+              correlationId: `qa:${row.id}:embed`,
+              entryType: "ai_tokens",
+              metadata: {
+                costUsd: estimateEmbeddingCostUsd(
+                  retrieval.embedModel,
+                  retrieval.embedTokens
+                ),
+                kind: "embedding",
+                model: retrieval.embedModel,
+                questionId: row.id,
+              },
+              organizationId: input.organizationId,
+              quantity: retrieval.embedTokens,
+              sourceId: input.sourceId,
+              unit: "tokens",
+            });
+          }
+          for (const usage of result.usage) {
+            // biome-ignore lint/performance/noAwaitInLoops: one entry, same tx
+            await recordUsage(tx, {
+              correlationId: `qa:${row.id}:answer`,
+              entryType: "ai_tokens",
+              metadata: {
+                attemptedModels: usage.attemptedModels,
+                attempts: usage.attempts,
+                cacheReadTokens: usage.cacheReadTokens,
+                cacheWriteTokens: usage.cacheWriteTokens,
+                costUsd: usage.costUsd,
+                inputTokens: usage.inputTokens,
+                model: usage.model,
+                outputTokens: usage.outputTokens,
+                provider: usage.provider,
+                questionId: row.id,
+                task: usage.task,
+                upstreamProvider: usage.upstreamProvider,
+              },
+              organizationId: input.organizationId,
+              quantity: usage.inputTokens + usage.outputTokens,
+              sourceId: input.sourceId,
+              unit: "tokens",
+            });
+          }
+          return row.id;
+        }
+      );
+
+      return {
+        answer: result.output.answer,
+        answerable: result.output.answerable,
+        citations,
+        questionId,
+      };
+    });
   } catch (error) {
     // A failed ask still leaves a row — history shows the miss, and the
     // question text is not lost.
     const message =
       error instanceof Error ? error.message : "Unknown Q&A failure";
-    await withOrgScope(input.organizationId, (tx) =>
-      tx.insert(sourceQuestion).values({
-        createdBy: input.userId,
-        error: sanitizeIngestError(message).slice(0, QA_ERROR_MAX_CHARS),
+    await withOrgScope(input.organizationId, async (tx) => {
+      const [row] = await tx
+        .insert(sourceQuestion)
+        .values({
+          createdBy: input.userId,
+          error: sanitizeIngestError(message).slice(0, QA_ERROR_MAX_CHARS),
+          organizationId: input.organizationId,
+          question: input.question,
+          sourceId: input.sourceId,
+          status: "failed",
+        })
+        .returning({ id: sourceQuestion.id });
+      if (!row) {
+        return;
+      }
+      if (retrievalMetering && retrievalMetering.tokens > 0) {
+        await recordUsage(tx, {
+          correlationId: `qa:${row.id}:embed`,
+          entryType: "ai_tokens",
+          metadata: {
+            costUsd: retrievalMetering.costUsd,
+            failed: true,
+            kind: "embedding",
+            model: retrievalMetering.model,
+            questionId: row.id,
+          },
+          organizationId: input.organizationId,
+          quantity: retrievalMetering.tokens,
+          sourceId: input.sourceId,
+          unit: "tokens",
+        });
+      }
+      await recordStructuredUsages(tx, {
+        correlationForTask: (task) => `qa:${row.id}:failed:${task}`,
+        failed: true,
         organizationId: input.organizationId,
-        question: input.question,
         sourceId: input.sourceId,
-        status: "failed",
-      })
-    ).catch(() => {
+        usages: structuredFailureUsages(error, capturedUsage),
+      });
+    }).catch(() => {
       // The original error is the one worth surfacing
     });
     throw error;

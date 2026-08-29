@@ -21,9 +21,14 @@ vi.mock("ai", async (importOriginal) => {
 vi.mock("../lib/ai/provider", () => ({
   getModelCandidates: vi.fn(async () => [
     {
-      model: { id: "claude-opus-5" },
-      modelId: "claude-opus-5",
-      provider: "anthropic",
+      capabilities: {
+        promptCaching: "explicit",
+        reasoningEffort: true,
+        structuredOutputs: true,
+      },
+      model: { id: "anthropic/claude-opus-5" },
+      modelId: "anthropic/claude-opus-5",
+      provider: "openrouter",
     },
   ]),
 }));
@@ -90,7 +95,9 @@ interface CapturedGenerateOptions {
     content: { text?: string }[];
   }[];
   providerOptions?: {
-    anthropic?: { structuredOutputMode?: string };
+    openrouter?: {
+      provider?: { require_parameters?: boolean };
+    };
   };
 }
 
@@ -106,7 +113,7 @@ function instructionAt(callIndex: number): string {
 
 beforeEach(() => {
   mockGenerate.mockReset();
-  vi.stubEnv("ANALYSIS_PROVIDER", "anthropic");
+  vi.stubEnv("ANALYSIS_PROVIDER", "openrouter");
 });
 
 afterEach(() => {
@@ -138,7 +145,7 @@ describe("segment semantic repair", () => {
     expect(instructionAt(1)).toContain("(no plan returned)");
     for (let callIndex = 0; callIndex < 2; callIndex += 1) {
       expect(generatedOptions(callIndex).providerOptions).toMatchObject({
-        anthropic: { structuredOutputMode: "jsonTool" },
+        openrouter: { provider: { require_parameters: true } },
       });
     }
   });

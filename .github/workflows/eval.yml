@@ -1,7 +1,7 @@
 # Golden evals for AI capabilities — manual trigger, not per-PR: eval runs
 # spend real model tokens and grade quality, not correctness. Run before
 # promoting prompt changes; the deterministic scorers gate, the judge
-# grades. Needs the ANTHROPIC_API_KEY repo secret.
+# grades. Needs the OPENROUTER_API_KEY repo secret.
 name: evals
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
 jobs:
   evals:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -20,4 +20,4 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm eval
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}

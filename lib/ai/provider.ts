@@ -1,94 +1,97 @@
 import type { MastraModelConfig } from "@mastra/core/llm";
-import { type AiTask, MODEL_TIERS, routeForTask } from "./config";
+import type { OpenRouterChatSettings } from "@openrouter/ai-sdk-provider";
+import {
+  type AiTask,
+  type ModelCapabilities,
+  modelDefinitionFor,
+  type ReasoningEffort,
+  routeForTask,
+} from "./config";
 
-// Model-provider seam (decision 2026-08-23, inverting tech-stack §7's
-// gateway-first plan): Anthropic DIRECT is the primary — it is the only
-// path that guarantees 1h prompt-cache TTL and reaches the Batch API's 50%
-// discount, and the Vercel gateway demonstrably downgrades cache TTLs.
-// OpenRouter is a break-glass FALLBACK, active only when OPENROUTER_API_KEY
-// is set and the primary call fails — never a hop in the healthy path.
-// The one deliberate exception (2026-08-26): a per-task tier override that
-// names an OpenRouter slug (lib/ai/config.ts) routes that task to
-// OpenRouter as the ONLY candidate — the third-party model audition path.
-// Adopting a gateway later (multi-provider at S5+) is a change to this one
-// file. Keys are raw process.env reads outside serverEnvSchema (the
-// TRIGGER_SECRET_KEY precedent): unconfigured degrades to "no analysis",
-// never a boot failure.
+// OpenRouter is the single active gateway. Model fallback remains owned by
+// Mitosia (the ordered candidate list), while OpenRouter may fail over among
+// eligible upstream endpoints for the same explicit model id.
+
+export const OPENROUTER_STRUCTURED_MODEL_SETTINGS = {
+  plugins: [{ id: "response-healing" }],
+  provider: {
+    allow_fallbacks: true,
+    data_collection: "deny",
+    require_parameters: true,
+    zdr: true,
+  },
+  structuredOutputs: { strict: true },
+  usage: { include: true },
+} as const satisfies OpenRouterChatSettings;
+
+const UNKNOWN_MODEL_CAPABILITIES: ModelCapabilities = {
+  // An explicit environment override may point to a newly auditioned model
+  // not yet in the registry. Strict output support is verified at runtime by
+  // require_parameters; no model-specific cache/effort hint is assumed.
+  promptCaching: "none",
+  reasoningEffort: false,
+  structuredOutputs: true,
+};
 
 export interface ModelCandidate {
-  // Mastra's model union: it accepts any live AI SDK spec version, which
-  // is what lets a v7 Anthropic model and a v5-line OpenRouter model share
-  // one seam without adapter shims.
+  capabilities: ModelCapabilities;
+  // Mastra's model union accepts the AI SDK model specification returned by
+  // the OpenRouter provider without an adapter shim.
   model: MastraModelConfig;
-  // The id actually served — recorded in run rows and ledger metadata, so
-  // an audition run is attributed to the real model, never the table tier.
   modelId: string;
-  provider: "anthropic" | "openrouter";
+  provider: "openrouter";
+  reasoningEffort?: ReasoningEffort;
 }
 
-// Ordered candidates for a task — callers try in order, exactly like the
-// transcription provider failover.
+function settingsForCandidate(
+  capabilities: ModelCapabilities,
+  reasoningEffort: ReasoningEffort | undefined
+): OpenRouterChatSettings {
+  return {
+    ...OPENROUTER_STRUCTURED_MODEL_SETTINGS,
+    ...(reasoningEffort && capabilities.reasoningEffort
+      ? { reasoning: { effort: reasoningEffort } }
+      : {}),
+  };
+}
+
 export async function getModelCandidates(
   task: AiTask
 ): Promise<ModelCandidate[]> {
-  const route = routeForTask(task);
   const openRouterKey = process.env.OPENROUTER_API_KEY;
-
-  // Audition path: the override named a third-party model, so OpenRouter is
-  // the only candidate. Falling back to Anthropic here would silently
-  // produce a first-party candidate set labeled as the audition; a missing
-  // key is a loud misconfiguration for the same reason. usage.include puts
-  // the real billed cost in providerMetadata for the ledger.
-  if (route.openrouterModel) {
-    if (!openRouterKey) {
-      throw new Error(
-        `${task} is overridden to OpenRouter model "${route.openrouterModel}" but OPENROUTER_API_KEY is unset`
-      );
-    }
-    const { createOpenRouter } = await import("@openrouter/ai-sdk-provider");
-    const openrouter = createOpenRouter({ apiKey: openRouterKey });
-    return [
-      {
-        model: openrouter.chat(route.openrouterModel, {
-          usage: { include: true },
-        }),
-        modelId: route.openrouterModel,
-        provider: "openrouter",
-      },
-    ];
+  if (!openRouterKey) {
+    return [];
   }
 
-  const modelId = MODEL_TIERS[route.tier];
-  const candidates: ModelCandidate[] = [];
+  const route = routeForTask(task);
+  const { createOpenRouter } = await import("@openrouter/ai-sdk-provider");
+  const openrouter = createOpenRouter({
+    apiKey: openRouterKey,
+    appName: "Mitosia",
+    compatibility: "strict",
+  });
 
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
-  if (anthropicKey) {
-    const { createAnthropic } = await import("@ai-sdk/anthropic");
-    const anthropic = createAnthropic({ apiKey: anthropicKey });
-    candidates.push({
-      model: anthropic(modelId),
+  return route.modelIds.map((modelId) => {
+    const definition = modelDefinitionFor(modelId);
+    const capabilities = definition
+      ? definition.capabilities
+      : UNKNOWN_MODEL_CAPABILITIES;
+    const reasoningEffort = capabilities.reasoningEffort
+      ? route.reasoningEffort
+      : undefined;
+    return {
+      capabilities,
+      model: openrouter.chat(
+        modelId,
+        settingsForCandidate(capabilities, reasoningEffort)
+      ),
       modelId,
-      provider: "anthropic",
-    });
-  }
-
-  if (openRouterKey) {
-    const { createOpenRouter } = await import("@openrouter/ai-sdk-provider");
-    const openrouter = createOpenRouter({ apiKey: openRouterKey });
-    candidates.push({
-      model: openrouter.chat(`anthropic/${modelId}`, {
-        usage: { include: true },
-      }),
-      modelId: `anthropic/${modelId}`,
-      provider: "openrouter",
-    });
-  }
-
-  return candidates;
+      provider: "openrouter" as const,
+      ...(reasoningEffort ? { reasoningEffort } : {}),
+    };
+  });
 }
 
 export function isAiConfigured(): boolean {
-  return Boolean(
-    process.env.ANTHROPIC_API_KEY || process.env.OPENROUTER_API_KEY
-  );
+  return Boolean(process.env.OPENROUTER_API_KEY);
 }

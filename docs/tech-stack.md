@@ -115,7 +115,7 @@ The heaviest divergence from AceBuilder — they run generated web apps; Mitosia
 | Scene/shot detection | **PySceneDetect + FFmpeg** on workers | Deterministic, cheap |
 | Face / active-speaker detection (reframing) | **Modal (serverless GPU)** running open ASD + face-tracking models (TalkNet/Light-ASD family + InsightFace); CPU fallback: MediaPipe center-weighted crop | The hardest CV problem in the product; per-second GPU billing, scales to zero |
 | Audio intelligence | **FFmpeg (silencedetect, loudnorm/EBU R128) + librosa/pyloudnorm** on Python workers | Energy/pause/filler analysis feeding moment scoring |
-| Semantic analysis (chapters, topics, claims, quotes, stories, moment candidates) | **Claude via the AI layer (§7)** over transcript + audio/visual signals, Batch API for full-source passes | This is editorial judgment — the model's job, orchestrated by the harness |
+| Semantic analysis (chapters, topics, claims, quotes, stories, moment candidates) | **Explicit Claude/GPT/Gemini/Kimi pools through OpenRouter (§7)** over transcript + audio/visual signals | This is editorial judgment — the model's job, locally validated and orchestrated by the harness |
 
 ### 6.3 Rendering
 
@@ -137,9 +137,9 @@ The harness is Mitosia's product. Specialists (Planner, Source Analyst, Moment C
 | Slot | Pick | Why |
 |---|---|---|
 | Agent/capability framework | **Mastra 1.0** (agents, typed tools, workflows with suspend/resume, memory, RAG, scorers, MCP) | TS-native and stable since Jan 2026; gives the specialist capabilities their structure — Zod tool schemas, step retries, branching, suspend/resume — without LangChain-style indirection. Built on the AI SDK, so nothing changes underneath |
-| Model layer under Mastra | **AI SDK v5 providers** via **Vercel AI Gateway** (primary) + **OpenRouter** (fallback) | Two-gateway failover exactly as AceBuilder runs it; both are plain APIs and work fine off-Vercel |
-| Direct SDKs where features demand | **Anthropic SDK** (prompt caching, Batch API, extended context) | Brand/client context packs are ideal prompt-cache targets; Batch API halves full-source analysis cost |
-| Model tiering | **Haiku 4.5** — broad cheap passes (chapterization, first-pass candidate scan, classification) · **Sonnet 5** — writing, adaptation, reranking, evaluators · **Opus 5 / Fable 5** — campaign planning, editorial judgment, brand-conflict reasoning | Tiered processing per thesis §27.2; routing table lives in config, per-task, per-tenant overridable |
+| Model gateway under Mastra | **OpenRouter through the AI SDK** for text generation | One operational gateway for explicit GPT/Gemini/Claude/Kimi pools. Mitosia owns cross-model order, validation, repair, evals, and audit; OpenRouter owns endpoint routing within one pinned model. No opaque auto-router |
+| Provider escape hatch | In-house candidate/generation boundary | Direct provider SDKs are deliberately absent today, but a provider-only feature or gateway incident can add an adapter without changing capability/domain contracts |
+| Model profiles | **Efficient / balanced / editorial** ordered model pools, pinned per task | Product roles replace vendor-branded tiers. Each task can be overridden with explicit OpenRouter model slugs; actual model, upstream endpoint, tokens, and cost are recorded |
 | Embeddings | **voyage-3-large** (primary) via adapter | Transcript/moment/asset semantic search |
 | Reranking | **Cohere Rerank** | Cheap quality boost on retrieval before context assembly |
 | Context assembly | Custom `packages/ai/context` — purpose-specific context packs (org/client/brand/project/source scopes) with precedence hierarchy, versioned snapshots, per-item provenance — injected into Mastra agents as runtime context | Thesis §11 — the differentiator; every generation records which context snapshot it used |
@@ -308,7 +308,7 @@ packages/
 | Zustand + TanStack Query + nuqs + cmdk + Sonner + Vaul + Recharts | **Adopt** | Same roles |
 | Lexical | **Replace → Tiptap** | Collaborative docs with track-changes outweigh prompt-editor ergonomics; Tiptap mentions cover the `@` pattern |
 | Monaco + Shiki | **Downscope → CodeMirror + Shiki** | No full IDE surface in Mitosia |
-| AI SDK + two gateways + auto/manual model routing | **Adopt, wrapped by Mastra** | Mastra 1.0 sits on the AI SDK; gateways + direct Anthropic SDK (caching/Batch) unchanged underneath |
+| AI SDK + model routing | **Adapt → AI SDK behind Mitosia's verified OpenRouter seam** | One maintained gateway; explicit pinned model pools, portable wire schemas, local exact validation, corrective repair, and auditable fallback. No opaque auto-router or direct text-provider SDK |
 | Custom agent harness | **Adopt philosophy** | Ours is the whole product: content graph + bounded capabilities + evals |
 | PlanetScale Postgres | **Adapt → Neon** | Branching DX + pgvector now; PlanetScale remains scale option |
 | Redis for sandbox state | **Downscope → Upstash for cache/ratelimit** | Trigger.dev owns queue/state |

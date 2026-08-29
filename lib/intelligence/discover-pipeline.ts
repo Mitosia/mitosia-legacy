@@ -20,7 +20,14 @@ import {
   hashContextPack,
   type SourceContextPack,
 } from "@/lib/ai/context";
-import type { StructuredUsage } from "@/lib/ai/generate";
+import {
+  captureStructuredUsage,
+  type StructuredUsage,
+  structuredFailureUsages,
+  summarizeStructuredUsages,
+  sumStructuredUsage,
+} from "@/lib/ai/generate";
+import { recordStructuredUsages } from "@/lib/ai/metering";
 import { recordAudit } from "@/lib/audit";
 import {
   brand,
@@ -38,7 +45,6 @@ import {
   transcriptChunk,
 } from "@/lib/db/schema";
 import { type OrgTransaction, withOrgScope } from "@/lib/db/tenant";
-import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
 import type { TranscriptWord } from "@/lib/transcription/types";
@@ -72,6 +78,23 @@ import {
 
 const DISCOVER_ERROR_MAX_CHARS = 2000;
 const DISCOVERY_HEARTBEAT_INTERVAL_MS = 60_000;
+const DISCOVERY_USAGE_SUFFIXES: Partial<
+  Record<StructuredUsage["task"], string>
+> = {
+  "clip-fine.cut": ":cut",
+  "episode-brief.compose": ":brief",
+  "moment-discovery.candidates": "",
+  "moment-review.verdict": ":review",
+};
+
+function discoveryUsageCorrelation(
+  sourceId: string,
+  attempt: number,
+  task: StructuredUsage["task"]
+): string {
+  const suffix = DISCOVERY_USAGE_SUFFIXES[task] ?? `:${task}`;
+  return `discover:${sourceId}:${attempt}${suffix}`;
+}
 
 export interface DiscoveryPayload {
   dispatchLease: string;
@@ -135,7 +158,8 @@ async function recordRunFailure(
   payload: DiscoveryPayload,
   claimed: ClaimedRun,
   error: unknown,
-  finalAttempt: boolean
+  finalAttempt: boolean,
+  capturedUsage: readonly StructuredUsage[]
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown discovery failure";
@@ -143,6 +167,7 @@ async function recordRunFailure(
     0,
     DISCOVER_ERROR_MAX_CHARS
   );
+  const failedUsages = structuredFailureUsages(error, capturedUsage);
   await withOrgScope(payload.organizationId, async (tx) => {
     const [updated] = await tx
       .update(momentDiscoveryRun)
@@ -161,6 +186,14 @@ async function recordRunFailure(
         id: momentDiscoveryRun.id,
         status: momentDiscoveryRun.status,
       });
+    await recordStructuredUsages(tx, {
+      correlationForTask: (task) =>
+        discoveryUsageCorrelation(payload.sourceId, claimed.attempt, task),
+      failed: true,
+      organizationId: payload.organizationId,
+      sourceId: payload.sourceId,
+      usages: failedUsages,
+    });
     if (updated?.status === "ready") {
       await recordAudit(tx, {
         action: "moment_discovery.refresh_failed_preserved",
@@ -417,7 +450,7 @@ async function reviewSurvivors(
     for (const [key, verdict] of result.verdicts) {
       verdicts.set(Number(key), verdict);
     }
-    return { usage: sumUsage(result.usage), verdicts };
+    return { usage: sumStructuredUsage(result.usage), verdicts };
   } catch (error) {
     console.error("[discover] reviewer pass failed:", error);
     return EMPTY_REVIEW;
@@ -531,7 +564,7 @@ async function fineCutSurvivors(
     // which must survive the cut.
     Object.assign(target.row, updated);
   });
-  return sumUsage(usages);
+  return sumStructuredUsage(usages);
 }
 
 // Fixes that route back through the Cutter for the ONE bounded revision
@@ -542,24 +575,6 @@ const REVISION_FIXES = new Set([
   "trim_end",
   "extend_end",
 ]);
-
-function sumUsage(usages: readonly StructuredUsage[]): StructuredUsage | null {
-  const [first] = usages;
-  if (!first) {
-    return null;
-  }
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let costUsd: number | null = null;
-  for (const entry of usages) {
-    inputTokens += entry.inputTokens;
-    outputTokens += entry.outputTokens;
-    if (entry.costUsd !== null) {
-      costUsd = (costUsd ?? 0) + entry.costUsd;
-    }
-  }
-  return { ...first, costUsd, inputTokens, outputTokens };
-}
 
 function verdictColumns(verdict: MomentReviewVerdict | undefined) {
   if (!verdict) {
@@ -605,314 +620,256 @@ export async function runDiscovery(
     return;
   }
   const stopHeartbeat = startDiscoveryRunHeartbeat(payload, claimed);
+  const capturedUsage: StructuredUsage[] = [];
 
   try {
-    const transcript = await loadCurrentTranscript(
-      payload.organizationId,
-      payload.sourceId
-    );
-    if (!transcript) {
-      throw new Error("Source has no ready transcript to discover from");
-    }
-    const speakerCount = new Set(
-      transcript.data.words.map((word) => word.speaker).filter(Boolean)
-    ).size;
-    const context = await assembleContext(
-      payload,
-      transcript.data.language,
-      speakerCount
-    );
-    const durationMs = Math.round(context.durationSeconds * 1000);
+    await captureStructuredUsage(capturedUsage, async () => {
+      const transcript = await loadCurrentTranscript(
+        payload.organizationId,
+        payload.sourceId
+      );
+      if (!transcript) {
+        throw new Error("Source has no ready transcript to discover from");
+      }
+      const speakerCount = new Set(
+        transcript.data.words.map((word) => word.speaker).filter(Boolean)
+      ).size;
+      const context = await assembleContext(
+        payload,
+        transcript.data.language,
+        speakerCount
+      );
+      const durationMs = Math.round(context.durationSeconds * 1000);
 
-    // The cutting room (docs/clip-cut-architecture.md §4): brief → rough
-    // cut → deterministic gauntlet → per-clip Cutter → cold review → one
-    // bounded revision. Stage names on the run row keep the reaper's
-    // silence window honest across the longer pipeline.
-    const grid = buildCutGrid(transcript.data.words);
-    const shotTimesMs = await loadShotTimes(payload);
+      // The cutting room (docs/clip-cut-architecture.md §4): brief → rough
+      // cut → deterministic gauntlet → per-clip Cutter → cold review → one
+      // bounded revision. Stage names on the run row keep the reaper's
+      // silence window honest across the longer pipeline.
+      const grid = buildCutGrid(transcript.data.words);
+      const shotTimesMs = await loadShotTimes(payload);
 
-    await writeStage(payload, claimed, "brief");
-    const ensured = await ensureEpisodeBrief(
-      payload,
-      clipPrefixInput(
+      await writeStage(payload, claimed, "brief");
+      const ensured = await ensureEpisodeBrief(
+        {
+          ...payload,
+          usageCorrelationId: `discover:${payload.sourceId}:${claimed.attempt}:brief`,
+        },
+        clipPrefixInput(
+          {
+            analysis: context.analysis,
+            contextPack: context.pack,
+            seeds: context.seeds,
+          },
+          grid
+        ),
+        transcript.revision
+      );
+
+      await writeStage(payload, claimed, "rough");
+      const result = await runMomentDiscovery(
         {
           analysis: context.analysis,
           contextPack: context.pack,
+          durationMs,
           seeds: context.seeds,
+          transcript: transcript.data,
         },
-        grid
-      ),
-      transcript.revision
-    );
-
-    await writeStage(payload, claimed, "rough");
-    const result = await runMomentDiscovery(
-      {
-        analysis: context.analysis,
-        contextPack: context.pack,
-        durationMs,
-        seeds: context.seeds,
-        transcript: transcript.data,
-      },
-      { brief: ensured.brief }
-    );
-
-    // seedIds the model invented (not in the inventory it was shown) are
-    // dropped deterministically — citations must reference real rows.
-    const knownSeedIds = new Set(context.seeds.map((seed) => seed.id));
-    const items = result.items.map((item) => ({
-      ...item,
-      seedIds: item.seedIds.filter((id) => knownSeedIds.has(id)),
-    }));
-
-    const chunks = await loadDedupeChunks(payload);
-    let rows = buildMomentRows(
-      items,
-      transcript.data.words,
-      durationMs,
-      chunks
-    );
-
-    await writeStage(payload, claimed, "cut");
-    const cutUsage = await fineCutSurvivors(
-      rows,
-      grid,
-      shotTimesMs,
-      transcript.data.words
-    );
-    // Refined boundaries can converge two candidates — dedupe re-runs.
-    rows = dedupeAndRankMomentRows(rows, chunks);
-
-    await writeStage(payload, claimed, "review");
-    const review = await reviewSurvivors(rows, transcript.data.words);
-    // Verdicts keyed by row IDENTITY, not index — the revision round and
-    // its re-rank reorder the array.
-    const verdictByRow = new Map<MomentRow, MomentReviewVerdict>();
-    for (const [index, verdict] of review.verdicts) {
-      const row = rows[index];
-      if (row) {
-        verdictByRow.set(row, verdict);
-      }
-    }
-
-    await writeStage(payload, claimed, "revise");
-    const revisionNotes = new Map<MomentRow, string>();
-    for (const [row, verdict] of verdictByRow) {
-      if (REVISION_FIXES.has(verdict.suggestedFix)) {
-        revisionNotes.set(row, `${verdict.suggestedFix}: ${verdict.notes}`);
-      }
-    }
-    const reviseUsage =
-      revisionNotes.size > 0
-        ? await fineCutSurvivors(
-            rows,
-            grid,
-            shotTimesMs,
-            transcript.data.words,
-            revisionNotes
-          )
-        : null;
-    rows = dedupeAndRankMomentRows(rows, chunks);
-
-    await withOrgScope(payload.organizationId, async (tx) => {
-      // A reaper may have retired this attempt while a provider call was in
-      // flight. Lock and verify the exact claim before any replacement rows,
-      // context snapshot, or metering can be committed.
-      const activeAttempt = await assertActiveAttempt(tx, claimed);
-      const [snapshot] = await tx
-        .insert(contextSnapshot)
-        .values({
-          content: JSON.parse(canonicalJson(context.pack)),
-          hash: hashContextPack(context.pack),
-          kind: context.pack.kind,
-          organizationId: payload.organizationId,
-        })
-        .returning({ id: contextSnapshot.id });
-
-      const [replacementFacts] = await tx
-        .select({
-          boundaryEditCount: sql<number>`count(*) FILTER (WHERE ${momentCandidate.adjustedStartMs} IS NOT NULL OR ${momentCandidate.adjustedEndMs} IS NOT NULL)::int`,
-          candidateCount: sql<number>`count(*)::int`,
-          decisionCount: sql<number>`count(*) FILTER (WHERE ${momentCandidate.status} <> 'proposed')::int`,
-        })
-        .from(momentCandidate)
-        .where(eq(momentCandidate.sourceId, payload.sourceId));
-
-      // Re-runs replace: candidates belong to exactly one run per source.
-      // Human work reaches this point only after the action's exact-version
-      // destructive confirmation; its decision/boundary metrics remain in
-      // the append-only audit trail.
-      await tx
-        .delete(momentCandidate)
-        .where(eq(momentCandidate.sourceId, payload.sourceId));
-      const replacedCandidateCount = Number(
-        replacementFacts?.candidateCount ?? 0
+        { brief: ensured.brief }
       );
-      if (replacedCandidateCount > 0) {
-        await recordAudit(tx, {
-          action: "moment_discovery.replaced",
-          actorUserId: null,
-          entityId: claimed.runId,
-          entityType: "moment_discovery_run",
-          metadata: {
-            discardedBoundaryEditCount: Number(
-              replacementFacts?.boundaryEditCount ?? 0
-            ),
-            discardedCandidateCount: replacedCandidateCount,
-            discardedDecisionCount: Number(
-              replacementFacts?.decisionCount ?? 0
-            ),
-            previousEditVersion: activeAttempt.editVersion,
-            sourceId: payload.sourceId,
-          },
-          organizationId: payload.organizationId,
-        });
+
+      // seedIds the model invented (not in the inventory it was shown) are
+      // dropped deterministically — citations must reference real rows.
+      const knownSeedIds = new Set(context.seeds.map((seed) => seed.id));
+      const items = result.items.map((item) => ({
+        ...item,
+        seedIds: item.seedIds.filter((id) => knownSeedIds.has(id)),
+      }));
+
+      const chunks = await loadDedupeChunks(payload);
+      let rows = buildMomentRows(
+        items,
+        transcript.data.words,
+        durationMs,
+        chunks
+      );
+
+      await writeStage(payload, claimed, "cut");
+      await fineCutSurvivors(rows, grid, shotTimesMs, transcript.data.words);
+      // Refined boundaries can converge two candidates — dedupe re-runs.
+      rows = dedupeAndRankMomentRows(rows, chunks);
+
+      await writeStage(payload, claimed, "review");
+      const review = await reviewSurvivors(rows, transcript.data.words);
+      // Verdicts keyed by row IDENTITY, not index — the revision round and
+      // its re-rank reorder the array.
+      const verdictByRow = new Map<MomentRow, MomentReviewVerdict>();
+      for (const [index, verdict] of review.verdicts) {
+        const row = rows[index];
+        if (row) {
+          verdictByRow.set(row, verdict);
+        }
       }
-      if (rows.length > 0) {
-        await tx.insert(momentCandidate).values(
-          rows.map((row) => ({
-            ...row,
-            ...verdictColumns(verdictByRow.get(row)),
-            organizationId: payload.organizationId,
-            revision: transcript.revision,
-            runId: claimed.runId,
-            sourceId: payload.sourceId,
-          }))
+
+      await writeStage(payload, claimed, "revise");
+      const revisionNotes = new Map<MomentRow, string>();
+      for (const [row, verdict] of verdictByRow) {
+        if (REVISION_FIXES.has(verdict.suggestedFix)) {
+          revisionNotes.set(row, `${verdict.suggestedFix}: ${verdict.notes}`);
+        }
+      }
+      if (revisionNotes.size > 0) {
+        await fineCutSurvivors(
+          rows,
+          grid,
+          shotTimesMs,
+          transcript.data.words,
+          revisionNotes
         );
       }
+      rows = dedupeAndRankMomentRows(rows, chunks);
 
-      const [finalized] = await tx
-        .update(momentDiscoveryRun)
-        .set({
-          contextSnapshotId: snapshot?.id ?? null,
-          counts: {
-            dispatchLease: payload.dispatchLease,
-            flagged: [...review.verdicts.values()].filter(isFlaggedVerdict)
-              .length,
-            grounded: rows.filter((row) => row.grounded).length,
-            proposed: rows.length,
-            reviewed: review.verdicts.size,
-            revised: rows.filter((row) => row.flags.includes("revised")).length,
-            suppressed: rows.filter((row) => row.suppressed).length,
-          },
-          editVersion: 0,
-          error: null,
-          humanEditedAt: null,
-          models: Object.fromEntries(
-            result.usage.map((usage) => [
-              usage.task,
-              { model: usage.model, provider: usage.provider },
-            ])
-          ),
-          revision: transcript.revision,
-          status: "ready",
-        })
-        .where(
-          and(
-            eq(momentDiscoveryRun.id, claimed.runId),
-            eq(momentDiscoveryRun.attempts, claimed.attempt),
-            eq(momentDiscoveryRun.status, "processing")
-          )
-        )
-        .returning({ id: momentDiscoveryRun.id });
-      if (!finalized) {
-        throw new Error("Moment discovery attempt lost its finalization lease");
-      }
+      const meteredUsage = summarizeStructuredUsages(capturedUsage).filter(
+        (usage) =>
+          usage.task !== "episode-brief.compose" || ensured.usage === null
+      );
 
-      // The cutting room's per-clip passes: each summed into one ledger
-      // entry (the reviewer's pattern) — the ledger meters the pass,
-      // Langfuse holds the per-call detail.
-      const summedPasses: [string, StructuredUsage | null, number][] = [
-        [
-          `discover:${payload.sourceId}:${claimed.attempt}:brief`,
-          ensured.usage,
-          1,
-        ],
-        [
-          `discover:${payload.sourceId}:${claimed.attempt}:cut`,
-          cutUsage,
-          rows.filter((row) => row.grounded && !row.suppressed).length,
-        ],
-        [
-          `discover:${payload.sourceId}:${claimed.attempt}:revise`,
-          reviseUsage,
-          revisionNotes.size,
-        ],
-      ];
-      for (const [correlationId, usage, calls] of summedPasses) {
-        if (!usage) {
-          continue;
+      await withOrgScope(payload.organizationId, async (tx) => {
+        // A reaper may have retired this attempt while a provider call was in
+        // flight. Lock and verify the exact claim before any replacement rows,
+        // context snapshot, or metering can be committed.
+        const activeAttempt = await assertActiveAttempt(tx, claimed);
+        const [snapshot] = await tx
+          .insert(contextSnapshot)
+          .values({
+            content: JSON.parse(canonicalJson(context.pack)),
+            hash: hashContextPack(context.pack),
+            kind: context.pack.kind,
+            organizationId: payload.organizationId,
+          })
+          .returning({ id: contextSnapshot.id });
+
+        const [replacementFacts] = await tx
+          .select({
+            boundaryEditCount: sql<number>`count(*) FILTER (WHERE ${momentCandidate.adjustedStartMs} IS NOT NULL OR ${momentCandidate.adjustedEndMs} IS NOT NULL)::int`,
+            candidateCount: sql<number>`count(*)::int`,
+            decisionCount: sql<number>`count(*) FILTER (WHERE ${momentCandidate.status} <> 'proposed')::int`,
+          })
+          .from(momentCandidate)
+          .where(eq(momentCandidate.sourceId, payload.sourceId));
+
+        // Re-runs replace: candidates belong to exactly one run per source.
+        // Human work reaches this point only after the action's exact-version
+        // destructive confirmation; its decision/boundary metrics remain in
+        // the append-only audit trail.
+        await tx
+          .delete(momentCandidate)
+          .where(eq(momentCandidate.sourceId, payload.sourceId));
+        const replacedCandidateCount = Number(
+          replacementFacts?.candidateCount ?? 0
+        );
+        if (replacedCandidateCount > 0) {
+          await recordAudit(tx, {
+            action: "moment_discovery.replaced",
+            actorUserId: null,
+            entityId: claimed.runId,
+            entityType: "moment_discovery_run",
+            metadata: {
+              discardedBoundaryEditCount: Number(
+                replacementFacts?.boundaryEditCount ?? 0
+              ),
+              discardedCandidateCount: replacedCandidateCount,
+              discardedDecisionCount: Number(
+                replacementFacts?.decisionCount ?? 0
+              ),
+              previousEditVersion: activeAttempt.editVersion,
+              sourceId: payload.sourceId,
+            },
+            organizationId: payload.organizationId,
+          });
         }
-        // biome-ignore lint/performance/noAwaitInLoops: few entries, same tx
-        await recordUsage(tx, {
-          correlationId,
-          entryType: "ai_tokens",
-          metadata: {
-            calls,
-            costUsd: usage.costUsd,
-            inputTokens: usage.inputTokens,
-            model: usage.model,
-            outputTokens: usage.outputTokens,
-            provider: usage.provider,
-            task: usage.task,
-          },
-          organizationId: payload.organizationId,
-          quantity: usage.inputTokens + usage.outputTokens,
-          sourceId: payload.sourceId,
-          unit: "tokens",
-        });
-      }
+        if (rows.length > 0) {
+          await tx.insert(momentCandidate).values(
+            rows.map((row) => ({
+              ...row,
+              ...verdictColumns(verdictByRow.get(row)),
+              organizationId: payload.organizationId,
+              revision: transcript.revision,
+              runId: claimed.runId,
+              sourceId: payload.sourceId,
+            }))
+          );
+        }
 
-      // Reviewer spend: all verdict calls summed into one entry — the
-      // ledger meters the pass, Langfuse holds the per-call detail.
-      if (review.usage) {
-        await recordUsage(tx, {
-          correlationId: `discover:${payload.sourceId}:${claimed.attempt}:review`,
-          entryType: "ai_tokens",
-          metadata: {
-            calls: review.verdicts.size,
-            costUsd: review.usage.costUsd,
-            inputTokens: review.usage.inputTokens,
-            model: review.usage.model,
-            outputTokens: review.usage.outputTokens,
-            provider: review.usage.provider,
-            task: "moment-review.verdict",
-          },
-          organizationId: payload.organizationId,
-          quantity: review.usage.inputTokens + review.usage.outputTokens,
-          sourceId: payload.sourceId,
-          unit: "tokens",
-        });
-      }
+        const [finalized] = await tx
+          .update(momentDiscoveryRun)
+          .set({
+            contextSnapshotId: snapshot?.id ?? null,
+            counts: {
+              dispatchLease: payload.dispatchLease,
+              flagged: [...review.verdicts.values()].filter(isFlaggedVerdict)
+                .length,
+              grounded: rows.filter((row) => row.grounded).length,
+              proposed: rows.length,
+              reviewed: review.verdicts.size,
+              revised: rows.filter((row) => row.flags.includes("revised"))
+                .length,
+              suppressed: rows.filter((row) => row.suppressed).length,
+            },
+            editVersion: 0,
+            error: null,
+            humanEditedAt: null,
+            models: Object.fromEntries(
+              meteredUsage.map((usage) => [
+                usage.task,
+                {
+                  attemptedModels: usage.attemptedModels,
+                  attempts: usage.attempts,
+                  cacheReadTokens: usage.cacheReadTokens,
+                  cacheWriteTokens: usage.cacheWriteTokens,
+                  model: usage.model,
+                  provider: usage.provider,
+                  upstreamProvider: usage.upstreamProvider,
+                },
+              ])
+            ),
+            revision: transcript.revision,
+            status: "ready",
+          })
+          .where(
+            and(
+              eq(momentDiscoveryRun.id, claimed.runId),
+              eq(momentDiscoveryRun.attempts, claimed.attempt),
+              eq(momentDiscoveryRun.status, "processing")
+            )
+          )
+          .returning({ id: momentDiscoveryRun.id });
+        if (!finalized) {
+          throw new Error(
+            "Moment discovery attempt lost its finalization lease"
+          );
+        }
 
-      // Metering (cross-cutting rule 1): one ai_tokens entry per call.
-      for (const usage of result.usage) {
-        // biome-ignore lint/performance/noAwaitInLoops: at most one entry, same tx
-        await recordUsage(tx, {
-          correlationId: `discover:${payload.sourceId}:${claimed.attempt}`,
-          entryType: "ai_tokens",
-          metadata: {
-            costUsd: usage.costUsd,
-            inputTokens: usage.inputTokens,
-            model: usage.model,
-            outputTokens: usage.outputTokens,
-            provider: usage.provider,
-            sourceHours: context.durationSeconds / 3600,
-            task: usage.task,
-          },
+        // Capture every verified call, including swallowed optional failures,
+        // and sum by task so retries/fallbacks cannot disappear from billing.
+        await recordStructuredUsages(tx, {
+          callsForTask: (task) =>
+            capturedUsage.filter((entry) => entry.task === task).length,
+          correlationForTask: (task) =>
+            discoveryUsageCorrelation(payload.sourceId, claimed.attempt, task),
           organizationId: payload.organizationId,
-          quantity: usage.inputTokens + usage.outputTokens,
+          sourceHours: context.durationSeconds / 3600,
           sourceId: payload.sourceId,
-          unit: "tokens",
+          usages: meteredUsage,
         });
-      }
+      });
     });
   } catch (error) {
     await recordRunFailure(
       payload,
       claimed,
       error,
-      options.finalAttempt ?? true
+      options.finalAttempt ?? true,
+      capturedUsage
     );
     throw error;
   } finally {

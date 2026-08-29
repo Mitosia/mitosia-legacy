@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   runSourceAnalysis,
   type SourceAnalysisResult,
@@ -8,6 +8,11 @@ import {
   hashContextPack,
   type SourceContextPack,
 } from "@/lib/ai/context";
+import {
+  captureStructuredUsage,
+  type StructuredUsage,
+  structuredFailureUsages,
+} from "@/lib/ai/generate";
 import {
   brand,
   campaign,
@@ -19,7 +24,8 @@ import {
   sourceAnalysis,
   sourceChapter,
 } from "@/lib/db/schema";
-import { withOrgScope } from "@/lib/db/tenant";
+import { type OrgTransaction, withOrgScope } from "@/lib/db/tenant";
+import { startLeaseHeartbeat } from "@/lib/lease-heartbeat";
 import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
@@ -30,6 +36,7 @@ import { loadCurrentTranscript } from "@/lib/transcription/store";
 // recording, runs under Trigger or the in-process dev fallback.
 
 const ANALYSIS_ERROR_MAX_CHARS = 2000;
+const ANALYSIS_HEARTBEAT_INTERVAL_MS = 60_000;
 
 export interface AnalysisPayload {
   organizationId: string;
@@ -55,31 +62,27 @@ async function claimAnalysis(
       .where(eq(sourceAnalysis.sourceId, payload.sourceId))
       .limit(1);
 
-    if (!existing) {
-      const [created] = await tx
-        .insert(sourceAnalysis)
-        .values({
-          attempts: 1,
-          organizationId: payload.organizationId,
-          sourceId: payload.sourceId,
-          status: "processing",
-        })
-        .onConflictDoNothing({ target: sourceAnalysis.sourceId })
-        .returning({ id: sourceAnalysis.id });
-      return created ? { analysisId: created.id, attempt: 1 } : null;
-    }
-    if (existing.status === "processing" || existing.status === "ready") {
+    if (existing?.status !== "pending") {
       return null;
     }
-    await tx
+    const [claimed] = await tx
       .update(sourceAnalysis)
       .set({
         attempts: existing.attempts + 1,
         error: null,
         status: "processing",
       })
-      .where(eq(sourceAnalysis.id, existing.id));
-    return { analysisId: existing.id, attempt: existing.attempts + 1 };
+      .where(
+        and(
+          eq(sourceAnalysis.id, existing.id),
+          eq(sourceAnalysis.attempts, existing.attempts),
+          eq(sourceAnalysis.status, existing.status)
+        )
+      )
+      .returning({ id: sourceAnalysis.id });
+    return claimed
+      ? { analysisId: existing.id, attempt: existing.attempts + 1 }
+      : null;
   });
 }
 
@@ -88,21 +91,115 @@ async function claimAnalysis(
 // lib/intelligence/extract-pipeline.ts, same contract).
 async function recordAnalysisFailure(
   payload: AnalysisPayload,
-  analysisId: string,
+  claimed: ClaimedAnalysis,
   error: unknown,
-  finalAttempt: boolean
+  finalAttempt: boolean,
+  capturedUsage: readonly StructuredUsage[]
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown analysis failure";
-  await withOrgScope(payload.organizationId, (tx) =>
-    tx
+  await withOrgScope(payload.organizationId, async (tx) => {
+    await tx
       .update(sourceAnalysis)
       .set({
         error: sanitizeIngestError(message).slice(0, ANALYSIS_ERROR_MAX_CHARS),
         status: finalAttempt ? "failed" : "pending",
       })
-      .where(eq(sourceAnalysis.id, analysisId))
+      .where(
+        and(
+          eq(sourceAnalysis.id, claimed.analysisId),
+          eq(sourceAnalysis.attempts, claimed.attempt),
+          eq(sourceAnalysis.status, "processing")
+        )
+      );
+    // Model spend remains real even when this worker lost the lifecycle CAS.
+    // Group it per task and use the attempt-scoped correlation key so a
+    // retried failure recorder stays idempotent.
+    for (const failedUsage of structuredFailureUsages(error, capturedUsage)) {
+      // biome-ignore lint/performance/noAwaitInLoops: few task-level entries, same tx
+      await recordUsage(tx, {
+        correlationId: `analysis:${payload.sourceId}:${claimed.attempt}:failed:${failedUsage.task}`,
+        entryType: "ai_tokens",
+        metadata: {
+          attemptedModels: failedUsage.attemptedModels,
+          attempts: failedUsage.attempts,
+          cacheReadTokens: failedUsage.cacheReadTokens,
+          cacheWriteTokens: failedUsage.cacheWriteTokens,
+          costUsd: failedUsage.costUsd,
+          failed: true,
+          inputTokens: failedUsage.inputTokens,
+          model: failedUsage.model,
+          outputTokens: failedUsage.outputTokens,
+          provider: failedUsage.provider,
+          task: failedUsage.task,
+          upstreamProvider: failedUsage.upstreamProvider,
+        },
+        organizationId: payload.organizationId,
+        quantity: failedUsage.inputTokens + failedUsage.outputTokens,
+        sourceId: payload.sourceId,
+        unit: "tokens",
+      });
+    }
+  });
+}
+
+async function heartbeatAnalysis(
+  payload: AnalysisPayload,
+  claimed: ClaimedAnalysis
+): Promise<boolean> {
+  return await withOrgScope(payload.organizationId, async (tx) => {
+    const [touched] = await tx
+      .update(sourceAnalysis)
+      .set({ updatedAt: new Date() })
+      .where(
+        and(
+          eq(sourceAnalysis.id, claimed.analysisId),
+          eq(sourceAnalysis.attempts, claimed.attempt),
+          eq(sourceAnalysis.status, "processing")
+        )
+      )
+      .returning({ id: sourceAnalysis.id });
+    return Boolean(touched);
+  });
+}
+
+function startAnalysisHeartbeat(
+  payload: AnalysisPayload,
+  claimed: ClaimedAnalysis
+): () => Promise<void> {
+  return startLeaseHeartbeat({
+    heartbeat: () => heartbeatAnalysis(payload, claimed),
+    intervalMs: ANALYSIS_HEARTBEAT_INTERVAL_MS,
+    onError: (error) => {
+      console.error(
+        `[analysis] heartbeat failed for run ${claimed.analysisId}:`,
+        error
+      );
+    },
+  });
+}
+
+async function assertActiveAttempt(
+  tx: OrgTransaction,
+  claimed: ClaimedAnalysis
+): Promise<void> {
+  await tx.execute(
+    sql`SELECT ${sourceAnalysis.id} FROM ${sourceAnalysis} WHERE ${sourceAnalysis.id} = ${claimed.analysisId} FOR UPDATE`
   );
+  const [active] = await tx
+    .select({ id: sourceAnalysis.id })
+    .from(sourceAnalysis)
+    .where(
+      and(
+        eq(sourceAnalysis.id, claimed.analysisId),
+        eq(sourceAnalysis.attempts, claimed.attempt),
+        eq(sourceAnalysis.status, "processing")
+      )
+    )
+    .limit(1);
+  if (!active) {
+    throw new Error("Source analysis attempt is no longer active");
+  }
 }
 
 interface SourceContext {
@@ -166,6 +263,10 @@ async function persistAnalysis(
   result: SourceAnalysisResult
 ): Promise<void> {
   await withOrgScope(payload.organizationId, async (tx) => {
+    // A reaper may have retired this attempt while a provider call was in
+    // flight. Lock and verify the exact claim before replacing chapters or
+    // writing the snapshot and metering for it.
+    await assertActiveAttempt(tx, claimed);
     const [snapshot] = await tx
       .insert(contextSnapshot)
       .values({
@@ -195,7 +296,7 @@ async function persistAnalysis(
       );
     }
 
-    await tx
+    const [finalized] = await tx
       .update(sourceAnalysis)
       .set({
         contextSnapshotId: snapshot?.id ?? null,
@@ -204,7 +305,15 @@ async function persistAnalysis(
         models: Object.fromEntries(
           result.usage.map((u) => [
             u.task,
-            { model: u.model, provider: u.provider },
+            {
+              attemptedModels: u.attemptedModels,
+              attempts: u.attempts,
+              cacheReadTokens: u.cacheReadTokens,
+              cacheWriteTokens: u.cacheWriteTokens,
+              model: u.model,
+              provider: u.provider,
+              upstreamProvider: u.upstreamProvider,
+            },
           ])
         ),
         speakerSuggestions: result.editorial.speakers,
@@ -212,7 +321,17 @@ async function persistAnalysis(
         summary: result.editorial.summary,
         topics: result.editorial.topics,
       })
-      .where(eq(sourceAnalysis.id, claimed.analysisId));
+      .where(
+        and(
+          eq(sourceAnalysis.id, claimed.analysisId),
+          eq(sourceAnalysis.attempts, claimed.attempt),
+          eq(sourceAnalysis.status, "processing")
+        )
+      )
+      .returning({ id: sourceAnalysis.id });
+    if (!finalized) {
+      throw new Error("Source analysis attempt lost its finalization lease");
+    }
 
     // Metering (cross-cutting rule 1): one ai_tokens entry per model call,
     // quantity = total tokens, estimated USD in metadata. Cost per
@@ -223,6 +342,10 @@ async function persistAnalysis(
         correlationId: `analysis:${payload.sourceId}:${claimed.attempt}:${usage.task}`,
         entryType: "ai_tokens",
         metadata: {
+          attemptedModels: usage.attemptedModels,
+          attempts: usage.attempts,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheWriteTokens: usage.cacheWriteTokens,
           costUsd: usage.costUsd,
           inputTokens: usage.inputTokens,
           model: usage.model,
@@ -230,6 +353,7 @@ async function persistAnalysis(
           provider: usage.provider,
           sourceHours: durationSeconds / 3600,
           task: usage.task,
+          upstreamProvider: usage.upstreamProvider,
         },
         organizationId: payload.organizationId,
         quantity: usage.inputTokens + usage.outputTokens,
@@ -248,61 +372,68 @@ export async function runAnalysis(
   if (!claimed) {
     return;
   }
+  const stopHeartbeat = startAnalysisHeartbeat(payload, claimed);
+  const capturedUsage: StructuredUsage[] = [];
 
   try {
-    const transcript = await loadCurrentTranscript(
-      payload.organizationId,
-      payload.sourceId
-    );
-    if (!transcript) {
-      throw new Error("Source has no ready transcript to analyze");
-    }
+    await captureStructuredUsage(capturedUsage, async () => {
+      const transcript = await loadCurrentTranscript(
+        payload.organizationId,
+        payload.sourceId
+      );
+      if (!transcript) {
+        throw new Error("Source has no ready transcript to analyze");
+      }
 
-    const speakerCount = new Set(
-      transcript.data.words.map((word) => word.speaker).filter(Boolean)
-    ).size;
-    const context = await assembleContext(
-      payload,
-      transcript.data.language,
-      speakerCount
-    );
+      const speakerCount = new Set(
+        transcript.data.words.map((word) => word.speaker).filter(Boolean)
+      ).size;
+      const context = await assembleContext(
+        payload,
+        transcript.data.language,
+        speakerCount
+      );
 
-    const result = await runSourceAnalysis({
-      contextPack: context.pack,
-      durationMs: Math.round(context.durationSeconds * 1000),
-      transcript: transcript.data,
+      const result = await runSourceAnalysis({
+        contextPack: context.pack,
+        durationMs: Math.round(context.durationSeconds * 1000),
+        transcript: transcript.data,
+      });
+
+      await persistAnalysis(
+        payload,
+        claimed,
+        context.pack,
+        context.durationSeconds,
+        result
+      );
+
+      // Extraction is the next follow-on job (the transcription→analysis
+      // pattern, one level down): enqueued once the analysis is committed so
+      // its passes can reuse the summary/chapters, errors contained — a
+      // failed enqueue must not fail a finished analysis.
+      try {
+        const { enqueueExtraction } = await import(
+          "@/lib/intelligence/extract-enqueue"
+        );
+        await enqueueExtraction(payload);
+      } catch (error) {
+        console.error(
+          `[analysis] extraction enqueue failed for ${payload.sourceId}:`,
+          error
+        );
+      }
     });
-
-    await persistAnalysis(
-      payload,
-      claimed,
-      context.pack,
-      context.durationSeconds,
-      result
-    );
-
-    // Extraction is the next follow-on job (the transcription→analysis
-    // pattern, one level down): enqueued once the analysis is committed so
-    // its passes can reuse the summary/chapters, errors contained — a
-    // failed enqueue must not fail a finished analysis.
-    try {
-      const { enqueueExtraction } = await import(
-        "@/lib/intelligence/extract-enqueue"
-      );
-      await enqueueExtraction(payload);
-    } catch (error) {
-      console.error(
-        `[analysis] extraction enqueue failed for ${payload.sourceId}:`,
-        error
-      );
-    }
   } catch (error) {
     await recordAnalysisFailure(
       payload,
-      claimed.analysisId,
+      claimed,
       error,
-      options.finalAttempt ?? true
+      options.finalAttempt ?? true,
+      capturedUsage
     );
     throw error;
+  } finally {
+    await stopHeartbeat();
   }
 }

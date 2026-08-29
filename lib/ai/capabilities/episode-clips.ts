@@ -5,14 +5,13 @@ import type { SourceContextPack } from "../context";
 import { generateStructured, type StructuredResult } from "../generate";
 
 // The shared half of the cutting room's episode-level passes
-// (docs/clip-cut-architecture.md §4): the Director's brief and both rough
-// cuts and the global Reconciler read ONE cached prefix (context +
-// inventories + the coarse
-// paragraph-ID transcript) under ONE system string and ONE transport schema —
-// the S5 cache-key rule: tools/schema and system precede messages in the
-// Anthropic cache key, so any per-mode difference there would bust the
-// cache that makes four Opus passes affordable. Only the post-breakpoint
-// instruction text differs per mode.
+// (docs/clip-cut-architecture.md §4): the Director, rough Editors, and global
+// Reconciler read one stable content prefix (context + inventories + the
+// coarse paragraph-ID transcript). Each operation has its own small wire
+// schema, however: portability and reliable constrained decoding across an
+// OpenRouter model pool are more important than coupling every model to one
+// large four-job grammar. OpenRouter's sticky session still gives compatible
+// upstreams a stable cache identity for the shared content.
 //
 // Coordinates are paragraph IDs (P000…), never milliseconds: rough passes
 // locate REGIONS; the per-clip Cutter (clip-fine-cut.ts) places exact
@@ -113,10 +112,10 @@ const segmentPlanSchema = z
 
 export type SegmentRoughPlan = z.infer<typeof segmentPlanSchema>;
 
-// The global chapter Reconciler remains part of the SAME semantic envelope
-// as the Director and rough Editors. The compact provider transport below is
-// byte-identical across them, preserving the full-episode cache just before
-// the pass that most needs the Director's view.
+// The global chapter Reconciler remains part of the same local semantic
+// contract as the Director and rough Editors. Its provider wire grammar is
+// deliberately operation-specific; provider caches may include that grammar
+// in their key, so cross-operation cache reuse is measured, never assumed.
 const segmentGroupSchema = z
   .object({ reasoning: z.string().min(1).max(REASONING_MAX) })
   .extend({
@@ -183,24 +182,136 @@ export const clipProposalSchema = clipProposalBaseSchema.superRefine(
 
 export type ClipProposal = z.infer<typeof clipProposalSchema>;
 
-// Provider transport is intentionally much smaller and more permissive than
-// the semantic schema above. Anthropic compiles native output schemas into a
-// grammar and the former four-mode semantic union exceeded that compiler's
-// limit on the Karma episode. Other providers also omit several Zod
-// refinements (transforms, lengths and cross-field rules) from their grammar,
-// then AI SDK rejects the otherwise parseable JSON before our deterministic
-// repair loops can inspect it.
+// Provider transport is deliberately separate from the exact semantic
+// schema. These four operation-specific schemas contain only the conservative
+// JSON-Schema subset shared by OpenRouter's GPT, Gemini, Claude, and Kimi
+// endpoints: required object fields, primitives, arrays, enums, and nullable
+// values. They intentionally omit transforms, string/array limits, regexes,
+// numeric bounds, and cross-field refinements. Those remain local and feed a
+// bounded corrective pass instead of becoming a provider-side parse failure.
 //
-// Keep this byte-identical across the four episode passes for prompt-cache
-// reuse. The instructions describe each selected payload; code below applies
-// the exact schema and mode relationship after transport succeeds.
-export const clipProposalTransportSchema = z.object({
-  brief: z.unknown().optional(),
-  candidates: z.unknown().optional(),
-  mode: z.string().optional(),
-  plan: z.unknown().optional(),
-  reconciliation: z.unknown().optional(),
+// A selected payload is nullable so a model's explicit "no result" still
+// reaches the deterministic validator and its useful repair message. Inactive
+// branches do not exist in the wire contract at all, keeping each grammar
+// shallow and preventing a mode from accidentally filling another job.
+const transportParagraphIdSchema = z.number();
+const transportDropReasonSchema = z.enum([
+  "housekeeping",
+  "sponsor",
+  "low_energy",
+  "weaker_telling",
+  "thin",
+  "other",
+]);
+
+const episodeBriefTransportPayloadSchema = z.object({
+  dropZones: z.array(
+    z.object({
+      endP: transportParagraphIdSchema,
+      reason: transportDropReasonSchema,
+      startP: transportParagraphIdSchema,
+    })
+  ),
+  marqueeArcs: z.array(
+    z.object({
+      endP: transportParagraphIdSchema,
+      note: z.string(),
+      startP: transportParagraphIdSchema,
+      title: z.string(),
+    })
+  ),
+  spine: z.array(
+    z.object({
+      endP: transportParagraphIdSchema,
+      startP: transportParagraphIdSchema,
+      topic: z.string(),
+    })
+  ),
+  tone: z.string(),
 });
+
+const momentTransportItemSchema = z.object({
+  anchorText: z.string(),
+  endP: transportParagraphIdSchema,
+  hook: z.string(),
+  reasoning: z.string(),
+  scores: z.object({
+    comprehensibility: z.number(),
+    hook: z.number(),
+    insight: z.number(),
+    relevance: z.number(),
+    risk: z.number(),
+  }),
+  seedIds: z.array(z.string()),
+  startP: transportParagraphIdSchema,
+  summary: z.string(),
+  title: z.string(),
+});
+
+const segmentTransportItemSchema = z.object({
+  anchorText: z.string().nullable(),
+  dropReason: transportDropReasonSchema.nullable(),
+  endP: transportParagraphIdSchema,
+  hook: z.string().nullable(),
+  kind: z.enum(["keep", "drop"]),
+  startP: transportParagraphIdSchema,
+  summary: z.string().nullable(),
+  title: z.string().nullable(),
+});
+
+const segmentGroupTransportSchema = z.object({
+  atomIds: z.array(z.string()),
+  dropReason: transportDropReasonSchema.nullable(),
+  hook: z.string().nullable(),
+  kind: z.enum(["keep", "drop"]),
+  reasoning: z.string(),
+  summary: z.string().nullable(),
+  title: z.string().nullable(),
+});
+
+export const episodeBriefTransportSchema = z
+  .object({
+    brief: episodeBriefTransportPayloadSchema.nullable(),
+    mode: z.literal("brief"),
+  })
+  .strict();
+
+export const momentProposalTransportSchema = z
+  .object({
+    candidates: z.array(momentTransportItemSchema).nullable(),
+    mode: z.literal("moments"),
+  })
+  .strict();
+
+export const segmentPlanTransportSchema = z
+  .object({
+    mode: z.literal("segments"),
+    plan: z
+      .object({
+        segments: z.array(segmentTransportItemSchema),
+        tableOfContents: z.array(z.string()),
+      })
+      .nullable(),
+  })
+  .strict();
+
+export const segmentReconciliationTransportSchema = z
+  .object({
+    mode: z.literal("segment_reconcile"),
+    reconciliation: z
+      .object({ groups: z.array(segmentGroupTransportSchema) })
+      .nullable(),
+  })
+  .strict();
+
+// Useful only as a local decoder/test seam. Generation always receives the
+// one operation-specific schema above, never this root union.
+export const clipProposalTransportSchema = z.union([
+  episodeBriefTransportSchema,
+  momentProposalTransportSchema,
+  segmentPlanTransportSchema,
+  segmentReconciliationTransportSchema,
+]);
 
 export type ClipProposalTransport = z.infer<typeof clipProposalTransportSchema>;
 export type ClipProposalMode = keyof typeof MODE_BRANCH;
@@ -284,8 +395,8 @@ Rules that apply to every job:
   count; never invent weak items to fill a list. A short strong list beats
   a long padded one.
 - Never invent content that is not in the transcript.
-- The final instruction names your job: emit that mode, fill ONLY its
-  field, and set the other fields to null.`;
+- The final instruction names your job. Emit an object containing only
+  "mode" and that job's payload field. Never add another job's field.`;
 
 export interface ClipInventoryItem {
   endMs: number;
@@ -360,11 +471,11 @@ function inventoryPreamble(
   return `\n\n${label}:\n${lines}`;
 }
 
-// The ONE cached prefix all four episode passes read. Byte-identical
-// across lanes by construction (nothing lane-specific is rendered here) —
-// a discovery run's cache write is a segment plan's cache read when the
-// button lands within the TTL; the persisted brief row covers the cold
-// case.
+// The byte-identical content prefix all four episode passes read. The output
+// grammars differ by operation, and some upstream caches include that grammar
+// in the cache key. The short explicit breakpoint primarily protects a
+// same-operation corrective retry; the persisted brief is the durable
+// cross-operation memory.
 export function buildClipPrefix(input: ClipPrefixInput): string {
   return `${contextPreamble(input.contextPack)}${analysisPreamble(input.analysis)}${inventoryPreamble("HIGHLIGHT INVENTORY (grounded extractions you may build on)", input.seeds)}\n\nTRANSCRIPT:\n${renderCoarse(input.grid)}`;
 }
@@ -387,8 +498,7 @@ The brief object has this exact shape:
 [{ title, startP, endP, note }], dropZones:
 [{ startP, endP, reason }] }.
 
-Set mode to "brief", fill only "brief"; candidates, plan, and
-reconciliation are null.`;
+Set mode to "brief" and return only the "mode" and "brief" fields.`;
 
 function momentsInstructions(brief: string | null): string {
   return `${brief ? `EPISODE BRIEF (from the director):\n${brief}\n\n` : ""}Your job: MODE "moments". Propose the standalone scroll-stopping moments in this recording.
@@ -421,8 +531,8 @@ Each candidates item has this exact shape:
 scores: { comprehensibility, hook, insight, relevance, risk } }.
 
 Rank best first; prefer distinct moments over near-duplicates of one
-beat. Set mode to "moments", fill only "candidates"; brief, plan, and
-reconciliation are null.`;
+beat. Set mode to "moments" and return only the "mode" and "candidates"
+fields.`;
 }
 
 function segmentsInstructions(brief: string | null): string {
@@ -462,8 +572,7 @@ The plan object has this exact shape:
 kind: "keep" | "drop", anchorText, title, hook, summary, dropReason }] }.
 Use null for a field that the rules say does not apply.
 
-Set mode to "segments", fill only "plan"; brief, candidates, and
-reconciliation are null.`;
+Set mode to "segments" and return only the "mode" and "plan" fields.`;
 }
 
 export interface SegmentReconcileAtomInput {
@@ -564,8 +673,8 @@ ${toc || "(empty)"}
 ORDERED ATOMS:
 ${rough}${repair}
 
-Set mode to "segment_reconcile", fill only "reconciliation"; brief,
-candidates, and plan are null.`;
+Set mode to "segment_reconcile" and return only the "mode" and
+"reconciliation" fields.`;
 }
 
 // ---- Runners --------------------------------------------------------------
@@ -592,12 +701,13 @@ export async function runEpisodeBriefPass(
     "episode-brief.compose",
     CLIP_SYSTEM,
     BRIEF_INSTRUCTIONS,
-    clipProposalTransportSchema,
+    episodeBriefTransportSchema,
     {
-      anthropicStructuredOutputMode: "jsonTool",
       cachedPrefix: buildClipPrefix(input),
+      outputStrategy: "strictJsonSchema",
       validateOutput: (output) => {
         assertClipProposalMode(output, "brief");
+        return output;
       },
     }
   );
@@ -611,12 +721,13 @@ export async function runMomentRoughPass(
     "moment-discovery.candidates",
     CLIP_SYSTEM,
     momentsInstructions(brief ? briefToPromptText(brief) : null),
-    clipProposalTransportSchema,
+    momentProposalTransportSchema,
     {
-      anthropicStructuredOutputMode: "jsonTool",
       cachedPrefix: buildClipPrefix(input),
+      outputStrategy: "strictJsonSchema",
       validateOutput: (output) => {
         assertClipProposalMode(output, "moments");
+        return output;
       },
     }
   );
@@ -648,10 +759,10 @@ export async function runSegmentRoughPass(
     "segment-plan.partition",
     CLIP_SYSTEM,
     `${segmentsInstructions(brief ? briefToPromptText(brief) : null)}${inventory}${repair}`,
-    clipProposalTransportSchema,
+    segmentPlanTransportSchema,
     {
-      anthropicStructuredOutputMode: "jsonTool",
       cachedPrefix: buildClipPrefix(input),
+      outputStrategy: "strictJsonSchema",
     }
   );
 }
@@ -675,10 +786,10 @@ export async function runSegmentReconcilePass(
       previousGroups,
       input.grid
     ),
-    clipProposalTransportSchema,
+    segmentReconciliationTransportSchema,
     {
-      anthropicStructuredOutputMode: "jsonTool",
       cachedPrefix: buildClipPrefix(input),
+      outputStrategy: "strictJsonSchema",
     }
   );
 }
