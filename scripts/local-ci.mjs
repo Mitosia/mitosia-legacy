@@ -19,6 +19,7 @@ const RECEIPT_VERSION = 1;
 const SUCCESS_COMMANDS = [
   "pnpm check",
   "pnpm check:ffmpeg",
+  "docker build --target deps --output type=cacheonly .",
   "pnpm test",
   "pnpm build",
   "pnpm e2e:prod",
@@ -386,6 +387,14 @@ async function runFullGate(sha) {
     run("pnpm", ["check:ffmpeg"]);
     run("pnpm", ["exec", "playwright", "install", "chromium"]);
     run("docker", ["compose", "up", "-d", "--wait", "postgres", "minio"]);
+    run("docker", [
+      "build",
+      "--target",
+      "deps",
+      "--output",
+      "type=cacheonly",
+      ".",
+    ]);
 
     await createDatabase(adminUrl, database, role, password);
     databaseCreated = true;
