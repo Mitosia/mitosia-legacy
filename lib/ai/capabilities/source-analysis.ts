@@ -228,7 +228,7 @@ export async function runSourceAnalysis(
   const preamble = contextPreamble(input.contextPack);
   const userMessage = `${preamble}\n\nTRANSCRIPT:\n${transcriptText}`;
 
-  const [chaptersRun, editorialRun] = await Promise.all([
+  const [chaptersRun, editorialRun] = await Promise.allSettled([
     generateStructured(
       "source-analysis.chapters",
       CHAPTERS_INSTRUCTIONS,
@@ -242,13 +242,25 @@ export async function runSourceAnalysis(
       editorialOutputSchema
     ),
   ]);
+  // Both calls are already paid and may complete out of order. Wait for every
+  // started call before failing so usage capture is complete and a Trigger
+  // retry cannot overlap an abandoned sibling request.
+  if (chaptersRun.status === "rejected") {
+    throw chaptersRun.reason;
+  }
+  if (editorialRun.status === "rejected") {
+    throw editorialRun.reason;
+  }
 
   return {
-    chapters: normalizeChapters(chaptersRun.output.chapters, input.durationMs),
+    chapters: normalizeChapters(
+      chaptersRun.value.output.chapters,
+      input.durationMs
+    ),
     editorial: {
-      ...editorialRun.output,
-      entities: editorialRun.output.entities.slice(0, MAX_ENTITIES),
+      ...editorialRun.value.output,
+      entities: editorialRun.value.output.entities.slice(0, MAX_ENTITIES),
     },
-    usage: [chaptersRun.usage, editorialRun.usage],
+    usage: [chaptersRun.value.usage, editorialRun.value.usage],
   };
 }

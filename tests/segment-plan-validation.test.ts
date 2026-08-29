@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import {
   clipProposalSchema,
   clipProposalTransportSchema,
+  segmentPlanTransportSchema,
   validateClipProposalMode,
 } from "@/lib/ai/capabilities/episode-clips";
 import {
@@ -141,6 +143,20 @@ describe("clip proposal transport boundary", () => {
     expect(validated.issues).toEqual([
       "plan.tableOfContents.0: Too small: expected string to have >=1 characters",
     ]);
+  });
+
+  it("uses a small operation-specific schema with no unrelated branches", () => {
+    const jsonSchema = z.toJSONSchema(segmentPlanTransportSchema) as {
+      properties?: Record<string, unknown>;
+    };
+
+    expect(Object.keys(jsonSchema.properties ?? {})).toEqual(["mode", "plan"]);
+    expect(
+      segmentPlanTransportSchema.safeParse({
+        candidates: [],
+        ...envelope,
+      }).success
+    ).toBe(false);
   });
 });
 

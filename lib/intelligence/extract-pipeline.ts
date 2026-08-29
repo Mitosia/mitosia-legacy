@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import {
   type ExtractionAnalysisContext,
   runSourceExtraction,
@@ -8,6 +8,11 @@ import {
   hashContextPack,
   type SourceContextPack,
 } from "@/lib/ai/context";
+import {
+  captureStructuredUsage,
+  type StructuredUsage,
+  structuredFailureUsages,
+} from "@/lib/ai/generate";
 import {
   brand,
   campaign,
@@ -21,7 +26,8 @@ import {
   sourceExtraction,
   sourceExtractionRun,
 } from "@/lib/db/schema";
-import { withOrgScope } from "@/lib/db/tenant";
+import { type OrgTransaction, withOrgScope } from "@/lib/db/tenant";
+import { startLeaseHeartbeat } from "@/lib/lease-heartbeat";
 import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
@@ -39,6 +45,7 @@ import { type GroundedExtraction, groundExtractions } from "./grounding";
 // which is what makes every surfaced range playable and exact.
 
 const EXTRACT_ERROR_MAX_CHARS = 2000;
+const EXTRACTION_HEARTBEAT_INTERVAL_MS = 60_000;
 
 export interface ExtractionPayload {
   organizationId: string;
@@ -64,31 +71,27 @@ async function claimRun(
       .where(eq(sourceExtractionRun.sourceId, payload.sourceId))
       .limit(1);
 
-    if (!existing) {
-      const [created] = await tx
-        .insert(sourceExtractionRun)
-        .values({
-          attempts: 1,
-          organizationId: payload.organizationId,
-          sourceId: payload.sourceId,
-          status: "processing",
-        })
-        .onConflictDoNothing({ target: sourceExtractionRun.sourceId })
-        .returning({ id: sourceExtractionRun.id });
-      return created ? { attempt: 1, runId: created.id } : null;
-    }
-    if (existing.status === "processing" || existing.status === "ready") {
+    if (existing?.status !== "pending") {
       return null;
     }
-    await tx
+    const [claimed] = await tx
       .update(sourceExtractionRun)
       .set({
         attempts: existing.attempts + 1,
         error: null,
         status: "processing",
       })
-      .where(eq(sourceExtractionRun.id, existing.id));
-    return { attempt: existing.attempts + 1, runId: existing.id };
+      .where(
+        and(
+          eq(sourceExtractionRun.id, existing.id),
+          eq(sourceExtractionRun.attempts, existing.attempts),
+          eq(sourceExtractionRun.status, existing.status)
+        )
+      )
+      .returning({ id: sourceExtractionRun.id });
+    return claimed
+      ? { attempt: existing.attempts + 1, runId: existing.id }
+      : null;
   });
 }
 
@@ -99,21 +102,115 @@ async function claimRun(
 // is kept as a breadcrumb; the next claim clears it.
 async function recordRunFailure(
   payload: ExtractionPayload,
-  runId: string,
+  claimed: ClaimedRun,
   error: unknown,
-  finalAttempt: boolean
+  finalAttempt: boolean,
+  capturedUsage: readonly StructuredUsage[]
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown extraction failure";
-  await withOrgScope(payload.organizationId, (tx) =>
-    tx
+  await withOrgScope(payload.organizationId, async (tx) => {
+    await tx
       .update(sourceExtractionRun)
       .set({
         error: sanitizeIngestError(message).slice(0, EXTRACT_ERROR_MAX_CHARS),
         status: finalAttempt ? "failed" : "pending",
       })
-      .where(eq(sourceExtractionRun.id, runId))
+      .where(
+        and(
+          eq(sourceExtractionRun.id, claimed.runId),
+          eq(sourceExtractionRun.attempts, claimed.attempt),
+          eq(sourceExtractionRun.status, "processing")
+        )
+      );
+    // Model spend remains real even when this worker lost the lifecycle CAS.
+    // Group it per task and use the attempt-scoped correlation key so a
+    // retried failure recorder stays idempotent.
+    for (const failedUsage of structuredFailureUsages(error, capturedUsage)) {
+      // biome-ignore lint/performance/noAwaitInLoops: few task-level entries, same tx
+      await recordUsage(tx, {
+        correlationId: `extract:${payload.sourceId}:${claimed.attempt}:failed:${failedUsage.task}`,
+        entryType: "ai_tokens",
+        metadata: {
+          attemptedModels: failedUsage.attemptedModels,
+          attempts: failedUsage.attempts,
+          cacheReadTokens: failedUsage.cacheReadTokens,
+          cacheWriteTokens: failedUsage.cacheWriteTokens,
+          costUsd: failedUsage.costUsd,
+          failed: true,
+          inputTokens: failedUsage.inputTokens,
+          model: failedUsage.model,
+          outputTokens: failedUsage.outputTokens,
+          provider: failedUsage.provider,
+          task: failedUsage.task,
+          upstreamProvider: failedUsage.upstreamProvider,
+        },
+        organizationId: payload.organizationId,
+        quantity: failedUsage.inputTokens + failedUsage.outputTokens,
+        sourceId: payload.sourceId,
+        unit: "tokens",
+      });
+    }
+  });
+}
+
+async function heartbeatExtraction(
+  payload: ExtractionPayload,
+  claimed: ClaimedRun
+): Promise<boolean> {
+  return await withOrgScope(payload.organizationId, async (tx) => {
+    const [touched] = await tx
+      .update(sourceExtractionRun)
+      .set({ updatedAt: new Date() })
+      .where(
+        and(
+          eq(sourceExtractionRun.id, claimed.runId),
+          eq(sourceExtractionRun.attempts, claimed.attempt),
+          eq(sourceExtractionRun.status, "processing")
+        )
+      )
+      .returning({ id: sourceExtractionRun.id });
+    return Boolean(touched);
+  });
+}
+
+function startExtractionHeartbeat(
+  payload: ExtractionPayload,
+  claimed: ClaimedRun
+): () => Promise<void> {
+  return startLeaseHeartbeat({
+    heartbeat: () => heartbeatExtraction(payload, claimed),
+    intervalMs: EXTRACTION_HEARTBEAT_INTERVAL_MS,
+    onError: (error) => {
+      console.error(
+        `[extract] heartbeat failed for run ${claimed.runId}:`,
+        error
+      );
+    },
+  });
+}
+
+async function assertActiveAttempt(
+  tx: OrgTransaction,
+  claimed: ClaimedRun
+): Promise<void> {
+  await tx.execute(
+    sql`SELECT ${sourceExtractionRun.id} FROM ${sourceExtractionRun} WHERE ${sourceExtractionRun.id} = ${claimed.runId} FOR UPDATE`
   );
+  const [active] = await tx
+    .select({ id: sourceExtractionRun.id })
+    .from(sourceExtractionRun)
+    .where(
+      and(
+        eq(sourceExtractionRun.id, claimed.runId),
+        eq(sourceExtractionRun.attempts, claimed.attempt),
+        eq(sourceExtractionRun.status, "processing")
+      )
+    )
+    .limit(1);
+  if (!active) {
+    throw new Error("Source extraction attempt is no longer active");
+  }
 }
 
 interface ExtractionContext {
@@ -221,124 +318,160 @@ export async function runExtraction(
   if (!claimed) {
     return;
   }
+  const stopHeartbeat = startExtractionHeartbeat(payload, claimed);
+  const capturedUsage: StructuredUsage[] = [];
 
   try {
-    const transcript = await loadCurrentTranscript(
-      payload.organizationId,
-      payload.sourceId
-    );
-    if (!transcript) {
-      throw new Error("Source has no ready transcript to extract from");
-    }
-    const speakerCount = new Set(
-      transcript.data.words.map((word) => word.speaker).filter(Boolean)
-    ).size;
-    const context = await assembleContext(
-      payload,
-      transcript.data.language,
-      speakerCount
-    );
-    const durationMs = Math.round(context.durationSeconds * 1000);
+    await captureStructuredUsage(capturedUsage, async () => {
+      const transcript = await loadCurrentTranscript(
+        payload.organizationId,
+        payload.sourceId
+      );
+      if (!transcript) {
+        throw new Error("Source has no ready transcript to extract from");
+      }
+      const speakerCount = new Set(
+        transcript.data.words.map((word) => word.speaker).filter(Boolean)
+      ).size;
+      const context = await assembleContext(
+        payload,
+        transcript.data.language,
+        speakerCount
+      );
+      const durationMs = Math.round(context.durationSeconds * 1000);
 
-    const result = await runSourceExtraction({
-      analysis: context.analysis,
-      contextPack: context.pack,
-      durationMs,
-      transcript: transcript.data,
-    });
-    const rows = groundExtractions(
-      result.items,
-      transcript.data.words,
-      durationMs
-    );
+      const result = await runSourceExtraction({
+        analysis: context.analysis,
+        contextPack: context.pack,
+        durationMs,
+        transcript: transcript.data,
+      });
+      const rows = groundExtractions(
+        result.items,
+        transcript.data.words,
+        durationMs
+      );
 
-    await withOrgScope(payload.organizationId, async (tx) => {
-      const [snapshot] = await tx
-        .insert(contextSnapshot)
-        .values({
-          content: JSON.parse(canonicalJson(context.pack)),
-          hash: hashContextPack(context.pack),
-          kind: context.pack.kind,
-          organizationId: payload.organizationId,
-        })
-        .returning({ id: contextSnapshot.id });
-
-      // Re-runs replace: extractions belong to exactly one run per source.
-      await tx
-        .delete(sourceExtraction)
-        .where(eq(sourceExtraction.sourceId, payload.sourceId));
-      if (rows.length > 0) {
-        await tx.insert(sourceExtraction).values(
-          rows.map((row) => ({
-            ...row,
+      await withOrgScope(payload.organizationId, async (tx) => {
+        // A reaper may have retired this attempt while a provider call was in
+        // flight. Lock and verify the exact claim before replacing extraction
+        // rows or writing the snapshot and metering for it.
+        await assertActiveAttempt(tx, claimed);
+        const [snapshot] = await tx
+          .insert(contextSnapshot)
+          .values({
+            content: JSON.parse(canonicalJson(context.pack)),
+            hash: hashContextPack(context.pack),
+            kind: context.pack.kind,
             organizationId: payload.organizationId,
+          })
+          .returning({ id: contextSnapshot.id });
+
+        // Re-runs replace: extractions belong to exactly one run per source.
+        await tx
+          .delete(sourceExtraction)
+          .where(eq(sourceExtraction.sourceId, payload.sourceId));
+        if (rows.length > 0) {
+          await tx.insert(sourceExtraction).values(
+            rows.map((row) => ({
+              ...row,
+              organizationId: payload.organizationId,
+              revision: transcript.revision,
+              runId: claimed.runId,
+              sourceId: payload.sourceId,
+            }))
+          );
+        }
+
+        const [finalized] = await tx
+          .update(sourceExtractionRun)
+          .set({
+            contextSnapshotId: snapshot?.id ?? null,
+            counts: countByKind(rows),
+            error: null,
+            models: Object.fromEntries(
+              result.usage.map((usage) => [
+                usage.task,
+                {
+                  attemptedModels: usage.attemptedModels,
+                  attempts: usage.attempts,
+                  cacheReadTokens: usage.cacheReadTokens,
+                  cacheWriteTokens: usage.cacheWriteTokens,
+                  model: usage.model,
+                  provider: usage.provider,
+                  upstreamProvider: usage.upstreamProvider,
+                },
+              ])
+            ),
             revision: transcript.revision,
-            runId: claimed.runId,
+            status: "ready",
+          })
+          .where(
+            and(
+              eq(sourceExtractionRun.id, claimed.runId),
+              eq(sourceExtractionRun.attempts, claimed.attempt),
+              eq(sourceExtractionRun.status, "processing")
+            )
+          )
+          .returning({ id: sourceExtractionRun.id });
+        if (!finalized) {
+          throw new Error(
+            "Source extraction attempt lost its finalization lease"
+          );
+        }
+
+        // Metering (cross-cutting rule 1): one ai_tokens entry per pass.
+        for (const usage of result.usage) {
+          // biome-ignore lint/performance/noAwaitInLoops: at most four entries, same tx
+          await recordUsage(tx, {
+            correlationId: `extract:${payload.sourceId}:${claimed.attempt}:${usage.task}`,
+            entryType: "ai_tokens",
+            metadata: {
+              attemptedModels: usage.attemptedModels,
+              attempts: usage.attempts,
+              cacheReadTokens: usage.cacheReadTokens,
+              cacheWriteTokens: usage.cacheWriteTokens,
+              costUsd: usage.costUsd,
+              inputTokens: usage.inputTokens,
+              model: usage.model,
+              outputTokens: usage.outputTokens,
+              provider: usage.provider,
+              sourceHours: context.durationSeconds / 3600,
+              task: usage.task,
+              upstreamProvider: usage.upstreamProvider,
+            },
+            organizationId: payload.organizationId,
+            quantity: usage.inputTokens + usage.outputTokens,
             sourceId: payload.sourceId,
-          }))
+            unit: "tokens",
+          });
+        }
+      });
+
+      // Moment discovery is the next follow-on job (the analysis→extraction
+      // pattern, one level down): enqueued once the extractions are committed
+      // so the discovery pass can cite them as seeds, errors contained — a
+      // failed enqueue must not fail a finished extraction.
+      try {
+        const { enqueueDiscovery } = await import("./discover-enqueue");
+        await enqueueDiscovery(payload);
+      } catch (error) {
+        console.error(
+          `[extract] discovery enqueue failed for ${payload.sourceId}:`,
+          error
         );
       }
-
-      await tx
-        .update(sourceExtractionRun)
-        .set({
-          contextSnapshotId: snapshot?.id ?? null,
-          counts: countByKind(rows),
-          error: null,
-          models: Object.fromEntries(
-            result.usage.map((usage) => [
-              usage.task,
-              { model: usage.model, provider: usage.provider },
-            ])
-          ),
-          revision: transcript.revision,
-          status: "ready",
-        })
-        .where(eq(sourceExtractionRun.id, claimed.runId));
-
-      // Metering (cross-cutting rule 1): one ai_tokens entry per pass.
-      for (const usage of result.usage) {
-        // biome-ignore lint/performance/noAwaitInLoops: at most four entries, same tx
-        await recordUsage(tx, {
-          correlationId: `extract:${payload.sourceId}:${claimed.attempt}:${usage.task}`,
-          entryType: "ai_tokens",
-          metadata: {
-            costUsd: usage.costUsd,
-            inputTokens: usage.inputTokens,
-            model: usage.model,
-            outputTokens: usage.outputTokens,
-            provider: usage.provider,
-            sourceHours: context.durationSeconds / 3600,
-            task: usage.task,
-          },
-          organizationId: payload.organizationId,
-          quantity: usage.inputTokens + usage.outputTokens,
-          sourceId: payload.sourceId,
-          unit: "tokens",
-        });
-      }
     });
-
-    // Moment discovery is the next follow-on job (the analysis→extraction
-    // pattern, one level down): enqueued once the extractions are committed
-    // so the discovery pass can cite them as seeds, errors contained — a
-    // failed enqueue must not fail a finished extraction.
-    try {
-      const { enqueueDiscovery } = await import("./discover-enqueue");
-      await enqueueDiscovery(payload);
-    } catch (error) {
-      console.error(
-        `[extract] discovery enqueue failed for ${payload.sourceId}:`,
-        error
-      );
-    }
   } catch (error) {
     await recordRunFailure(
       payload,
-      claimed.runId,
+      claimed,
       error,
-      options.finalAttempt ?? true
+      options.finalAttempt ?? true,
+      capturedUsage
     );
     throw error;
+  } finally {
+    await stopHeartbeat();
   }
 }

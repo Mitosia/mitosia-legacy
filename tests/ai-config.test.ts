@@ -1,86 +1,132 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { EFFORT_TIERS, routeForTask, TASK_ROUTES } from "../lib/ai/config";
+import {
+  MODEL_PROFILES,
+  modelDefinitionFor,
+  OPENROUTER_MODELS,
+  routeForTask,
+  TASK_ROUTES,
+} from "../lib/ai/config";
 
-// Config-level invariants for the AI task table. The first wired-effort
-// call on staging (2026-08-24) failed every extraction with "This model
-// does not support the effort parameter" — claude-haiku-4-5 rejects
-// effort outright. The generate seam gates on EFFORT_TIERS too, but a
-// declared-yet-inert effort in the table is a lie waiting for the gate to
-// be refactored away; this keeps the table honest.
+const OVERRIDE_ENV_VARS = [
+  "MOMENT_DISCOVERY_MODELS",
+  "MOMENT_DISCOVERY_TIER",
+  "SEGMENT_PLAN_MODELS",
+  "SEGMENT_PLAN_TIER",
+] as const;
 
-describe("TASK_ROUTES", () => {
-  it("never declares effort on a tier that rejects the parameter", () => {
-    for (const [task, route] of Object.entries(TASK_ROUTES)) {
-      if ("effort" in route && route.effort !== undefined) {
-        expect(
-          EFFORT_TIERS.has(route.tier),
-          `${task} declares effort on tier "${route.tier}", which rejects the effort parameter`
-        ).toBe(true);
-      }
+afterEach(() => {
+  for (const envVar of OVERRIDE_ENV_VARS) {
+    delete process.env[envVar];
+  }
+});
+
+describe("provider-neutral model profiles", () => {
+  it("gives every route a positive budget and a structured-output requirement", () => {
+    for (const route of Object.values(TASK_ROUTES)) {
+      expect(route.maxOutputTokens).toBeGreaterThan(0);
+      expect(route.requiredCapabilities).toContain("structuredOutputs");
+      expect(MODEL_PROFILES[route.profile].length).toBeGreaterThan(0);
     }
   });
 
-  it("gives every route a positive output budget", () => {
-    for (const route of Object.values(TASK_ROUTES)) {
-      expect(route.maxOutputTokens).toBeGreaterThan(0);
+  it("orders all four requested frontier families in the editorial profile", () => {
+    expect(MODEL_PROFILES.editorial).toEqual([
+      "anthropic/claude-opus-5",
+      "openai/gpt-5.6-sol",
+      "google/gemini-3.1-pro-preview",
+      "moonshotai/kimi-k3",
+    ]);
+    expect(
+      MODEL_PROFILES.editorial.map(
+        (modelId) => modelDefinitionFor(modelId)?.family
+      )
+    ).toEqual(["anthropic", "openai", "google", "moonshot"]);
+  });
+
+  it("contains only explicit model ids, never a moving router alias", () => {
+    for (const model of Object.values(OPENROUTER_MODELS)) {
+      expect(model.id).toContain("/");
+      expect(model.id).not.toContain("latest");
+      expect(model.id).not.toBe("openrouter/auto");
+      expect(model.id.startsWith("~")).toBe(false);
+      expect(model.capabilities.structuredOutputs).toBe(true);
     }
+  });
+
+  it("resolves routes to ordered model ids instead of provider tiers", () => {
+    const editorial = routeForTask("moment-discovery.candidates");
+    expect(editorial.profile).toBe("editorial");
+    expect(editorial.modelIds).toEqual(MODEL_PROFILES.editorial);
+
+    const efficient = routeForTask("source-analysis.chapters");
+    expect(efficient.profile).toBe("efficient");
+    expect(efficient.modelIds).toEqual([
+      OPENROUTER_MODELS.claudeHaiku.id,
+      OPENROUTER_MODELS.geminiPro.id,
+      OPENROUTER_MODELS.gptSol.id,
+      OPENROUTER_MODELS.kimiK3.id,
+    ]);
   });
 });
 
-describe("tier overrides", () => {
-  afterEach(() => {
-    process.env.MOMENT_DISCOVERY_TIER = undefined;
-    delete process.env.MOMENT_DISCOVERY_TIER;
-    delete process.env.SEGMENT_PLAN_TIER;
+describe("model overrides", () => {
+  it("accepts one explicit model through the preferred models variable", () => {
+    process.env.MOMENT_DISCOVERY_MODELS = "moonshotai/kimi-k3";
+    expect(routeForTask("moment-discovery.candidates").modelIds).toEqual([
+      "moonshotai/kimi-k3",
+    ]);
   });
 
-  it("routes the discovery pass to the overridden tier", () => {
-    process.env.MOMENT_DISCOVERY_TIER = "opus";
-    expect(routeForTask("moment-discovery.candidates").tier).toBe("opus");
-    // Untouched tasks keep their table tier.
-    expect(routeForTask("source-extraction.claims").tier).toBe("sonnet");
+  it("accepts and deduplicates an ordered comma-separated candidate list", () => {
+    process.env.MOMENT_DISCOVERY_MODELS =
+      "openai/gpt-5.6-sol, google/gemini-3.1-pro-preview, openai/gpt-5.6-sol";
+    expect(routeForTask("moment-discovery.candidates").modelIds).toEqual([
+      "openai/gpt-5.6-sol",
+      "google/gemini-3.1-pro-preview",
+    ]);
   });
 
-  it("ignores invalid values", () => {
-    process.env.MOMENT_DISCOVERY_TIER = "gpt-5";
-    expect(routeForTask("moment-discovery.candidates").tier).toBe("opus");
-  });
-
-  it("drops effort when the override tier rejects it", () => {
+  it("keeps the legacy tier variable as a single-model compatibility path", () => {
     process.env.SEGMENT_PLAN_TIER = "haiku";
-    const route = routeForTask("segment-plan.partition");
-    expect(route.tier).toBe("haiku");
-    expect(route.effort).toBeUndefined();
+    expect(routeForTask("segment-plan.partition").modelIds).toEqual([
+      "anthropic/claude-haiku-4.5",
+    ]);
+
+    process.env.SEGMENT_PLAN_TIER = "opus";
+    expect(routeForTask("segment-plan.reconcile").modelIds).toEqual([
+      "anthropic/claude-opus-5",
+    ]);
   });
 
-  it("routes an OpenRouter slug to the audition path", () => {
-    process.env.MOMENT_DISCOVERY_TIER = "moonshotai/kimi-k3";
-    const route = routeForTask("moment-discovery.candidates");
-    expect(route.openrouterModel).toBe("moonshotai/kimi-k3");
-    // The table row still supplies the output budget; effort (an
-    // Anthropic-only parameter) never rides along on an audition.
-    expect(route.tier).toBe("opus");
-    expect(route.maxOutputTokens).toBe(
-      TASK_ROUTES["moment-discovery.candidates"].maxOutputTokens
-    );
-    expect(route.effort).toBeUndefined();
+  it("also accepts explicit candidates in the legacy variable", () => {
+    process.env.MOMENT_DISCOVERY_TIER =
+      "google/gemini-3.1-pro-preview,moonshotai/kimi-k3";
+    expect(routeForTask("moment-discovery.candidates").modelIds).toEqual([
+      "google/gemini-3.1-pro-preview",
+      "moonshotai/kimi-k3",
+    ]);
   });
 
-  it("accepts variant and alias slug forms", () => {
-    process.env.MOMENT_DISCOVERY_TIER = "google/gemini-3.1-pro-preview:batch";
-    expect(routeForTask("moment-discovery.candidates").openrouterModel).toBe(
-      "google/gemini-3.1-pro-preview:batch"
-    );
-    process.env.MOMENT_DISCOVERY_TIER = "~moonshotai/kimi-latest";
-    expect(routeForTask("moment-discovery.candidates").openrouterModel).toBe(
-      "~moonshotai/kimi-latest"
-    );
+  it("prefers the provider-neutral models variable over the legacy tier", () => {
+    process.env.MOMENT_DISCOVERY_MODELS = "openai/gpt-5.6-sol";
+    process.env.MOMENT_DISCOVERY_TIER = "opus";
+    expect(routeForTask("moment-discovery.candidates").modelIds).toEqual([
+      "openai/gpt-5.6-sol",
+    ]);
   });
 
-  it("rejects slug-shaped junk", () => {
-    process.env.MOMENT_DISCOVERY_TIER = "not a model/id with spaces";
-    const route = routeForTask("moment-discovery.candidates");
-    expect(route.openrouterModel).toBeUndefined();
-    expect(route.tier).toBe("opus");
+  it("ignores malformed and moving-alias overrides", () => {
+    for (const invalid of [
+      "gpt-5",
+      "not a model/id with spaces",
+      "openrouter/auto",
+      "~anthropic/claude-opus-latest",
+      "anthropic/claude-opus-latest",
+    ]) {
+      process.env.MOMENT_DISCOVERY_MODELS = invalid;
+      expect(routeForTask("moment-discovery.candidates").modelIds).toEqual(
+        MODEL_PROFILES.editorial
+      );
+    }
   });
 });

@@ -5,15 +5,11 @@ import type { SourceContextPack } from "../context";
 import { generateStructured, type StructuredUsage } from "../generate";
 import { transcriptToPromptText } from "./source-analysis";
 
-// The S5 extraction capability: four passes over ONE cached transcript
-// prefix — quotes, stories, claims (sonnet) and Q&A exchanges (haiku).
-// Every pass shares the SAME schema and system on purpose: Anthropic's
-// cache key covers tools/output-format and system before messages, so a
-// per-pass schema would bust the cache that makes multi-pass extraction
-// affordable. Only the post-breakpoint instruction text differs. Scheduling
-// mirrors that: the first sonnet pass is awaited (primes the cache), the
-// rest of the sonnet group runs in parallel on cache hits; haiku has its
-// own cache and a single pass, so it just runs.
+// The S5 extraction capability: four verified passes over one cached
+// transcript prefix — quotes, stories, claims, and Q&A exchanges. Model
+// identity comes from the provider-neutral task registry. Every pass uses
+// the same portable wire contract and local exact validator; cache reads are
+// recorded and measured rather than assumed from provider identity.
 //
 // `text` must be VERBATIM transcript words — the pipeline aligns it back to
 // the word timeline (lib/intelligence/grounding.ts) and discards what
@@ -247,12 +243,19 @@ export async function runSourceExtraction(
     return { items: [], usage: [] };
   }
 
-  // Prime the sonnet cache with the first pass, then fan out. The haiku
-  // pass rides along in the parallel wave — it has its own cache and only
-  // one pass, so there is nothing for it to prime.
+  // Prime the shared prefix with the first pass, then fan out. Await every
+  // started sibling before throwing so usage capture is complete and a
+  // Trigger retry cannot overlap an abandoned paid request.
   const first = await runPass(primer, cachedPrefix);
-  const parallel = await Promise.all(
+  const settled = await Promise.allSettled(
     rest.map((pass) => runPass(pass, cachedPrefix))
+  );
+  const rejected = settled.find((result) => result.status === "rejected");
+  if (rejected?.status === "rejected") {
+    throw rejected.reason;
+  }
+  const parallel = settled.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : []
   );
 
   const all = [first, ...parallel];

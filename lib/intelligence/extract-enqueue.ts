@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { inArray } from "drizzle-orm";
 import { isAiConfigured } from "@/lib/ai/provider";
 import { sourceExtractionRun } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
@@ -13,7 +13,9 @@ function extractionConfigured(): boolean {
   return isAiConfigured() || process.env.ANALYSIS_PROVIDER === "mock";
 }
 
-async function dispatch(payload: ExtractionPayload): Promise<void> {
+export async function dispatchExtraction(
+  payload: ExtractionPayload
+): Promise<void> {
   if (process.env.TRIGGER_SECRET_KEY) {
     const { tasks } = await import("@trigger.dev/sdk");
     const { extractSourceTask } = await import("@/trigger/extract-source");
@@ -27,8 +29,24 @@ async function dispatch(payload: ExtractionPayload): Promise<void> {
     await runExtraction(payload);
   };
   runInProcess().catch((error) => {
+    // If import/startup failed before claim, the durable pending row remains
+    // eligible for the stale-pending reaper. A claimed pipeline records its
+    // own terminal/retry state.
     console.error(`[extract] source ${payload.sourceId} failed:`, error);
   });
+}
+
+async function dispatchSafely(payload: ExtractionPayload): Promise<void> {
+  try {
+    await dispatchExtraction(payload);
+  } catch (error) {
+    // Queue submission is an ambiguous external boundary. Preserve the
+    // durable pending intent; its stale-pending sweep safely redispatches it.
+    console.error(
+      `[extract] could not dispatch source ${payload.sourceId}:`,
+      error
+    );
+  }
 }
 
 // The automatic chain (from analysis success): first run only — an existing
@@ -40,7 +58,7 @@ export async function enqueueExtraction(
   if (!extractionConfigured()) {
     return;
   }
-  await withOrgScope(payload.organizationId, (tx) =>
+  const [created] = await withOrgScope(payload.organizationId, (tx) =>
     tx
       .insert(sourceExtractionRun)
       .values({
@@ -49,8 +67,12 @@ export async function enqueueExtraction(
         status: "pending",
       })
       .onConflictDoNothing({ target: sourceExtractionRun.sourceId })
+      .returning({ id: sourceExtractionRun.id })
   );
-  await dispatch(payload);
+  if (!created) {
+    return;
+  }
+  await dispatchSafely(payload);
 }
 
 // The human action (retry after failure, re-extract after corrections):
@@ -61,7 +83,7 @@ export async function enqueueExtractionRerun(
   if (!extractionConfigured()) {
     return;
   }
-  await withOrgScope(payload.organizationId, (tx) =>
+  const [queued] = await withOrgScope(payload.organizationId, (tx) =>
     tx
       .insert(sourceExtractionRun)
       .values({
@@ -71,9 +93,13 @@ export async function enqueueExtractionRerun(
       })
       .onConflictDoUpdate({
         set: { error: null, status: "pending" },
-        setWhere: sql`${sourceExtractionRun.status} <> 'processing'`,
+        setWhere: inArray(sourceExtractionRun.status, ["failed", "ready"]),
         target: sourceExtractionRun.sourceId,
       })
+      .returning({ id: sourceExtractionRun.id })
   );
-  await dispatch(payload);
+  if (!queued) {
+    return;
+  }
+  await dispatchSafely(payload);
 }

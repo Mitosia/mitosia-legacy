@@ -58,7 +58,7 @@ import type { TranscriptData } from "@/lib/transcription/types";
 // dropped in locally) goes through the REAL capability, then the
 // deterministic scorers and — when a provider key exists — the LLM judge.
 //
-// Run: `pnpm eval` (needs ANTHROPIC_API_KEY unless ANALYSIS_PROVIDER=mock,
+// Run: `pnpm eval` (needs OPENROUTER_API_KEY unless ANALYSIS_PROVIDER=mock,
 // which smoke-tests the harness itself). Exits non-zero when any
 // deterministic score lands under its threshold, so the manual GitHub
 // Action (eval.yml) is a real gate. Langfuse dataset sync attaches here
@@ -531,7 +531,7 @@ async function main(): Promise<void> {
     throw new Error("No fixtures in evals/fixtures");
   }
   const useJudge = Boolean(
-    process.env.ANTHROPIC_API_KEY && process.env.ANALYSIS_PROVIDER !== "mock"
+    process.env.OPENROUTER_API_KEY && process.env.ANALYSIS_PROVIDER !== "mock"
   );
   console.log(
     `Running ${files.length} fixture(s); judge ${useJudge ? "on" : "off"}\n`

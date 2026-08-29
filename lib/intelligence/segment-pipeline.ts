@@ -28,7 +28,14 @@ import {
   hashContextPack,
   type SourceContextPack,
 } from "@/lib/ai/context";
-import type { StructuredUsage } from "@/lib/ai/generate";
+import {
+  captureStructuredUsage,
+  type StructuredUsage,
+  structuredFailureUsages,
+  summarizeStructuredUsages,
+  sumStructuredUsage,
+} from "@/lib/ai/generate";
+import { recordStructuredUsages } from "@/lib/ai/metering";
 import { recordAudit } from "@/lib/audit";
 import {
   brand,
@@ -47,7 +54,6 @@ import {
   transcriptChunk,
 } from "@/lib/db/schema";
 import { type OrgTransaction, withOrgScope } from "@/lib/db/tenant";
-import { recordUsage } from "@/lib/ledger";
 import { sanitizeIngestError } from "@/lib/media/ingest-error";
 import { loadCurrentTranscript } from "@/lib/transcription/store";
 import type { TranscriptWord } from "@/lib/transcription/types";
@@ -80,6 +86,23 @@ import { buildSegmentRows, checkPartition, type SegmentRow } from "./segments";
 
 const SEGMENT_ERROR_MAX_CHARS = 2000;
 const SEGMENT_HEARTBEAT_INTERVAL_MS = 60_000;
+const SEGMENT_USAGE_SUFFIXES: Partial<Record<StructuredUsage["task"], string>> =
+  {
+    "clip-fine.cut": ":cut",
+    "episode-brief.compose": ":brief",
+    "moment-review.verdict": ":review",
+    "segment-plan.partition": "",
+    "segment-plan.reconcile": ":reconcile",
+  };
+
+function segmentUsageCorrelation(
+  sourceId: string,
+  attempt: number,
+  task: StructuredUsage["task"]
+): string {
+  const suffix = SEGMENT_USAGE_SUFFIXES[task] ?? `:${task}`;
+  return `segment:${sourceId}:${attempt}${suffix}`;
+}
 
 export interface SegmentPlanPayload {
   dispatchLease: string;
@@ -154,7 +177,8 @@ async function recordRunFailure(
   payload: SegmentPlanPayload,
   claimed: ClaimedRun,
   error: unknown,
-  finalAttempt: boolean
+  finalAttempt: boolean,
+  capturedUsage: readonly StructuredUsage[]
 ): Promise<void> {
   const message =
     error instanceof Error ? error.message : "Unknown segment-plan failure";
@@ -162,6 +186,7 @@ async function recordRunFailure(
     0,
     SEGMENT_ERROR_MAX_CHARS
   );
+  const failedUsages = structuredFailureUsages(error, capturedUsage);
   await withOrgScope(payload.organizationId, async (tx) => {
     const [updated] = await tx
       .update(segmentPlanRun)
@@ -177,6 +202,14 @@ async function recordRunFailure(
         )
       )
       .returning({ id: segmentPlanRun.id, status: segmentPlanRun.status });
+    await recordStructuredUsages(tx, {
+      correlationForTask: (task) =>
+        segmentUsageCorrelation(payload.sourceId, claimed.attempt, task),
+      failed: true,
+      organizationId: payload.organizationId,
+      sourceId: payload.sourceId,
+      usages: failedUsages,
+    });
     if (updated?.status === "ready") {
       await recordAudit(tx, {
         action: "segment_plan.refresh_failed_preserved",
@@ -434,24 +467,6 @@ interface ReviewOutcome {
 
 const EMPTY_REVIEW: ReviewOutcome = { usage: null, verdicts: new Map() };
 
-function sumUsage(usages: readonly StructuredUsage[]): StructuredUsage | null {
-  const [first] = usages;
-  if (!first) {
-    return null;
-  }
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let costUsd: number | null = null;
-  for (const entry of usages) {
-    inputTokens += entry.inputTokens;
-    outputTokens += entry.outputTokens;
-    if (entry.costUsd !== null) {
-      costUsd = (costUsd ?? 0) + entry.costUsd;
-    }
-  }
-  return { ...first, costUsd, inputTokens, outputTokens };
-}
-
 // Cold reviewer over the KEEP segments — the same agent, same flag, same
 // never-a-gate contract as the moments lane.
 async function reviewKeeps(
@@ -481,7 +496,7 @@ async function reviewKeeps(
     for (const [key, verdict] of result.verdicts) {
       verdicts.set(Number(key), verdict);
     }
-    return { usage: sumUsage(result.usage), verdicts };
+    return { usage: sumStructuredUsage(result.usage), verdicts };
   } catch (error) {
     console.error("[segments] reviewer pass failed:", error);
     return EMPTY_REVIEW;
@@ -652,7 +667,7 @@ async function refineSegmentCuts(
     calls: targets.length,
     items: applied.items,
     rejected: applied.rejected + (targets.length - proposals.length),
-    usage: sumUsage(usages),
+    usage: sumStructuredUsage(usages),
   };
 }
 
@@ -786,7 +801,7 @@ async function reconcileSegmentPlan(
           mergedBoundaries: applied.mergedBoundaries,
           status: "applied",
           tableOfContents: applied.tableOfContents,
-          usage: sumUsage(usages),
+          usage: sumStructuredUsage(usages),
         };
       }
       validationIssues = applied.issues;
@@ -808,7 +823,7 @@ async function reconcileSegmentPlan(
     mergedBoundaries: 0,
     status: "fallback",
     tableOfContents: identity.tableOfContents,
-    usage: sumUsage(usages),
+    usage: sumStructuredUsage(usages),
   };
 }
 
@@ -821,268 +836,215 @@ export async function runSegmentPlanPipeline(
     return;
   }
   const stopHeartbeat = startSegmentRunHeartbeat(payload, claimed);
+  const capturedUsage: StructuredUsage[] = [];
 
   try {
-    const transcript = await loadCurrentTranscript(
-      payload.organizationId,
-      payload.sourceId
-    );
-    if (!transcript) {
-      throw new Error("Source has no ready transcript to plan from");
-    }
-    const speakerCount = new Set(
-      transcript.data.words.map((word) => word.speaker).filter(Boolean)
-    ).size;
-    const context = await assembleContext(
-      payload,
-      transcript.data.language,
-      speakerCount
-    );
-    const durationMs = Math.round(context.durationSeconds * 1000);
-
-    // The cutting room, chapters lane (§4): persisted brief → TOC-first
-    // rough partition → global boundary reconciliation → per-cut refinement
-    // seeing both sides → tiling gauntlet → cold review. Planning stays a
-    // button; the brief row is
-    // the cross-run memory when the prompt cache has gone cold.
-    const grid = buildCutGrid(transcript.data.words);
-    const shotTimesMs = await loadShotTimes(payload);
-    const prefixInput = clipPrefixInput(
-      {
-        analysis: context.input.analysis,
-        contextPack: context.input.contextPack,
-        seeds: context.input.seeds,
-      },
-      grid
-    );
-
-    await writeStage(payload, claimed, "brief");
-    const ensured = await ensureEpisodeBrief(
-      payload,
-      prefixInput,
-      transcript.revision
-    );
-
-    await writeStage(payload, claimed, "rough");
-    const result = await runSegmentPlan(
-      {
-        ...context.input,
-        durationMs,
-        transcript: transcript.data,
-      },
-      { brief: ensured.brief }
-    );
-
-    await writeStage(payload, claimed, "reconcile");
-    const reconciliation = await reconcileSegmentPlan(
-      result.items,
-      result.tableOfContents,
-      prefixInput,
-      ensured.brief,
-      transcript.data.words
-    );
-
-    await writeStage(payload, claimed, "cut");
-    const refinement = await refineSegmentCuts(
-      reconciliation.items,
-      grid,
-      shotTimesMs,
-      transcript.data.words[0]
-    );
-
-    const chunks = await loadDedupeChunks(payload);
-    const rows = buildSegmentRows(
-      refinement.items,
-      transcript.data.words,
-      durationMs,
-      chunks
-    );
-    const partition = checkPartition(rows, transcript.data.words);
-    if (!partition.ok) {
-      throw new Error(
-        `Segment partition failed integrity: ${partition.issues.join("; ")}`
+    await captureStructuredUsage(capturedUsage, async () => {
+      const transcript = await loadCurrentTranscript(
+        payload.organizationId,
+        payload.sourceId
       );
-    }
-    await writeStage(payload, claimed, "review");
-    const review = await reviewKeeps(rows, transcript.data.words);
+      if (!transcript) {
+        throw new Error("Source has no ready transcript to plan from");
+      }
+      const speakerCount = new Set(
+        transcript.data.words.map((word) => word.speaker).filter(Boolean)
+      ).size;
+      const context = await assembleContext(
+        payload,
+        transcript.data.language,
+        speakerCount
+      );
+      const durationMs = Math.round(context.durationSeconds * 1000);
 
-    await withOrgScope(payload.organizationId, async (tx) => {
-      // The reaper may have retired a silent attempt while a provider call
-      // was still in flight. Lock and verify the exact claim before any
-      // replacement rows or metering are written, so an old worker cannot
-      // resurrect itself over a retry.
-      await assertActiveAttempt(tx, claimed);
-      const [snapshot] = await tx
-        .insert(contextSnapshot)
-        .values({
-          content: JSON.parse(canonicalJson(context.input.contextPack)),
-          hash: hashContextPack(context.input.contextPack),
-          kind: context.input.contextPack.kind,
-          organizationId: payload.organizationId,
-        })
-        .returning({ id: contextSnapshot.id });
+      // The cutting room, chapters lane (§4): persisted brief → TOC-first
+      // rough partition → global boundary reconciliation → per-cut refinement
+      // seeing both sides → tiling gauntlet → cold review. Planning stays a
+      // button; the brief row is
+      // the cross-run memory when the prompt cache has gone cold.
+      const grid = buildCutGrid(transcript.data.words);
+      const shotTimesMs = await loadShotTimes(payload);
+      const prefixInput = clipPrefixInput(
+        {
+          analysis: context.input.analysis,
+          contextPack: context.input.contextPack,
+          seeds: context.input.seeds,
+        },
+        grid
+      );
 
-      // Re-plans replace (the rerun ACTION refuses while decisions exist).
-      await tx
-        .delete(segmentClip)
-        .where(eq(segmentClip.sourceId, payload.sourceId));
-      if (rows.length > 0) {
-        await tx.insert(segmentClip).values(
-          rows.map((row, index) => ({
-            ...row,
-            ...verdictColumns(review.verdicts.get(index)),
-            organizationId: payload.organizationId,
-            revision: transcript.revision,
-            runId: claimed.runId,
-            sourceId: payload.sourceId,
-          }))
+      await writeStage(payload, claimed, "brief");
+      const ensured = await ensureEpisodeBrief(
+        {
+          ...payload,
+          usageCorrelationId: `segment:${payload.sourceId}:${claimed.attempt}:brief`,
+        },
+        prefixInput,
+        transcript.revision
+      );
+
+      await writeStage(payload, claimed, "rough");
+      const result = await runSegmentPlan(
+        {
+          ...context.input,
+          durationMs,
+          transcript: transcript.data,
+        },
+        { brief: ensured.brief }
+      );
+
+      await writeStage(payload, claimed, "reconcile");
+      const reconciliation = await reconcileSegmentPlan(
+        result.items,
+        result.tableOfContents,
+        prefixInput,
+        ensured.brief,
+        transcript.data.words
+      );
+
+      await writeStage(payload, claimed, "cut");
+      const refinement = await refineSegmentCuts(
+        reconciliation.items,
+        grid,
+        shotTimesMs,
+        transcript.data.words[0]
+      );
+
+      const chunks = await loadDedupeChunks(payload);
+      const rows = buildSegmentRows(
+        refinement.items,
+        transcript.data.words,
+        durationMs,
+        chunks
+      );
+      const partition = checkPartition(rows, transcript.data.words);
+      if (!partition.ok) {
+        throw new Error(
+          `Segment partition failed integrity: ${partition.issues.join("; ")}`
         );
       }
+      await writeStage(payload, claimed, "review");
+      const review = await reviewKeeps(rows, transcript.data.words);
+      const meteredUsage = summarizeStructuredUsages(capturedUsage).filter(
+        (usage) =>
+          usage.task !== "episode-brief.compose" || ensured.usage === null
+      );
 
-      const [finalized] = await tx
-        .update(segmentPlanRun)
-        .set({
-          contextSnapshotId: snapshot?.id ?? null,
-          counts: {
-            architectureVersion: SEGMENT_PLAN_ARCHITECTURE_VERSION,
-            dispatchLease: payload.dispatchLease,
-            draftToc: result.tableOfContents,
-            dropped: rows.filter((row) => row.kind === "drop").length,
-            flagged: [...review.verdicts.values()].filter(isFlaggedVerdict)
-              .length,
-            grounded: rows.filter((row) => row.grounded).length,
-            kept: rows.filter((row) => row.kind === "keep").length,
-            mergedBoundaries: reconciliation.mergedBoundaries,
-            reconcileCalls: reconciliation.calls,
-            reconciledToc: reconciliation.tableOfContents,
-            reconcileIssues: reconciliation.issues,
-            reconcileStatus: reconciliation.status,
-            refinedApplied: refinement.applied,
-            refinedAtomicFallback: refinement.atomicFallback,
-            refinedCuts: refinement.calls,
-            refinedRejected: refinement.rejected,
-            reviewed: review.verdicts.size,
-            roughKept: result.items.filter((item) => item.kind === "keep")
-              .length,
-            roughSegments: result.items.length,
-            segments: rows.length,
-            toc: finalTableOfContents(rows),
-          },
-          editVersion: 0,
-          error: null,
-          humanEditedAt: null,
-          models: Object.fromEntries(
-            [...result.usage, reconciliation.usage]
-              .filter((usage): usage is StructuredUsage => usage !== null)
-              .map((usage) => [
-                usage.task,
-                { model: usage.model, provider: usage.provider },
-              ])
-          ),
-          revision: transcript.revision,
-          status: "ready",
-        })
-        .where(
-          and(
-            eq(segmentPlanRun.id, claimed.runId),
-            eq(segmentPlanRun.attempts, claimed.attempt),
-            eq(segmentPlanRun.status, "processing")
-          )
-        )
-        .returning({ id: segmentPlanRun.id });
-      if (!finalized) {
-        throw new Error("Segment plan attempt lost its finalization lease");
-      }
+      await withOrgScope(payload.organizationId, async (tx) => {
+        // The reaper may have retired a silent attempt while a provider call
+        // was still in flight. Lock and verify the exact claim before any
+        // replacement rows or metering are written, so an old worker cannot
+        // resurrect itself over a retry.
+        await assertActiveAttempt(tx, claimed);
+        const [snapshot] = await tx
+          .insert(contextSnapshot)
+          .values({
+            content: JSON.parse(canonicalJson(context.input.contextPack)),
+            hash: hashContextPack(context.input.contextPack),
+            kind: context.input.contextPack.kind,
+            organizationId: payload.organizationId,
+          })
+          .returning({ id: contextSnapshot.id });
 
-      const summedPasses: [string, StructuredUsage | null, number][] = [
-        [
-          `segment:${payload.sourceId}:${claimed.attempt}:brief`,
-          ensured.usage,
-          1,
-        ],
-        [
-          `segment:${payload.sourceId}:${claimed.attempt}:cut`,
-          refinement.usage,
-          refinement.calls,
-        ],
-        [
-          `segment:${payload.sourceId}:${claimed.attempt}:reconcile`,
-          reconciliation.usage,
-          reconciliation.calls,
-        ],
-      ];
-      for (const [correlationId, usage, calls] of summedPasses) {
-        if (!usage) {
-          continue;
+        // Re-plans replace (the rerun ACTION refuses while decisions exist).
+        await tx
+          .delete(segmentClip)
+          .where(eq(segmentClip.sourceId, payload.sourceId));
+        if (rows.length > 0) {
+          await tx.insert(segmentClip).values(
+            rows.map((row, index) => ({
+              ...row,
+              ...verdictColumns(review.verdicts.get(index)),
+              organizationId: payload.organizationId,
+              revision: transcript.revision,
+              runId: claimed.runId,
+              sourceId: payload.sourceId,
+            }))
+          );
         }
-        // biome-ignore lint/performance/noAwaitInLoops: few entries, same tx
-        await recordUsage(tx, {
-          correlationId,
-          entryType: "ai_tokens",
-          metadata: {
-            calls,
-            costUsd: usage.costUsd,
-            inputTokens: usage.inputTokens,
-            model: usage.model,
-            outputTokens: usage.outputTokens,
-            provider: usage.provider,
-            task: usage.task,
-          },
-          organizationId: payload.organizationId,
-          quantity: usage.inputTokens + usage.outputTokens,
-          sourceId: payload.sourceId,
-          unit: "tokens",
-        });
-      }
 
-      if (review.usage) {
-        await recordUsage(tx, {
-          correlationId: `segment:${payload.sourceId}:${claimed.attempt}:review`,
-          entryType: "ai_tokens",
-          metadata: {
-            calls: review.verdicts.size,
-            costUsd: review.usage.costUsd,
-            inputTokens: review.usage.inputTokens,
-            model: review.usage.model,
-            outputTokens: review.usage.outputTokens,
-            provider: review.usage.provider,
-            task: "moment-review.verdict",
-          },
-          organizationId: payload.organizationId,
-          quantity: review.usage.inputTokens + review.usage.outputTokens,
-          sourceId: payload.sourceId,
-          unit: "tokens",
-        });
-      }
+        const [finalized] = await tx
+          .update(segmentPlanRun)
+          .set({
+            contextSnapshotId: snapshot?.id ?? null,
+            counts: {
+              architectureVersion: SEGMENT_PLAN_ARCHITECTURE_VERSION,
+              dispatchLease: payload.dispatchLease,
+              draftToc: result.tableOfContents,
+              dropped: rows.filter((row) => row.kind === "drop").length,
+              flagged: [...review.verdicts.values()].filter(isFlaggedVerdict)
+                .length,
+              grounded: rows.filter((row) => row.grounded).length,
+              kept: rows.filter((row) => row.kind === "keep").length,
+              mergedBoundaries: reconciliation.mergedBoundaries,
+              reconcileCalls: reconciliation.calls,
+              reconciledToc: reconciliation.tableOfContents,
+              reconcileIssues: reconciliation.issues,
+              reconcileStatus: reconciliation.status,
+              refinedApplied: refinement.applied,
+              refinedAtomicFallback: refinement.atomicFallback,
+              refinedCuts: refinement.calls,
+              refinedRejected: refinement.rejected,
+              reviewed: review.verdicts.size,
+              roughKept: result.items.filter((item) => item.kind === "keep")
+                .length,
+              roughSegments: result.items.length,
+              segments: rows.length,
+              toc: finalTableOfContents(rows),
+            },
+            editVersion: 0,
+            error: null,
+            humanEditedAt: null,
+            models: Object.fromEntries(
+              meteredUsage.map((usage) => [
+                usage.task,
+                {
+                  attemptedModels: usage.attemptedModels,
+                  attempts: usage.attempts,
+                  cacheReadTokens: usage.cacheReadTokens,
+                  cacheWriteTokens: usage.cacheWriteTokens,
+                  model: usage.model,
+                  provider: usage.provider,
+                  upstreamProvider: usage.upstreamProvider,
+                },
+              ])
+            ),
+            revision: transcript.revision,
+            status: "ready",
+          })
+          .where(
+            and(
+              eq(segmentPlanRun.id, claimed.runId),
+              eq(segmentPlanRun.attempts, claimed.attempt),
+              eq(segmentPlanRun.status, "processing")
+            )
+          )
+          .returning({ id: segmentPlanRun.id });
+        if (!finalized) {
+          throw new Error("Segment plan attempt lost its finalization lease");
+        }
 
-      const roughUsage = sumUsage(result.usage);
-      if (roughUsage) {
-        await recordUsage(tx, {
-          correlationId: `segment:${payload.sourceId}:${claimed.attempt}`,
-          entryType: "ai_tokens",
-          metadata: {
-            calls: result.usage.length,
-            costUsd: roughUsage.costUsd,
-            inputTokens: roughUsage.inputTokens,
-            model: roughUsage.model,
-            outputTokens: roughUsage.outputTokens,
-            provider: roughUsage.provider,
-            sourceHours: context.durationSeconds / 3600,
-            task: roughUsage.task,
-          },
+        // Capture every verified call, including swallowed optional failures,
+        // and sum by task so retries/fallbacks cannot disappear from billing.
+        await recordStructuredUsages(tx, {
+          callsForTask: (task) =>
+            capturedUsage.filter((entry) => entry.task === task).length,
+          correlationForTask: (task) =>
+            segmentUsageCorrelation(payload.sourceId, claimed.attempt, task),
           organizationId: payload.organizationId,
-          quantity: roughUsage.inputTokens + roughUsage.outputTokens,
+          sourceHours: context.durationSeconds / 3600,
           sourceId: payload.sourceId,
-          unit: "tokens",
+          usages: meteredUsage,
         });
-      }
+      });
     });
   } catch (error) {
     await recordRunFailure(
       payload,
       claimed,
       error,
-      options.finalAttempt ?? true
+      options.finalAttempt ?? true,
+      capturedUsage
     );
     throw error;
   } finally {

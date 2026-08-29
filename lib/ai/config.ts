@@ -1,30 +1,131 @@
-// Model tiering (tech-stack §7, thesis §27.2): every AI task routes through
-// this table, never a hardcoded model string at a call site. Cheap broad
-// passes ride Haiku, writing/evaluation rides Sonnet, editorial judgment
-// (S6+) rides Opus. Per-tenant overrides arrive when entitlements do —
-// the table shape already keys by task so that lands here, not in callers.
+// Provider-neutral model routing. OpenRouter is the only active transport,
+// while this registry keeps model identity and capabilities out of callers.
+// Every production id is an explicit model revision/family id: aliases such
+// as `openrouter/auto`, `~vendor/*-latest`, and `:free` never appear here.
 
+export type ReasoningEffort = "high" | "low" | "medium";
+export type PromptCachingMode = "automatic" | "explicit" | "none";
+
+export interface ModelCapabilities {
+  promptCaching: PromptCachingMode;
+  reasoningEffort: boolean;
+  structuredOutputs: boolean;
+}
+
+export interface ModelDefinition {
+  capabilities: ModelCapabilities;
+  family: "anthropic" | "google" | "moonshot" | "openai";
+  id: string;
+}
+
+const EXPLICIT_CACHE_CAPABILITIES = {
+  promptCaching: "explicit",
+  reasoningEffort: true,
+  structuredOutputs: true,
+} as const satisfies ModelCapabilities;
+
+const AUTOMATIC_CACHE_CAPABILITIES = {
+  promptCaching: "automatic",
+  reasoningEffort: true,
+  structuredOutputs: true,
+} as const satisfies ModelCapabilities;
+
+export const OPENROUTER_MODELS = {
+  claudeHaiku: {
+    capabilities: {
+      ...EXPLICIT_CACHE_CAPABILITIES,
+      // Haiku 4.5 has rejected effort on the proven production path. Keep
+      // the adapter conservative instead of asking OpenRouter to translate it.
+      reasoningEffort: false,
+    },
+    family: "anthropic",
+    id: "anthropic/claude-haiku-4.5",
+  },
+  claudeOpus: {
+    capabilities: EXPLICIT_CACHE_CAPABILITIES,
+    family: "anthropic",
+    id: "anthropic/claude-opus-5",
+  },
+  claudeSonnet: {
+    capabilities: EXPLICIT_CACHE_CAPABILITIES,
+    family: "anthropic",
+    id: "anthropic/claude-sonnet-5",
+  },
+  geminiPro: {
+    capabilities: AUTOMATIC_CACHE_CAPABILITIES,
+    family: "google",
+    id: "google/gemini-3.1-pro-preview",
+  },
+  gptSol: {
+    capabilities: AUTOMATIC_CACHE_CAPABILITIES,
+    family: "openai",
+    id: "openai/gpt-5.6-sol",
+  },
+  kimiK3: {
+    capabilities: {
+      ...AUTOMATIC_CACHE_CAPABILITIES,
+      // Kimi reasons natively, but OpenRouter does not promise that every
+      // eligible endpoint accepts a portable effort level.
+      reasoningEffort: false,
+    },
+    family: "moonshot",
+    id: "moonshotai/kimi-k3",
+  },
+} as const satisfies Record<string, ModelDefinition>;
+
+export type RegisteredModel =
+  (typeof OPENROUTER_MODELS)[keyof typeof OPENROUTER_MODELS];
+
+// Candidate order is a Mitosia editorial decision. OpenRouter may fail over
+// between upstream endpoints for one model, while generateStructured may move
+// to the next model in this list only after the current candidate fails.
+export const MODEL_PROFILES = {
+  balanced: [
+    OPENROUTER_MODELS.claudeSonnet.id,
+    OPENROUTER_MODELS.gptSol.id,
+    OPENROUTER_MODELS.geminiPro.id,
+    OPENROUTER_MODELS.kimiK3.id,
+  ],
+  editorial: [
+    OPENROUTER_MODELS.claudeOpus.id,
+    OPENROUTER_MODELS.gptSol.id,
+    OPENROUTER_MODELS.geminiPro.id,
+    OPENROUTER_MODELS.kimiK3.id,
+  ],
+  efficient: [
+    OPENROUTER_MODELS.claudeHaiku.id,
+    OPENROUTER_MODELS.geminiPro.id,
+    OPENROUTER_MODELS.gptSol.id,
+    OPENROUTER_MODELS.kimiK3.id,
+  ],
+} as const;
+export type ModelProfile = keyof typeof MODEL_PROFILES;
+
+// Kept only so existing imports and `*_TIER=haiku|sonnet|opus` deployment
+// configuration continue to resolve during migration. Task routes no longer
+// use tiers, and all three ids are sent through OpenRouter.
 export const MODEL_TIERS = {
   haiku: "claude-haiku-4-5",
   opus: "claude-opus-5",
   sonnet: "claude-sonnet-5",
 } as const;
 export type ModelTier = keyof typeof MODEL_TIERS;
-
-// Which tiers accept the `effort` parameter. claude-haiku-4-5 REJECTS it
-// with "This model does not support the effort parameter" — a hard API
-// error, learned on staging 2026-08-24 when the first wired-effort call
-// failed every extraction. generateStructured gates on this, and the
-// config test asserts no route declares effort on an unsupported tier.
 export const EFFORT_TIERS: ReadonlySet<ModelTier> = new Set(["sonnet", "opus"]);
 
+const LEGACY_TIER_MODEL_IDS: Record<ModelTier, string> = {
+  haiku: OPENROUTER_MODELS.claudeHaiku.id,
+  opus: OPENROUTER_MODELS.claudeOpus.id,
+  sonnet: OPENROUTER_MODELS.claudeSonnet.id,
+};
+
 export interface TaskRoute {
-  // Reasoning effort (Anthropic adaptive thinking) — only meaningful on
-  // EFFORT_TIERS; omit for the provider default ("high").
-  effort?: "low" | "medium" | "high";
   maxOutputTokens: number;
-  tier: ModelTier;
+  profile: ModelProfile;
+  reasoningEffort?: ReasoningEffort;
+  requiredCapabilities: readonly (keyof ModelCapabilities)[];
 }
+
+const STRUCTURED_OUTPUT_REQUIRED = ["structuredOutputs"] as const;
 
 // One row per AI task the product performs. S4 ships source analysis; S5+
 // tasks append rows rather than inventing new plumbing.
@@ -34,9 +135,10 @@ export const TASK_ROUTES = {
   // medium effort; budget = tiny ID payload + reasoning + thinking
   // headroom (sonnet thinks by default and thinking counts).
   "clip-fine.cut": {
-    effort: "medium",
     maxOutputTokens: 3000,
-    tier: "sonnet",
+    profile: "balanced",
+    reasoningEffort: "medium",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // The Director (§4 Pass 1): the episode brief — spine, marquee arcs,
   // drop zones — over the shared cached prefix. Opus: this is the pass
@@ -45,12 +147,14 @@ export const TASK_ROUTES = {
   // fields ≈ 4-5k payload + thinking headroom.
   "episode-brief.compose": {
     maxOutputTokens: 12_000,
-    tier: "opus",
+    profile: "editorial",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // LLM-as-judge scorers for the golden evals.
   "evals.judge": {
     maxOutputTokens: 2000,
-    tier: "sonnet",
+    profile: "balanced",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // Moment discovery (S6): ONE pass proposing clip-worthy candidates over
   // the cached transcript prefix — editorial judgment, sonnet. Budget math
@@ -71,7 +175,8 @@ export const TASK_ROUTES = {
   // decide). The env override below remains the audition path.
   "moment-discovery.candidates": {
     maxOutputTokens: 32_000,
-    tier: "opus",
+    profile: "editorial",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // Cold-context reviewer verdict (S6 §9): one SMALL call per candidate
   // clip — input is only the clip's own span + title (a few k tokens, no
@@ -79,9 +184,10 @@ export const TASK_ROUTES = {
   // Sonnet at medium effort: editorial judgment on a small artifact;
   // budget = tiny payload (~150 tokens) + thinking headroom.
   "moment-review.verdict": {
-    effort: "medium",
     maxOutputTokens: 2000,
-    tier: "sonnet",
+    profile: "balanced",
+    reasoningEffort: "medium",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // Segment plan (S6.5): ONE pass proposing the episode's full keep/drop
   // partition over the cached prefix — the Editor half of the clip
@@ -97,7 +203,8 @@ export const TASK_ROUTES = {
   // Opus by default — the audition verdict, same as moment discovery.
   "segment-plan.partition": {
     maxOutputTokens: 32_000,
-    tier: "opus",
+    profile: "editorial",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // Global chapter Reconciler: one full-episode pass over the rough plan,
   // removing false boundaries before the fine Cutter spends calls placing
@@ -105,13 +212,15 @@ export const TASK_ROUTES = {
   // the large cap covers an exact ordered grouping plus adaptive thinking.
   "segment-plan.reconcile": {
     maxOutputTokens: 32_000,
-    tier: "opus",
+    profile: "editorial",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // Chapters/topics over a full transcript: broad, structured, cheap.
   // No effort: haiku rejects the parameter (see EFFORT_TIERS).
   "source-analysis.chapters": {
     maxOutputTokens: 8000,
-    tier: "haiku",
+    profile: "efficient",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // Summary, entities, and speaker intelligence: editorial quality matters,
   // and the speaker-merge suggestions carry real product risk if sloppy.
@@ -119,7 +228,8 @@ export const TASK_ROUTES = {
     // Generous: adaptive thinking counts against the output budget, and a
     // 2.5h interview legitimately produces a long entity/speaker inventory
     maxOutputTokens: 16_000,
-    tier: "sonnet",
+    profile: "balanced",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // Extraction passes (S5): three sonnet passes share one cached transcript
   // prefix + one schema (see lib/ai/capabilities/source-extraction.ts); the
@@ -141,94 +251,145 @@ export const TASK_ROUTES = {
   // grounding is content-dependent (fo547 qa grounded 0/…), and the
   // committed fixture is too small to rule that out for the marquee pass.
   "source-extraction.claims": {
-    effort: "medium",
     maxOutputTokens: 32_000,
-    tier: "sonnet",
+    profile: "balanced",
+    reasoningEffort: "medium",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // No effort: haiku rejects the parameter (see EFFORT_TIERS); haiku
   // runs no thinking, so this budget is payload-only.
   "source-extraction.qa": {
     maxOutputTokens: 12_000,
-    tier: "haiku",
+    profile: "efficient",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   "source-extraction.quotes": {
-    effort: "medium",
     maxOutputTokens: 24_000,
-    tier: "sonnet",
+    profile: "balanced",
+    reasoningEffort: "medium",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   "source-extraction.stories": {
-    effort: "medium",
     maxOutputTokens: 24_000,
-    tier: "sonnet",
+    profile: "balanced",
+    reasoningEffort: "medium",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
   // Interactive source Q&A over retrieved chunks: a small prompt, but the
   // answer is user-facing prose with citations — sonnet quality.
   "source-qa.answer": {
     maxOutputTokens: 4000,
-    tier: "sonnet",
+    profile: "balanced",
+    requiredCapabilities: STRUCTURED_OUTPUT_REQUIRED,
   },
 } as const;
 export type AiTask = keyof typeof TASK_ROUTES;
 
-// Per-task tier override via env — the model A/B switch for the quality
-// program (M1 finding 2026-08-26: candidate taste, not boundaries, is the
-// open question, and this table's own header has always said editorial
-// judgment rides Opus). Raw env reads outside serverEnvSchema (the
-// standing precedent); an invalid value is ignored, never a boot failure.
-// Flip it in the Trigger env, re-run the pass, judge the sets blind.
-// Two accepted forms, told apart by the "/" every OpenRouter id carries:
-// a first-party tier name ("opus"), or an OpenRouter model slug
-// ("moonshotai/kimi-k3") — the third-party audition path.
-const TIER_OVERRIDE_ENV: Partial<Record<AiTask, string>> = {
-  "clip-fine.cut": "CLIP_FINE_TIER",
-  "episode-brief.compose": "EPISODE_BRIEF_TIER",
-  "moment-discovery.candidates": "MOMENT_DISCOVERY_TIER",
-  "moment-review.verdict": "MOMENT_REVIEW_TIER",
-  "segment-plan.partition": "SEGMENT_PLAN_TIER",
-  "segment-plan.reconcile": "SEGMENT_PLAN_TIER",
+interface ModelOverrideEnv {
+  candidates: string;
+  legacyTier: string;
+}
+
+// `*_MODELS` is the provider-neutral override: one explicit OpenRouter slug,
+// or an ordered comma-separated candidate list. `*_TIER` remains accepted so
+// existing Trigger/Dokploy configuration does not change behavior abruptly.
+// Invalid values are ignored, never a boot failure.
+const MODEL_OVERRIDE_ENV: Partial<Record<AiTask, ModelOverrideEnv>> = {
+  "clip-fine.cut": {
+    candidates: "CLIP_FINE_MODELS",
+    legacyTier: "CLIP_FINE_TIER",
+  },
+  "episode-brief.compose": {
+    candidates: "EPISODE_BRIEF_MODELS",
+    legacyTier: "EPISODE_BRIEF_TIER",
+  },
+  "moment-discovery.candidates": {
+    candidates: "MOMENT_DISCOVERY_MODELS",
+    legacyTier: "MOMENT_DISCOVERY_TIER",
+  },
+  "moment-review.verdict": {
+    candidates: "MOMENT_REVIEW_MODELS",
+    legacyTier: "MOMENT_REVIEW_TIER",
+  },
+  "segment-plan.partition": {
+    candidates: "SEGMENT_PLAN_MODELS",
+    legacyTier: "SEGMENT_PLAN_TIER",
+  },
+  "segment-plan.reconcile": {
+    candidates: "SEGMENT_PLAN_MODELS",
+    legacyTier: "SEGMENT_PLAN_TIER",
+  },
 };
 
 function isModelTier(value: string): value is ModelTier {
   return value in MODEL_TIERS;
 }
 
-// OpenRouter ids: author/model, occasionally with a variant suffix
-// (":batch") or a leading "~" alias.
-const OPENROUTER_SLUG = /^[\w~][\w.~-]*\/[\w.~:-]+$/;
+// Explicit OpenRouter ids: author/model, optionally with a pinned variant
+// suffix such as `:batch`. Moving aliases are deliberately rejected so an
+// eval or rerun cannot silently change models between executions.
+const OPENROUTER_SLUG = /^[\w][\w.~-]*\/[\w][\w.~:-]+$/;
+const MOVING_ALIAS = /(^|[.:-])latest($|[.:-])/i;
+
+function parseExplicitCandidates(value: string | undefined): string[] | null {
+  if (!value) {
+    return null;
+  }
+  const candidates = value
+    .split(",")
+    .map((candidate) => candidate.trim())
+    .filter(Boolean);
+  if (
+    candidates.length === 0 ||
+    candidates.some(
+      (candidate) =>
+        !OPENROUTER_SLUG.test(candidate) ||
+        candidate === "openrouter/auto" ||
+        candidate.startsWith("~") ||
+        MOVING_ALIAS.test(candidate)
+    )
+  ) {
+    return null;
+  }
+  return [...new Set(candidates)];
+}
+
+const MODEL_BY_ID = new Map<string, ModelDefinition>(
+  Object.values(OPENROUTER_MODELS).map((model) => [model.id, model])
+);
+
+export function modelDefinitionFor(
+  modelId: string
+): ModelDefinition | undefined {
+  return MODEL_BY_ID.get(modelId);
+}
 
 export type ResolvedRoute = TaskRoute & {
-  // Set when the override names an OpenRouter model. The provider seam
-  // then makes OpenRouter the ONLY candidate — a silent first-party
-  // fallback mid-audition would produce a mislabeled A/B set — and effort
-  // is dropped (an Anthropic-only parameter). The table row still supplies
-  // maxOutputTokens.
-  openrouterModel?: string;
+  modelIds: readonly string[];
 };
 
 export function routeForTask(task: AiTask): ResolvedRoute {
   const route: TaskRoute = TASK_ROUTES[task];
-  const envVar = TIER_OVERRIDE_ENV[task];
-  const override = envVar ? process.env[envVar] : undefined;
-  if (!override) {
-    return route;
+  const overrideEnv = MODEL_OVERRIDE_ENV[task];
+  const explicitCandidates = parseExplicitCandidates(
+    overrideEnv ? process.env[overrideEnv.candidates] : undefined
+  );
+  if (explicitCandidates) {
+    return { ...route, modelIds: explicitCandidates };
   }
-  if (isModelTier(override)) {
-    if (override === route.tier) {
-      return route;
-    }
-    // Effort must not survive onto a tier that rejects the parameter (the
-    // haiku hard-API-error lesson).
-    if (route.effort && !EFFORT_TIERS.has(override)) {
-      const { effort: _effort, ...rest } = route;
-      return { ...rest, tier: override };
-    }
-    return { ...route, tier: override };
+
+  const legacyOverride = overrideEnv
+    ? process.env[overrideEnv.legacyTier]?.trim()
+    : undefined;
+  if (legacyOverride && isModelTier(legacyOverride)) {
+    return { ...route, modelIds: [LEGACY_TIER_MODEL_IDS[legacyOverride]] };
   }
-  if (OPENROUTER_SLUG.test(override)) {
-    const { effort: _effort, ...rest } = route;
-    return { ...rest, openrouterModel: override };
+  const legacyCandidates = parseExplicitCandidates(legacyOverride);
+  if (legacyCandidates) {
+    return { ...route, modelIds: legacyCandidates };
   }
-  return route;
+
+  return { ...route, modelIds: MODEL_PROFILES[route.profile] };
 }
 
 // USD per million tokens (first-party list prices, 2026-08). Used only for

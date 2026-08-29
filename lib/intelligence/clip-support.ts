@@ -8,6 +8,7 @@ import {
 import type { StructuredUsage } from "@/lib/ai/generate";
 import { episodeBrief, sourceArtifact } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
+import { recordUsage } from "@/lib/ledger";
 import { type ShotsArtifact, shotTimesAboveThreshold } from "@/lib/media/shots";
 import { getObject } from "@/lib/storage";
 
@@ -19,6 +20,7 @@ import { getObject } from "@/lib/storage";
 interface ClipJobPayload {
   organizationId: string;
   sourceId: string;
+  usageCorrelationId?: string;
 }
 
 // Shot-change times above the decision threshold, from the ingest
@@ -160,6 +162,29 @@ export async function ensureEpisodeBrief(
         },
         target: episodeBrief.sourceId,
       });
+    if (usage && payload.usageCorrelationId) {
+      await recordUsage(tx, {
+        correlationId: payload.usageCorrelationId,
+        entryType: "ai_tokens",
+        metadata: {
+          attemptedModels: usage.attemptedModels,
+          attempts: usage.attempts,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheWriteTokens: usage.cacheWriteTokens,
+          costUsd: usage.costUsd,
+          inputTokens: usage.inputTokens,
+          model: usage.model,
+          outputTokens: usage.outputTokens,
+          provider: usage.provider,
+          task: usage.task,
+          upstreamProvider: usage.upstreamProvider,
+        },
+        organizationId: payload.organizationId,
+        quantity: usage.inputTokens + usage.outputTokens,
+        sourceId: payload.sourceId,
+        unit: "tokens",
+      });
+    }
   });
   return { brief, usage };
 }
