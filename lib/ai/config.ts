@@ -5,7 +5,14 @@
 
 export type ReasoningEffort = "high" | "low" | "medium";
 export type PromptCachingMode = "automatic" | "explicit" | "none";
-export type ModelFamily = "anthropic" | "google" | "moonshot" | "openai";
+export type ModelFamily =
+  | "anthropic"
+  | "deepseek"
+  | "google"
+  | "minimax"
+  | "moonshot"
+  | "openai"
+  | "z-ai";
 
 export interface ModelCapabilities {
   promptCaching: PromptCachingMode;
@@ -31,6 +38,16 @@ const AUTOMATIC_CACHE_CAPABILITIES = {
   structuredOutputs: true,
 } as const satisfies ModelCapabilities;
 
+// No OpenAI entry: measured 2026-08-30, every `openai/gpt-5.6-*` request
+// under Mitosia's mandatory shape (`zdr: true` + `require_parameters: true` +
+// strict structured outputs) returns an instant 404 — "No endpoints found
+// matching your data policy (Zero data retention)". The same probe passes
+// with either flag dropped, and both flags are deliberate policy, so the
+// vendor is out of the pools, not the policy. Every pool slot it held was a
+// guaranteed dead call (the audition's "GPT-5.6 Terra challenger" was never
+// reachable in production). Re-probe the full request shape before
+// reinstating OpenAI — or any new vendor (Qwen fails the same probe today:
+// Alibaba-only hosting, no ZDR endpoints).
 export const OPENROUTER_MODELS = {
   claudeHaiku: {
     capabilities: {
@@ -52,15 +69,37 @@ export const OPENROUTER_MODELS = {
     family: "anthropic",
     id: "anthropic/claude-sonnet-5",
   },
+  // The cheap-PRO bench (2026-08-30): transport-verified under the full
+  // request shape (ZDR + require_parameters + strict schema), priced 4-20x
+  // under the frontier tier. Pool fallbacks and `*_MODELS` audition levers;
+  // promotion to a lane's FIRST slot still requires a real-source audition.
+  deepseekV4Pro: {
+    capabilities: {
+      ...AUTOMATIC_CACHE_CAPABILITIES,
+      // Reasons natively; effort translation across its many third-party
+      // hosts is unverified, so stay conservative (the Kimi precedent).
+      reasoningEffort: false,
+    },
+    family: "deepseek",
+    id: "deepseek/deepseek-v4-pro",
+  },
+  gemini37Flash: {
+    capabilities: AUTOMATIC_CACHE_CAPABILITIES,
+    family: "google",
+    id: "google/gemini-3.7-flash",
+  },
   geminiPro: {
     capabilities: AUTOMATIC_CACHE_CAPABILITIES,
     family: "google",
     id: "google/gemini-3.1-pro-preview",
   },
-  gptSol: {
-    capabilities: AUTOMATIC_CACHE_CAPABILITIES,
-    family: "openai",
-    id: "openai/gpt-5.6-sol",
+  glm53: {
+    capabilities: {
+      ...AUTOMATIC_CACHE_CAPABILITIES,
+      reasoningEffort: false,
+    },
+    family: "z-ai",
+    id: "z-ai/glm-5.3",
   },
   kimiK3: {
     capabilities: {
@@ -71,6 +110,14 @@ export const OPENROUTER_MODELS = {
     },
     family: "moonshot",
     id: "moonshotai/kimi-k3",
+  },
+  minimaxM3: {
+    capabilities: {
+      ...AUTOMATIC_CACHE_CAPABILITIES,
+      reasoningEffort: false,
+    },
+    family: "minimax",
+    id: "minimax/minimax-m3",
   },
 } as const satisfies Record<string, ModelDefinition>;
 
@@ -83,30 +130,32 @@ export type RegisteredModel =
 export const MODEL_PROFILES = {
   balanced: [
     OPENROUTER_MODELS.claudeSonnet.id,
-    OPENROUTER_MODELS.gptSol.id,
     OPENROUTER_MODELS.geminiPro.id,
+    OPENROUTER_MODELS.deepseekV4Pro.id,
     OPENROUTER_MODELS.kimiK3.id,
   ],
   // Independent publishing critic. The supervising Editor starts with
   // Claude; the verifier deliberately starts in another model family. The
   // pipeline additionally excludes the winning Editor's whole family, so a
-  // fallback Editor still never grades its own work.
+  // fallback Editor still never grades its own work. (Gemini leads since the
+  // OpenAI slot proved ZDR-unreachable — its "first candidate" was a
+  // guaranteed dead call in front of every verification.)
   critic: [
-    OPENROUTER_MODELS.gptSol.id,
     OPENROUTER_MODELS.geminiPro.id,
+    OPENROUTER_MODELS.deepseekV4Pro.id,
     OPENROUTER_MODELS.claudeOpus.id,
     OPENROUTER_MODELS.kimiK3.id,
   ],
   editorial: [
     OPENROUTER_MODELS.claudeOpus.id,
-    OPENROUTER_MODELS.gptSol.id,
     OPENROUTER_MODELS.geminiPro.id,
+    OPENROUTER_MODELS.deepseekV4Pro.id,
     OPENROUTER_MODELS.kimiK3.id,
   ],
   efficient: [
     OPENROUTER_MODELS.claudeHaiku.id,
+    OPENROUTER_MODELS.gemini37Flash.id,
     OPENROUTER_MODELS.geminiPro.id,
-    OPENROUTER_MODELS.gptSol.id,
     OPENROUTER_MODELS.kimiK3.id,
   ],
 } as const;
@@ -415,7 +464,11 @@ export function modelFamilyFor(modelId: string): string {
   if (vendor === "moonshotai") {
     return "moonshot";
   }
-  if (["anthropic", "google", "openai"].includes(vendor)) {
+  if (
+    ["anthropic", "deepseek", "google", "minimax", "openai", "z-ai"].includes(
+      vendor
+    )
+  ) {
     return vendor;
   }
   return `openrouter-vendor:${vendor}`;
@@ -449,17 +502,17 @@ export function routeForTask(task: AiTask): ResolvedRoute {
   return { ...route, modelIds: MODEL_PROFILES[route.profile] };
 }
 
-// USD per million tokens (first-party list prices, 2026-08). Used only for
-// the estimated-cost metadata on ledger entries — billing truth is the
-// provider invoice; this is the "cost per source-hour" visibility the S4
-// exit criterion asks for.
+// USD per million tokens (OpenRouter catalog, re-checked 2026-08-30). Used
+// only for estimated-cost metadata — billing truth is OpenRouter's reported
+// per-request cost, which the ledger stores; this is the "cost per
+// source-hour" visibility the S4 exit criterion asks for.
 export const MODEL_PRICING_PER_MTOK: Record<
   (typeof MODEL_TIERS)[ModelTier],
   { input: number; output: number }
 > = {
   "claude-haiku-4-5": { input: 1, output: 5 },
   "claude-opus-5": { input: 5, output: 25 },
-  "claude-sonnet-5": { input: 3, output: 15 },
+  "claude-sonnet-5": { input: 2, output: 10 },
 };
 
 // Embedding models bill on input tokens only. voyage-4 verified 2026-08-24

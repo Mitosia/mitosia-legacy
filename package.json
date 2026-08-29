@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "ai:costs": "esbuild scripts/ai-costs.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --alias:@=. --outfile=scripts/.ai-costs.cjs && node --env-file-if-exists=.env scripts/.ai-costs.cjs",
     "backfill:artifact-sizes": "esbuild scripts/backfill-artifact-sizes.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --outfile=scripts/.backfill-artifact-sizes.cjs && node --env-file-if-exists=.env scripts/.backfill-artifact-sizes.cjs",
     "build": "next build",
     "check": "ultracite check",
