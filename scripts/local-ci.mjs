@@ -19,9 +19,9 @@ const RECEIPT_VERSION = 1;
 const SUCCESS_COMMANDS = [
   "pnpm check",
   "pnpm check:ffmpeg",
-  "docker build --target deps --output type=cacheonly .",
+  "docker build --output type=cacheonly .",
   "pnpm test",
-  "pnpm build",
+  "pnpm exec next build --webpack",
   "pnpm e2e:prod",
   "pnpm exec playwright test --max-failures=1",
 ];
@@ -385,16 +385,17 @@ async function runFullGate(sha) {
     run("pnpm", ["install", "--frozen-lockfile"]);
     run("pnpm", ["check"]);
     run("pnpm", ["check:ffmpeg"]);
+    // CI rebuilds both production and development artifacts from scratch.
+    // Reclaim stale ignored caches first so repeated verified deliveries do
+    // not exhaust the host disk during multipart-upload e2e coverage.
+    rmSync(resolve(ROOT, ".next"), { force: true, recursive: true });
+    // The full image is the deploy contract and exercises Turbopack inside
+    // its real Linux container. The host-side Webpack build below supplies
+    // standalone output for Playwright without depending on a Rust helper
+    // that restricted coding-agent sandboxes cannot launch.
+    run("docker", ["build", "--output", "type=cacheonly", "."]);
     run("pnpm", ["exec", "playwright", "install", "chromium"]);
     run("docker", ["compose", "up", "-d", "--wait", "postgres", "minio"]);
-    run("docker", [
-      "build",
-      "--target",
-      "deps",
-      "--output",
-      "type=cacheonly",
-      ".",
-    ]);
 
     await createDatabase(adminUrl, database, role, password);
     databaseCreated = true;
@@ -410,7 +411,7 @@ async function runFullGate(sha) {
     // Next includes .next/dev/types in tsconfig; an interrupted dev server can
     // leave a half-written generated file that has nothing to do with HEAD.
     rmSync(resolve(ROOT, ".next/dev"), { force: true, recursive: true });
-    run("pnpm", ["build"], env);
+    run("pnpm", ["exec", "next", "build", "--webpack"], env);
     run("pnpm", ["e2e:prod"], env);
     // The complete suite still runs on success; on failure there is no value
     // in spending minutes collecting the same root cause from later specs.
