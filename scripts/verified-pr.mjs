@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ALLOWED_BRANCH = /^(chore|docs|feat|fix)\//;
 const GITHUB_ORIGIN = /github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?$/;
+const WORKFLOW_REGISTRATION_ATTEMPTS = 30;
+const WORKFLOW_REGISTRATION_INTERVAL_MS = 3000;
 
 process.chdir(ROOT);
 
@@ -84,6 +86,116 @@ function assertRemoteMatches(branch, sha) {
   }
 }
 
+function sleep(milliseconds) {
+  Atomics.wait(
+    new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)),
+    0,
+    0,
+    milliseconds
+  );
+}
+
+function openPullRequest(branch) {
+  const pullRequests = JSON.parse(
+    command(
+      "gh",
+      [
+        "pr",
+        "list",
+        "--head",
+        branch,
+        "--state",
+        "open",
+        "--limit",
+        "1",
+        "--json",
+        "headRefOid,isDraft,number,url",
+      ],
+      { capture: true }
+    )
+  );
+  return pullRequests[0] ?? null;
+}
+
+function workflowRunId(sha) {
+  const runs = JSON.parse(
+    command(
+      "gh",
+      [
+        "run",
+        "list",
+        "--workflow",
+        "ci.yml",
+        "--commit",
+        sha,
+        "--event",
+        "pull_request",
+        "--limit",
+        "20",
+        "--json",
+        "createdAt,databaseId,headSha",
+      ],
+      { capture: true }
+    )
+  );
+  return runs
+    .filter((run) => run.headSha === sha)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
+    ?.databaseId;
+}
+
+function waitForRequiredCheck(branch, sha, { pullRequestRequired }) {
+  const pullRequest = openPullRequest(branch);
+  if (!pullRequest) {
+    if (pullRequestRequired) {
+      throw new Error(`No open pull request exists for ${branch}`);
+    }
+    return;
+  }
+  if (pullRequest.headRefOid !== sha) {
+    throw new Error(
+      `PR #${pullRequest.number} points at ${pullRequest.headRefOid}, not ${sha}`
+    );
+  }
+  if (pullRequest.isDraft) {
+    process.stdout.write(
+      `PR #${pullRequest.number} is a draft; required checks start when it becomes ready.\n`
+    );
+    return;
+  }
+
+  process.stdout.write(
+    `Waiting for GitHub's required check on PR #${pullRequest.number}...\n`
+  );
+  for (
+    let attempt = 1;
+    attempt <= WORKFLOW_REGISTRATION_ATTEMPTS;
+    attempt += 1
+  ) {
+    const runId = workflowRunId(sha);
+    if (runId) {
+      command("gh", [
+        "run",
+        "watch",
+        String(runId),
+        "--compact",
+        "--exit-status",
+      ]);
+      process.stdout.write(
+        `Required GitHub check passed for PR #${pullRequest.number}.\n`
+      );
+      return;
+    }
+    if (attempt < WORKFLOW_REGISTRATION_ATTEMPTS) {
+      sleep(WORKFLOW_REGISTRATION_INTERVAL_MS);
+    }
+  }
+
+  throw new Error(
+    `GitHub did not register ci.yml for exact commit ${sha} within 90 seconds`
+  );
+}
+
 function attest(branch, sha) {
   const receipt = receiptFor(sha);
   assertRemoteMatches(branch, sha);
@@ -131,12 +243,13 @@ function main() {
   }
 
   if (mode === "push") {
-    pushVerified();
+    const { branch, sha } = pushVerified();
+    waitForRequiredCheck(branch, sha, { pullRequestRequired: false });
     return;
   }
 
   if (mode === "pr") {
-    const { branch } = pushVerified();
+    const { branch, sha } = pushVerified();
     command("gh", [
       "pr",
       "create",
@@ -146,6 +259,7 @@ function main() {
       branch,
       ...passthrough,
     ]);
+    waitForRequiredCheck(branch, sha, { pullRequestRequired: true });
     return;
   }
 

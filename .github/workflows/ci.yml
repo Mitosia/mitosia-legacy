@@ -2,6 +2,7 @@ name: Local CI provenance
 
 on:
   pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
 
 permissions:
   contents: read
@@ -20,8 +21,9 @@ jobs:
   # that already passed the former full checks job stay mergeable, while new
   # PRs get this proof-only implementation under the same Actions-owned name.
   checks:
+    if: ${{ github.event.pull_request.draft == false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 3
     steps:
       - name: Verify exact-commit local attestation
         env:
@@ -31,14 +33,22 @@ jobs:
           REPOSITORY: ${{ github.repository }}
         run: |
           expected_url="https://github.com/${REPOSITORY}/commit/${HEAD_SHA}"
-          status=$(gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}/statuses" | jq -r \
-            --arg author "$PR_AUTHOR" --arg target "$expected_url" \
-            '[.[] | select(.context == "local-ci" and .creator.login == $author and .target_url == $target)][0].state // empty')
+          for attempt in {1..18}; do
+            status=$(gh api "repos/${REPOSITORY}/commits/${HEAD_SHA}/statuses" | jq -r \
+              --arg author "$PR_AUTHOR" --arg target "$expected_url" \
+              '[.[] | select(.context == "local-ci" and .creator.login == $author and .target_url == $target)][0].state // empty')
 
-          if [ "$status" != "success" ]; then
-            echo "::error::No successful local-ci attestation from ${PR_AUTHOR} exists for exact commit ${HEAD_SHA}."
-            echo "Run pnpm push:verified, then re-run this job."
-            exit 1
-          fi
+            if [ "$status" = "success" ]; then
+              echo "Exact commit ${HEAD_SHA} passed the repository-owned local gate."
+              exit 0
+            fi
 
-          echo "Exact commit ${HEAD_SHA} passed the repository-owned local gate."
+            if [ "$attempt" -lt 18 ]; then
+              echo "Waiting for exact-commit local-ci attestation (${attempt}/18)..."
+              sleep 5
+            fi
+          done
+
+          echo "::error::No successful local-ci attestation from ${PR_AUTHOR} exists for exact commit ${HEAD_SHA}."
+          echo "Run pnpm push:verified; this check waits up to 90 seconds for its status."
+          exit 1
