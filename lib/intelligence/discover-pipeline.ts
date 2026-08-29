@@ -21,6 +21,7 @@ import {
   type SourceContextPack,
 } from "@/lib/ai/context";
 import {
+  AiBudgetExceededError,
   captureStructuredUsage,
   type StructuredUsage,
   structuredFailureUsages,
@@ -868,7 +869,11 @@ export async function runDiscovery(
       payload,
       claimed,
       error,
-      options.finalAttempt ?? true,
+      // A blown AI budget is terminal regardless of Trigger's retry
+      // schedule: each retry starts a fresh budget scope, so parking the
+      // run back in "pending" would multiply the ceiling by the attempt
+      // count instead of enforcing it.
+      (options.finalAttempt ?? true) || error instanceof AiBudgetExceededError,
       capturedUsage
     );
     throw error;

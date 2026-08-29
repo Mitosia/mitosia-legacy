@@ -184,23 +184,104 @@ const CANDIDATE_SPECIFIC_FORBIDDEN =
 // hung endpoints instead of racing the lifecycle reaper.
 const LONG_ATTEMPT_TIMEOUT_MS = 30 * 60 * 1000;
 
-const structuredUsageCapture = new AsyncLocalStorage<
-  (usage: StructuredUsage) => void
->();
+// Hard ceiling on billed model spend inside one captureStructuredUsage
+// scope — the backstop that turns any future retry/validation bug into a
+// bounded loss instead of an open credit drain (2026-08-30: a brief
+// prompt/validator mismatch swept the whole model pool per pass, per
+// Trigger attempt, unbounded). Known OpenRouter-billed cost only; entries
+// without a reported cost do not count, so the guard is a safety net, not
+// an accounting surface — the ledger stays billing truth.
+const DEFAULT_AI_RUN_BUDGET_USD = 10;
+
+function runBudgetLimitUsd(): number | null {
+  const raw = process.env.AI_RUN_BUDGET_USD?.trim();
+  if (!raw) {
+    return DEFAULT_AI_RUN_BUDGET_USD;
+  }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_AI_RUN_BUDGET_USD;
+  }
+  // Zero or negative disables the guard explicitly.
+  return parsed > 0 ? parsed : null;
+}
+
+export class AiBudgetExceededError extends StructuredGenerationError {
+  readonly budgetUsd: number;
+  readonly spentUsd: number;
+
+  constructor(
+    message: string,
+    usage: StructuredUsage | null,
+    budgetUsd: number,
+    spentUsd: number
+  ) {
+    super(message, usage);
+    this.name = "AiBudgetExceededError";
+    this.budgetUsd = budgetUsd;
+    this.spentUsd = spentUsd;
+  }
+}
+
+interface UsageCaptureStore {
+  budget: { limitUsd: number; spentUsd: number } | null;
+  report: (usage: StructuredUsage) => void;
+}
+
+const structuredUsageCapture = new AsyncLocalStorage<UsageCaptureStore>();
 
 export async function captureStructuredUsage<T>(
   captured: StructuredUsage[],
   operation: () => Promise<T>
 ): Promise<T> {
+  const limitUsd = runBudgetLimitUsd();
   return await structuredUsageCapture.run(
-    (usage) => captured.push(usage),
+    {
+      budget: limitUsd === null ? null : { limitUsd, spentUsd: 0 },
+      report: (usage) => captured.push(usage),
+    },
     operation
   );
 }
 
 function reportStructuredUsage(usage: StructuredUsage): StructuredUsage {
-  structuredUsageCapture.getStore()?.(usage);
+  const store = structuredUsageCapture.getStore();
+  if (store) {
+    if (store.budget && usage.costUsd !== null) {
+      store.budget.spentUsd += usage.costUsd;
+    }
+    store.report(usage);
+  }
   return usage;
+}
+
+// Checked before every provider attempt: completed calls in this capture
+// scope plus what the current call has already billed. Throwing here is
+// deliberately terminal — pipelines mark a budget failure final so a
+// Trigger retry cannot restart the meter from zero.
+function assertWithinRunBudget(
+  task: AiTask,
+  currentCallUsage: readonly RecordedUsage[],
+  usageForError: () => StructuredUsage
+): void {
+  const budget = structuredUsageCapture.getStore()?.budget;
+  if (!budget) {
+    return;
+  }
+  const spentUsd =
+    budget.spentUsd +
+    currentCallUsage.reduce((sum, entry) => sum + (entry.costUsd ?? 0), 0);
+  if (spentUsd < budget.limitUsd) {
+    return;
+  }
+  throwStructuredGenerationError(
+    new AiBudgetExceededError(
+      `${task} halted: this run has spent $${spentUsd.toFixed(2)} of its $${budget.limitUsd.toFixed(2)} AI budget (AI_RUN_BUDGET_USD)`,
+      usageForError(),
+      budget.limitUsd,
+      spentUsd
+    )
+  );
 }
 
 function throwStructuredGenerationError(
@@ -284,6 +365,36 @@ function issueDetails(error: unknown): string {
   return bounded(message, MAX_REPAIR_ISSUE_CHARS);
 }
 
+// Bounded, transcript-free summary of a LOCAL validation failure, for
+// operational logs and terminal errors. Zod issues are reduced to
+// path/code/message (structural template strings); a validator-thrown plain
+// Error (grid integrity, mode integrity) is our own message. Without this
+// the trace shows only "failed (type=StructuredOutputValidationError)" —
+// which is how a deterministic contract bug hid inside what looked like
+// model noise (2026-08-30).
+const MAX_VALIDATION_LOG_CHARS = 500;
+
+function localValidationSummary(error: unknown): string | null {
+  if (!(error instanceof StructuredOutputValidationError)) {
+    return null;
+  }
+  const issues = nestedValidationIssues(error);
+  if (issues) {
+    return bounded(
+      issues
+        .map(({ code, message: issueMessage, path }) => {
+          const location = Array.isArray(path) ? path.join(".") : "output";
+          return `${location}: ${String(issueMessage ?? code ?? "invalid")}`;
+        })
+        .join("; "),
+      MAX_VALIDATION_LOG_CHARS
+    );
+  }
+  return error.cause instanceof Error
+    ? bounded(error.cause.message, MAX_VALIDATION_LOG_CHARS)
+    : null;
+}
+
 function rejectedOutputForRepair(error: unknown): string | undefined {
   if (error instanceof StructuredOutputValidationError) {
     return jsonForRepair(error.rejectedOutput);
@@ -322,6 +433,15 @@ ${rejected}`
 // the whole task run. Budget exhaustion (finishReason "length") is
 // deliberately NOT retried: that is a route-sizing bug and must stay loud.
 const SCHEMA_MISS_RETRIES = 1;
+
+// LOCAL semantic validation rejecting one model's output can be that
+// model's defect (the audition's fabricated-anchors case — failover to the
+// next candidate is exactly right). The same local validator rejecting TWO
+// independent models' output is evidence the prompt/validator contract is
+// broken, and every further candidate is a full-prompt spend against a gate
+// no model can pass — the 2026-08-30 episode-brief incident swept the whole
+// pool, twice per model, per Trigger attempt. Halt failover at this count.
+const LOCAL_VALIDATION_MODEL_LIMIT = 2;
 
 function isRetryableSchemaMiss(error: unknown): boolean {
   return (
@@ -837,6 +957,64 @@ async function runCandidateAttempt<Wire, Output>({
   }
 }
 
+interface CandidateLoopState {
+  attemptCount: number;
+  attemptedModels: Set<string>;
+  usageEntries: RecordedUsage[];
+}
+
+type CandidateOutcome<Output> =
+  | { output: Output; status: "success" }
+  | { candidateError: unknown; status: "failure" };
+
+// One candidate's attempt plus its bounded same-candidate correction retry.
+// Mutates the shared loop state so budget checks and usage aggregation see
+// every billed attempt; terminal failures throw from here.
+async function runCandidateWithRetries<Wire, Output>(
+  input: CandidateAttemptInput<Wire, Output>,
+  state: CandidateLoopState,
+  usageSoFar: () => StructuredUsage
+): Promise<CandidateOutcome<Output>> {
+  const { candidate, prompt, task } = input;
+  let candidateError: unknown;
+  for (let retry = 0; retry <= SCHEMA_MISS_RETRIES; retry += 1) {
+    if (retry > 0 && !isRetryableSchemaMiss(candidateError)) {
+      break;
+    }
+    assertWithinRunBudget(task, state.usageEntries, usageSoFar);
+    state.attemptCount += 1;
+    state.attemptedModels.add(candidate.modelId);
+    // biome-ignore lint/performance/noAwaitInLoops: the correction retry depends on the previous attempt's failure
+    const attempt = await runCandidateAttempt({
+      ...input,
+      prompt:
+        retry > 0 ? buildCorrectionPrompt(prompt, candidateError) : prompt,
+    });
+    state.usageEntries.push(...attempt.usage);
+    if (attempt.status === "success") {
+      return { output: attempt.output, status: "success" };
+    }
+
+    const { error } = attempt;
+    const validationSummary = localValidationSummary(error);
+    console.error(
+      `[ai] ${task} failed on ${candidate.provider}/${candidate.modelId}:`,
+      safeErrorLog(error),
+      ...(validationSummary ? [`validation: ${validationSummary}`] : [])
+    );
+
+    // Safety/account failures are terminal. Truncation is candidate-specific
+    // across a heterogeneous model pool, so it skips same-model repair but
+    // may fall through to the next eligible family.
+    const terminalError = terminalGenerationError(task, error, usageSoFar());
+    if (terminalError) {
+      throwStructuredGenerationError(terminalError);
+    }
+    candidateError = error;
+  }
+  return { candidateError, status: "failure" };
+}
+
 export async function generateStructured<Wire, Output = Wire>(
   task: AiTask,
   system: string,
@@ -864,72 +1042,56 @@ export async function generateStructured<Wire, Output = Wire>(
   let lastError: unknown;
   const usageEntries: RecordedUsage[] = [];
   const attemptedModels = new Set<string>();
-  let attemptCount = 0;
+  const state: CandidateLoopState = {
+    attemptCount: 0,
+    attemptedModels,
+    usageEntries,
+  };
+  let localValidationModelFailures = 0;
+  const usageSoFar = () =>
+    aggregateUsage(task, usageEntries, attemptedModels, state.attemptCount);
   for (const candidate of candidates) {
-    let candidateError: unknown;
-    for (let retry = 0; retry <= SCHEMA_MISS_RETRIES; retry += 1) {
-      if (retry > 0 && !isRetryableSchemaMiss(candidateError)) {
-        break;
-      }
-      attemptCount += 1;
-      attemptedModels.add(candidate.modelId);
-      const attemptPrompt =
-        retry > 0 ? buildCorrectionPrompt(prompt, candidateError) : prompt;
-      // biome-ignore lint/performance/noAwaitInLoops: candidates are tried strictly in order
-      const attempt = await runCandidateAttempt({
+    // biome-ignore lint/performance/noAwaitInLoops: candidates are tried strictly in order
+    const outcome = await runCandidateWithRetries(
+      {
         candidate,
         maxOutputTokens: route.maxOutputTokens,
         options,
-        prompt: attemptPrompt,
+        prompt,
         providerSchema,
         schema,
         system,
         task,
-      });
-      usageEntries.push(...attempt.usage);
-      if (attempt.status === "success") {
-        const usage = reportStructuredUsage(
-          aggregateUsage(
-            task,
-            usageEntries,
-            attemptedModels,
-            attemptCount,
-            candidate.modelId
+      },
+      state,
+      usageSoFar
+    );
+    if (outcome.status === "success") {
+      const usage = reportStructuredUsage(
+        aggregateUsage(
+          task,
+          usageEntries,
+          attemptedModels,
+          state.attemptCount,
+          candidate.modelId
+        )
+      );
+      return { output: outcome.output, usage };
+    }
+    lastError = outcome.candidateError;
+    if (outcome.candidateError instanceof StructuredOutputValidationError) {
+      localValidationModelFailures += 1;
+      if (localValidationModelFailures >= LOCAL_VALIDATION_MODEL_LIMIT) {
+        throwStructuredGenerationError(
+          new StructuredGenerationError(
+            `${task} output failed local validation on ${localValidationModelFailures} independent models — halting failover; the prompt/validator contract is the likely defect (last issues: ${localValidationSummary(outcome.candidateError) ?? "unavailable"})`,
+            usageSoFar()
           )
         );
-        return {
-          output: attempt.output,
-          usage,
-        };
       }
-
-      const { error } = attempt;
-      console.error(
-        `[ai] ${task} failed on ${candidate.provider}/${candidate.modelId}:`,
-        safeErrorLog(error)
-      );
-
-      // Safety/account failures are terminal. Truncation is candidate-specific
-      // across a heterogeneous model pool, so it skips same-model repair but
-      // may fall through to the next eligible family.
-      const terminalError = terminalGenerationError(
-        task,
-        error,
-        aggregateUsage(task, usageEntries, attemptedModels, attemptCount)
-      );
-      if (terminalError) {
-        throwStructuredGenerationError(terminalError);
-      }
-      candidateError = error;
-      lastError = error;
     }
   }
-  const finalUsage = aggregateUsage(
-    task,
-    usageEntries,
-    attemptedModels,
-    attemptCount
-  );
+  const finalUsage = usageSoFar();
   const failure =
     outputBudgetError(task, route.maxOutputTokens, lastError, finalUsage) ??
     publicGenerationError(task, lastError, finalUsage);

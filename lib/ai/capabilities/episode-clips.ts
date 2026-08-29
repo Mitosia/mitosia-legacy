@@ -536,12 +536,20 @@ export function buildClipPrefix(input: ClipPrefixInput): string {
 const BRIEF_INSTRUCTIONS = `Your job: MODE "brief". Watch the whole episode first and write the episode brief — the document every later cut answers to.
 
 - spine: the episode's ordered topics, each with its paragraph range —
-  the table of contents as a chapter list would name them.
+  the table of contents as a chapter list would name them. The spine is
+  an EXACT COVER of the transcript: the first entry starts at the first
+  supplied paragraph, every entry starts at the paragraph directly after
+  the previous entry's endP, and the last entry ends at the final
+  supplied paragraph. No gaps, no overlaps, nothing skipped — sponsor
+  reads, housekeeping and dead stretches still belong to some spine
+  entry's range (name that entry honestly, e.g. "Sponsor break").
 - marqueeArcs: the strongest complete stories/exchanges, each with its
   region (INCLUDING the question or setup that provokes it), and a note
   on why it lands.
 - dropZones: regions that earn no clip (sponsor reads, housekeeping,
-  warmup chatter, dead stretches), each with its reason.
+  warmup chatter, dead stretches), each with its reason. Drop zones
+  ANNOTATE ranges that also sit inside the spine's cover; they never
+  exempt paragraphs from the spine.
 - tone: two sentences on the episode's register and audience.
 
 The brief object has this exact shape:
