@@ -19,6 +19,11 @@ const RECEIPT_VERSION = 1;
 const SUCCESS_COMMANDS = [
   "pnpm check",
   "pnpm check:ffmpeg",
+  "uv sync --frozen (pipeline)",
+  "uv run --frozen ruff format --check . (pipeline)",
+  "uv run --frozen ruff check . (pipeline)",
+  "uv run --frozen pyright (pipeline)",
+  "uv run --frozen pytest (pipeline)",
   "docker build --output type=cacheonly .",
   "pnpm test",
   "pnpm exec next build --webpack",
@@ -60,11 +65,11 @@ function capture(command, args) {
   return result.stdout.trim();
 }
 
-function run(command, args, env = process.env) {
+function run(command, args, env = process.env, cwd = ROOT) {
   assertNotInterrupted();
   process.stdout.write(`\n> ${command} ${args.join(" ")}\n`);
   const result = spawnSync(command, args, {
-    cwd: ROOT,
+    cwd,
     env,
     stdio: "inherit",
   });
@@ -83,6 +88,36 @@ function run(command, args, env = process.env) {
 
 function currentSha() {
   return capture("git", ["rev-parse", "HEAD"]);
+}
+
+function runPipelineStage() {
+  const pipelineDir = resolve(ROOT, "pipeline");
+  try {
+    capture("uv", ["--version"]);
+  } catch (error) {
+    throw new Error(
+      "The pipeline stage needs uv (https://docs.astral.sh/uv/) — brew install uv",
+      { cause: error }
+    );
+  }
+
+  run("uv", ["sync", "--frozen"], process.env, pipelineDir);
+  run(
+    "uv",
+    ["run", "--frozen", "ruff", "format", "--check", "."],
+    process.env,
+    pipelineDir
+  );
+  run(
+    "uv",
+    ["run", "--frozen", "ruff", "check", "."],
+    process.env,
+    pipelineDir
+  );
+  run("uv", ["run", "--frozen", "pyright"], process.env, pipelineDir);
+  // CI pytest runs must stay cassette-only: no live LLM or provider calls.
+  // The cassette machinery itself arrives with the A2 LLM seam.
+  run("uv", ["run", "--frozen", "pytest"], process.env, pipelineDir);
 }
 
 function receiptPath() {
@@ -385,6 +420,7 @@ async function runFullGate(sha) {
     run("pnpm", ["install", "--frozen-lockfile"]);
     run("pnpm", ["check"]);
     run("pnpm", ["check:ffmpeg"]);
+    runPipelineStage();
     // CI rebuilds both production and development artifacts from scratch.
     // Reclaim stale ignored caches first so repeated verified deliveries do
     // not exhaust the host disk during multipart-upload e2e coverage.

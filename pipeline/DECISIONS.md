@@ -61,3 +61,22 @@ entry here wins.
    Python org-scope helper setting the same `app.organization_id` GUC as
    `lib/db/tenant.ts`, and `security_invoker` on the `public.v_pipeline_*`
    views. Ships in A2 with the first migration.
+
+## 2026-08-31 — A0 scaffold conventions
+
+10. **Toolchain shape fixed at the scaffold.** Package `clipper` (src layout,
+    `uv_build` backend, `py.typed`), Python pinned by `.python-version` to
+    3.12 (uv-managed interpreter). Ruff runs `select = ["ALL"]` with a small
+    reasoned ignore list — parity with the app's Ultracite strictness culture
+    — and pyright runs `strict`. Loosening either is a logged decision, not a
+    convenience edit.
+11. **The local gate's pipeline stage runs before the Docker build** (cheap
+    checks first): `uv sync --frozen` → `ruff format --check` → `ruff check`
+    → `pyright` → `pytest`, all inside `pipeline/`, all frozen against the
+    committed lockfile. CI pytest stays cassette-only by policy from day one;
+    the cassette machinery itself arrives at A2. `uv` joins ffmpeg/docker as
+    a required dev-machine tool (`brew install uv`).
+12. **The app image never sees `pipeline/`.** `.dockerignore` excludes it:
+    the pipeline ships in its own worker image later, and the `.venv` alone
+    would add ~66 MB to every app build context. Biome ignores `pipeline/`
+    too (`biome.jsonc`) — ruff owns Python style.
