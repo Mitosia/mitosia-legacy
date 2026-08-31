@@ -1,0 +1,50 @@
+[project]
+name = "clipper"
+version = "0.1.0"
+description = "Mitosia's Python harness pipeline (Temporal workers, editorial passes, sensors, evals)"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pyright>=1.1.404",
+  "pytest>=8.4",
+  "ruff>=0.12",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.7,<0.13"]
+build-backend = "uv_build"
+
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+# Strictness parity with the app's Ultracite setup: everything on, opt out
+# rule-by-rule with a reason.
+select = ["ALL"]
+ignore = [
+  "COM812", # conflicts with the ruff formatter
+  "CPY001", # the repo carries no per-file copyright headers anywhere
+  "D1",     # a docstring on every public symbol is churn, not clarity
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.per-file-ignores]
+# Bare asserts and literal expectations are the point of tests.
+"tests/**" = ["S101", "PLR2004"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "strict"
+include = ["src", "tests"]
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -13,6 +13,10 @@ build
 .github
 .claude
 docs
+
+# The Python pipeline ships in its own worker image, never the app image
+# (and its .venv alone would bloat this build context by ~66 MB).
+pipeline
 docker-compose.yml
 README.md
 AGENTS.md

@@ -2,7 +2,8 @@
   "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
   "extends": ["ultracite/biome/core"],
   "files": {
-    "includes": ["!public"]
+    // pipeline/ is the self-contained Python project (ruff owns its style).
+    "includes": ["!public", "!pipeline"]
   },
   "overrides": [
     {
