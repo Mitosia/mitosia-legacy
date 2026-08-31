@@ -22,6 +22,7 @@
     "e2e": "playwright test",
     "e2e:prod": "playwright test --config playwright.prod.config.ts",
     "eval": "esbuild scripts/run-evals.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --alias:@=. --outfile=scripts/.run-evals.cjs && node --env-file-if-exists=.env scripts/.run-evals.cjs",
+    "eval:parity": "esbuild scripts/dump-eval-parity.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --alias:@=. --outfile=scripts/.dump-eval-parity.cjs && node --env-file-if-exists=.env scripts/.dump-eval-parity.cjs",
     "fix": "ultracite fix",
     "lint": "ultracite check",
     "moments:metrics": "esbuild scripts/moment-metrics.ts --bundle --platform=node --format=cjs --target=node24 --external:pg-native --alias:@=. --outfile=scripts/.moment-metrics.cjs && node --env-file-if-exists=.env scripts/.moment-metrics.cjs",

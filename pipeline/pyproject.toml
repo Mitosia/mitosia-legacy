@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Mitosia's Python harness pipeline (Temporal workers, editorial passes, sensors, evals)"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-dependencies = []
+dependencies = [
+  "pydantic>=2.11",
+]
+
+[project.scripts]
+clipper-eval = "clipper.evals.runner:main"
 
 [dependency-groups]
 dev = [
@@ -37,6 +42,13 @@ convention = "pep257"
 [tool.ruff.lint.per-file-ignores]
 # Bare asserts and literal expectations are the point of tests.
 "tests/**" = ["S101", "PLR2004"]
+# Behavior ports mirror the TS originals line-for-line: spec constants stay
+# inline, control flow keeps its shape, and TS-mirrored loops beat
+# comprehensions when the parity gate compares outputs byte-for-byte.
+"src/clipper/evals/parity.py" = ["PLR0911"]
+"src/clipper/evals/scorers.py" = ["C901", "FBT001", "PERF401", "PLR2004"]
+# The typographic quote in SENTENCE_TERMINAL is part of the ported regex.
+"src/clipper/substrate/grid.py" = ["PERF401", "RUF001", "RUF003"]
 
 [tool.pyright]
 pythonVersion = "3.12"
