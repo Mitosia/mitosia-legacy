@@ -4,6 +4,8 @@
 **Inputs:** Feature specification, harness thesis, [tech-stack.md](tech-stack.md)
 **Last updated:** 2026-08-31
 
+> **2026-08-31 — pipeline rebuild:** harness work now builds on the Python/Temporal pipeline chassis; sequencing is governed by [pipeline-implementation-plan.md](pipeline-implementation-plan.md) (design: [pipeline-architecture.md](pipeline-architecture.md)). The sprint sequence below remains the record for the TS app and for deferred product work (S16 intake/connectors, S18 delivery, billing), which resumes after the harness roster completes.
+
 ## How to read this plan
 
 - **Sprints are two weeks** and numbered S0–S24. Each has a goal, the build list, and an exit test (what must be demonstrable, on staging, with a real source file).
@@ -281,6 +283,8 @@
 Automation builder (triggers/conditions/actions), audio and podcast studio depth, translation and dubbing studio, experiments framework, archive mining and cross-source intelligence, agency ops and profitability reporting depth, public API + webhooks + developer portal, enterprise pack (SSO/SCIM, residency, audit export, custom roles at scale), mobile companion app (Expo), template and recipe marketplace, additional publishing and intake connectors.
 
 ## Harness workflow roadmap (recorded 2026-08-31 — high level; extend per workflow when it is scheduled)
+
+> **Build home update (2026-08-31, later the same day):** these workflows ship as Phase C lanes on the Python pipeline chassis — order and phase gates in [pipeline-implementation-plan.md](pipeline-implementation-plan.md) §Phase C. The per-sprint "home" notes below predate the rebuild decision and are superseded by that plan; the spec/sensor detail in the entries stays authoritative.
 
 The clip lanes proved a five-layer recipe that generalizes across editing workflows: **structured perception → declarative spec (the model addresses indices, never pixels or raw timestamps) → deterministic execution → computable sensors → separate evaluator → fixture flywheel.** Per workflow, only two things change: what the spec is and what the sensors check. Build order ranks by the **fraction of quality that is deterministically checkable** — high-computable workflows (filler removal, captions ≈ 90%) reach reliable automation fast and cheap; low-computable ones (trailers ≈ 30%) burn evaluator tokens and keep human review queues longer. For Mitosia the adjacency order is **5 → 3 → 2 (mid-roll insertion → smart reframe → multicam)**: each reuses the existing perception layer and boundary machinery, so the marginal harness is mostly new sensors, not new architecture. Entries below are deliberately high level; the per-workflow spec and sensor detail get designed into the plan when each is actually scheduled.
 
