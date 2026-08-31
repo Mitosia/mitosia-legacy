@@ -2,7 +2,7 @@
 
 **Status:** Working plan — sequence is the commitment, calendar dates are not
 **Inputs:** Feature specification, harness thesis, [tech-stack.md](tech-stack.md)
-**Last updated:** 2026-08-08
+**Last updated:** 2026-08-31
 
 ## How to read this plan
 
@@ -279,6 +279,18 @@
 ## Post-GA roadmap (sequenced later, deliberately out of v1)
 
 Automation builder (triggers/conditions/actions), audio and podcast studio depth, translation and dubbing studio, experiments framework, archive mining and cross-source intelligence, agency ops and profitability reporting depth, public API + webhooks + developer portal, enterprise pack (SSO/SCIM, residency, audit export, custom roles at scale), mobile companion app (Expo), template and recipe marketplace, additional publishing and intake connectors.
+
+## Harness workflow roadmap (recorded 2026-08-31 — high level; extend per workflow when it is scheduled)
+
+The clip lanes proved a five-layer recipe that generalizes across editing workflows: **structured perception → declarative spec (the model addresses indices, never pixels or raw timestamps) → deterministic execution → computable sensors → separate evaluator → fixture flywheel.** Per workflow, only two things change: what the spec is and what the sensors check. Build order ranks by the **fraction of quality that is deterministically checkable** — high-computable workflows (filler removal, captions ≈ 90%) reach reliable automation fast and cheap; low-computable ones (trailers ≈ 30%) burn evaluator tokens and keep human review queues longer. For Mitosia the adjacency order is **5 → 3 → 2 (mid-roll insertion → smart reframe → multicam)**: each reuses the existing perception layer and boundary machinery, so the marginal harness is mostly new sensors, not new architecture. Entries below are deliberately high level; the per-workflow spec and sensor detail get designed into the plan when each is actually scheduled.
+
+1. **Silence & filler removal (rough-cut editing)** — home: extends S8 transcript-based cutting. Spec: a list of word/gap indices to delete. Mostly deterministic (pause map + filler lexicon from the transcript); the LLM judges only ambiguous cases ("you know" as filler vs. meaningful). Sensors: no clipped word onsets (cut points checked against word timestamps), resulting pace within a WPM band, max consecutive jump-cuts. Easiest harness of the lot — nearly all feedback is computable.
+2. **Multicam auto-switching (podcast/interview)** — unscheduled. Perception: diarization + per-camera face presence. Spec: a camera cut list `{time, cam_id}` keyed to word indices. Sensors: min shot length ~2s, no cut mid-word, active speaker on-camera ≥90% of their talk time, max time-on-one-camera. Evaluator samples segments for "does the cut rhythm feel motivated." Descript/Riverside ship versions of this; the harness gap — and the edge — is the verification layer.
+3. **Smart reframe (16:9 → 9:16 subject tracking)** — home: S10, upgrading its default from center-crop. Perception: face/saliency track per frame. Spec: a crop **keyframe path**, never per-frame crops. The sensors are the whole product here: subject-in-frame ratio, crop velocity/acceleration caps (jitter kills quality), no crop pans across a shot boundary (the ingest `shots` artifact already provides the boundaries).
+4. **Captions, translation, dubbing** — home: captions land with S8/S9; translation and dubbing stay post-GA. Spec: subtitle segments with line breaks. The deterministic sensor layer comes free from mature broadcast standards — chars/sec ≤ 17, line length ≤ 42, sync drift, shot-change crossing rules — an unusually strong sensor layer for the cost. Translation adds an LLM judge (back-translation consistency); dubbing adds duration-fit sensors (translated audio fits the source segment ±10%).
+5. **Mid-roll ad insertion** — unscheduled; cheapest adjacency, first in line. This is the segment-lane boundary detector with a different objective: boundaries ranked by topic-completion strength and distance from narrative peaks. Spec: ranked insertion points. The sensors (snap to pause, min spacing) already exist in `lib/intelligence`.
+6. **Trailer/teaser generation** — unscheduled; hardest to sense deterministically, build last. Spec: ordered sparse segments with role labels (hook/tension/reveal-withheld). Quality is narrative arc, so the evaluator carries most weight (gates: no spoiler segment included, hook within the first 3s, each segment comprehensible standalone). Reliability flag: this is the workflow where LLM-judge scores correlate worst with human preference — expect the widest gap between eval pass and human judgment, and budget the deepest fixture set and the longest human-in-loop period.
+7. **Best-take assembly (scripted content)** — unscheduled. Perception: align each take's transcript to the script (edit distance per line). Spec: `{script_line → take_id, word_range}`. Sensors: full script coverage, per-line WER threshold, audio-level continuity across take joins (RMS delta cap), no visual jump at joins unless separated by a cutaway. Very harness-friendly — the script is ground truth, which most video workflows lack.
 
 ## Top risks and standing mitigations
 
