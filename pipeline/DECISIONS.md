@@ -1,0 +1,63 @@
+# Pipeline DECISIONS.md
+
+Deviation and decision log for [docs/pipeline-architecture.md](../docs/pipeline-architecture.md),
+per that document's own rule ("Log every deviation in DECISIONS.md").
+
+**Scope rule (2026-08-31):** pipeline-internal deviations and decisions live
+here; repo-wide durable decisions still go to `AGENTS.md` the turn they are
+made. Where this log and the architecture doc conflict, the newest dated
+entry here wins.
+
+---
+
+## 2026-08-31 — Seed entries (recorded before any pipeline code)
+
+1. **S3 keys live under the org prefix.** The architecture doc's §5 artifact
+   keys (`clips/{run}/…`, `plans/{run}/…`, `indexes/…`) must be nested under
+   `org/{orgId}/…` (e.g. `org/{orgId}/client/{clientId}/source/{sourceId}/pipeline/…`).
+   The `/api/media/[...path]` proxy authorizes on the org prefix, and the
+   review UI can only play what that proxy serves. Bare run-scoped keys would
+   make every rendered clip unplayable in the panel.
+2. **Postgres version.** The doc says "Postgres 16"; the repo's reality is
+   the `pgvector/pgvector:pg18` dev image and Neon in deployed environments.
+   Target what exists; do not install anything 16-specific.
+3. **Temporal hosting** (closes the doc's `[AGENT-DECIDES]` marker, in
+   stages). Dev: `temporalio/auto-setup` added to docker-compose, persisting
+   into the existing pg18 container as separate `temporal` /
+   `temporal_visibility` databases, on the repo's high-port convention.
+   Staging: self-hosted on the VPS as a Dokploy compose stack with a **local**
+   Postgres volume — Temporal persistence is too chatty for the
+   Mumbai↔Singapore RTT to Neon. Temporal Cloud: revisited at cutover, when
+   external users depend on uptime. Worker deploy mechanism (path-filtered
+   workflow vs Dokploy service) is decided at A2.
+4. **`llm_calls` payload storage.** Store hashes/references for the shared
+   cached transcript prefix, not a full copy per call — a per-call copy of a
+   multi-hour transcript prefix bloats the table by orders of magnitude.
+5. **Parity gate demoted; cutover is per-lane dogfooding.** P4 shadow parity
+   is a report, not a blocker (no external users depend on the TS output).
+   P5's per-org flag flips our own org per lane as soon as that lane passes
+   its M-gate. Shadow comparison runs double AI spend on compared sources —
+   accepted and budgeted. `lib/intelligence/*` freezes (bugfixes only) at the
+   B4 checkpoint so the baseline stops moving.
+6. **Review-signal shape: OPEN — decide at the top of B1.** Options:
+   workflow stays open awaiting `review_complete` (worker-versioning friction
+   on deploys during days-long waits) vs run completes at `ready` and review
+   starts a short finalize workflow (signal-with-start). Leaning: the second,
+   for a solo operator. The UI's staleness protection (today's run-id +
+   attempt + `edit_version` token) gets rebuilt on whichever shape wins.
+7. **Python DB layer ports the network lesson.** IPv4 preference + explicit
+   connect timeout before the first Neon connection — the Python edition of
+   `tuneOutboundConnections()` (Happy Eyeballs false-`ETIMEDOUT` + AAAA
+   `ENETUNREACH` incident). Required in every entrypoint that opens a
+   database connection, workers included.
+8. **Transcription A/B judges diarization too.** The doc's P6 scopes the
+   whisperx-vs-AssemblyAI A/B to "word-timestamp quality"; speaker labels are
+   load-bearing upstream (speaker system, Q&A lead-in capture, turn grids),
+   so diarization quality is a first-class axis of the same A/B.
+9. **Tenancy is chassis work, not integration work.** The doc's §6 schema
+   carries no `organization_id` and no RLS; the repo's load-bearing rule
+   applies to `pipeline.*`: org column + FORCE RLS in the creating Alembic
+   migration, a script-provisioned non-superuser `mitosia_pipeline` role, a
+   Python org-scope helper setting the same `app.organization_id` GUC as
+   `lib/db/tenant.ts`, and `security_invoker` on the `public.v_pipeline_*`
+   views. Ships in A2 with the first migration.
