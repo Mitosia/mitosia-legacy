@@ -1,0 +1,589 @@
+{
+  "cases": [
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "chapters": [
+          {
+            "endMs": 32000,
+            "startMs": 0,
+            "summary": "Deterministic mock chapter one.",
+            "title": "Mock chapter 1"
+          },
+          {
+            "endMs": 64000,
+            "startMs": 32000,
+            "summary": "Deterministic mock chapter two.",
+            "title": "Mock chapter 2"
+          },
+          {
+            "endMs": 96000,
+            "startMs": 64000,
+            "summary": "Deterministic mock chapter three.",
+            "title": "Mock chapter 3"
+          }
+        ],
+        "durationMs": 96000
+      },
+      "scorer": "chapters"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "speakerIds": [
+          "0",
+          "1"
+        ],
+        "suggestions": [
+          {
+            "confidence": 0.9,
+            "evidence": "Welcome to the Mitosia mock transcript.",
+            "mergeWith": null,
+            "speaker": "0",
+            "suggestedName": "Mock Host"
+          },
+          {
+            "confidence": 0.9,
+            "evidence": "Welcome to the Mitosia mock transcript.",
+            "mergeWith": null,
+            "speaker": "1",
+            "suggestedName": "Mock Guest"
+          }
+        ]
+      },
+      "scorer": "speakers"
+    },
+    {
+      "expected": {
+        "issues": [
+          "summary has fewer than 2 sentences"
+        ],
+        "score": 0.5
+      },
+      "input": {
+        "summary": "A deterministic mock analysis of the mock transcript, exercising the full lifecycle without a model call."
+      },
+      "scorer": "summary"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "durationMs": 96000,
+        "rows": [
+          {
+            "endMs": 17600,
+            "grounded": true,
+            "kind": "quote",
+            "startMs": 0
+          },
+          {
+            "endMs": 48600,
+            "grounded": true,
+            "kind": "claim",
+            "startMs": 22000
+          },
+          {
+            "endMs": 69600,
+            "grounded": true,
+            "kind": "story",
+            "startMs": 52000
+          },
+          {
+            "endMs": 48600,
+            "grounded": true,
+            "kind": "qa",
+            "startMs": 0
+          }
+        ]
+      },
+      "scorer": "extraction"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "durationMs": 96000,
+        "rows": [
+          {
+            "endMs": 17600,
+            "grounded": true,
+            "scores": {
+              "comprehensibility": 0.9,
+              "hook": 0.9,
+              "insight": 0.8,
+              "relevance": 0.9,
+              "risk": 0.1
+            },
+            "startMs": 0,
+            "suppressed": false
+          },
+          {
+            "endMs": 48600,
+            "grounded": true,
+            "scores": {
+              "comprehensibility": 0.8,
+              "hook": 0.7,
+              "insight": 0.7,
+              "relevance": 0.8,
+              "risk": 0.8
+            },
+            "startMs": 22000,
+            "suppressed": false
+          },
+          {
+            "endMs": 69600,
+            "grounded": true,
+            "scores": {
+              "comprehensibility": 0.7,
+              "hook": 0.6,
+              "insight": 0.7,
+              "relevance": 0.7,
+              "risk": 0.2
+            },
+            "startMs": 52000,
+            "suppressed": false
+          },
+          {
+            "endMs": 17600,
+            "grounded": true,
+            "scores": {
+              "comprehensibility": 0.6,
+              "hook": 0.5,
+              "insight": 0.5,
+              "relevance": 0.6,
+              "risk": 0.1
+            },
+            "startMs": 0,
+            "suppressed": true
+          }
+        ],
+        "words": [
+          {
+            "confidence": 0.96,
+            "endMs": 1400,
+            "speaker": "0",
+            "startMs": 0,
+            "text": "Welcome"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 3200,
+            "speaker": "0",
+            "startMs": 1800,
+            "text": "back"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 5000,
+            "speaker": "0",
+            "startMs": 3600,
+            "text": "to"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 6800,
+            "speaker": "0",
+            "startMs": 5400,
+            "text": "Signal"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 8600,
+            "speaker": "0",
+            "startMs": 7200,
+            "text": "Boost,"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 10400,
+            "speaker": "0",
+            "startMs": 9000,
+            "text": "I'm"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 12200,
+            "speaker": "0",
+            "startMs": 10800,
+            "text": "your"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 14000,
+            "speaker": "0",
+            "startMs": 12600,
+            "text": "host"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 15800,
+            "speaker": "0",
+            "startMs": 14400,
+            "text": "Priya"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 17600,
+            "speaker": "0",
+            "startMs": 16200,
+            "text": "Nair."
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 23400,
+            "speaker": "1",
+            "startMs": 22000,
+            "text": "Thanks"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 25200,
+            "speaker": "1",
+            "startMs": 23800,
+            "text": "Priya,"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 27000,
+            "speaker": "1",
+            "startMs": 25600,
+            "text": "great"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 28800,
+            "speaker": "1",
+            "startMs": 27400,
+            "text": "to"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 30600,
+            "speaker": "1",
+            "startMs": 29200,
+            "text": "be"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 32400,
+            "speaker": "1",
+            "startMs": 31000,
+            "text": "here."
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 34200,
+            "speaker": "1",
+            "startMs": 32800,
+            "text": "I'm"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 36000,
+            "speaker": "1",
+            "startMs": 34600,
+            "text": "Marcus"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 37800,
+            "speaker": "1",
+            "startMs": 36400,
+            "text": "Webb,"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 39600,
+            "speaker": "1",
+            "startMs": 38200,
+            "text": "I"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 41400,
+            "speaker": "1",
+            "startMs": 40000,
+            "text": "run"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 43200,
+            "speaker": "1",
+            "startMs": 41800,
+            "text": "growth"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 45000,
+            "speaker": "1",
+            "startMs": 43600,
+            "text": "at"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 46800,
+            "speaker": "1",
+            "startMs": 45400,
+            "text": "Lumen"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 48600,
+            "speaker": "1",
+            "startMs": 47200,
+            "text": "Robotics."
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 53400,
+            "speaker": "0",
+            "startMs": 52000,
+            "text": "Marcus,"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 55200,
+            "speaker": "0",
+            "startMs": 53800,
+            "text": "your"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 57000,
+            "speaker": "0",
+            "startMs": 55600,
+            "text": "team"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 58800,
+            "speaker": "0",
+            "startMs": 57400,
+            "text": "tripled"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 60600,
+            "speaker": "0",
+            "startMs": 59200,
+            "text": "organic"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 62400,
+            "speaker": "0",
+            "startMs": 61000,
+            "text": "reach"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 64200,
+            "speaker": "0",
+            "startMs": 62800,
+            "text": "last"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 66000,
+            "speaker": "0",
+            "startMs": 64600,
+            "text": "quarter."
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 67800,
+            "speaker": "0",
+            "startMs": 66400,
+            "text": "What"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 69600,
+            "speaker": "0",
+            "startMs": 68200,
+            "text": "changed?"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 69400,
+            "speaker": "1",
+            "startMs": 68000,
+            "text": "We"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 71200,
+            "speaker": "1",
+            "startMs": 69800,
+            "text": "stopped"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 73000,
+            "speaker": "1",
+            "startMs": 71600,
+            "text": "chasing"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 74800,
+            "speaker": "1",
+            "startMs": 73400,
+            "text": "volume"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 76600,
+            "speaker": "1",
+            "startMs": 75200,
+            "text": "and"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 78400,
+            "speaker": "1",
+            "startMs": 77000,
+            "text": "rebuilt"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 80200,
+            "speaker": "1",
+            "startMs": 78800,
+            "text": "everything"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 82000,
+            "speaker": "1",
+            "startMs": 80600,
+            "text": "around"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 83800,
+            "speaker": "1",
+            "startMs": 82400,
+            "text": "one"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 85600,
+            "speaker": "1",
+            "startMs": 84200,
+            "text": "weekly"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 87400,
+            "speaker": "1",
+            "startMs": 86000,
+            "text": "flagship"
+          },
+          {
+            "confidence": 0.96,
+            "endMs": 89200,
+            "speaker": "1",
+            "startMs": 87800,
+            "text": "interview."
+          }
+        ]
+      },
+      "scorer": "moments"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "partitionOk": true,
+        "rows": [
+          {
+            "dropReason": null,
+            "endMs": 17600,
+            "grounded": true,
+            "kind": "keep",
+            "startMs": 0
+          },
+          {
+            "dropReason": "low_energy",
+            "endMs": 48600,
+            "grounded": true,
+            "kind": "drop",
+            "startMs": 22000
+          },
+          {
+            "dropReason": null,
+            "endMs": 89200,
+            "grounded": true,
+            "kind": "keep",
+            "startMs": 52000
+          }
+        ]
+      },
+      "scorer": "segments"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "outcomes": [
+          {
+            "answer": "Deterministic mock answer grounded in the excerpt at 0ms.",
+            "citations": [
+              {
+                "endMs": 89200,
+                "quote": "Speaker 1: Welcome back to Signal Boost, I'm your host Priya Nair.\nSpeaker 2: Th",
+                "startMs": 0
+              }
+            ],
+            "expectedAnswerable": true,
+            "goldEndMs": 48600,
+            "goldStartMs": 38200,
+            "gotAnswerable": true,
+            "question": "Who runs growth at Lumen Robotics?"
+          },
+          {
+            "answer": "Deterministic mock answer grounded in the excerpt at 0ms.",
+            "citations": [
+              {
+                "endMs": 89200,
+                "quote": "Speaker 1: Welcome back to Signal Boost, I'm your host Priya Nair.\nSpeaker 2: Th",
+                "startMs": 0
+              }
+            ],
+            "expectedAnswerable": true,
+            "goldEndMs": 89200,
+            "goldStartMs": 68000,
+            "gotAnswerable": true,
+            "question": "What did they rebuild everything around to grow organic reach?"
+          },
+          {
+            "answer": "This recording does not discuss that.",
+            "citations": [],
+            "expectedAnswerable": false,
+            "gotAnswerable": false,
+            "question": "What subscription price does Lumen Robotics charge?"
+          }
+        ]
+      },
+      "scorer": "qa"
+    }
+  ],
+  "name": "signal-boost-snippet",
+  "version": 1
+}

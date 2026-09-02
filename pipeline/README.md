@@ -20,7 +20,17 @@ uv run ruff format .    # format
 uv run ruff check .     # lint
 uv run pyright          # typecheck (strict)
 uv run pytest           # tests — CI runs cassette-only, never live LLM calls
+uv run clipper-eval verify   # replay the TS↔Python parity snapshots
 ```
 
 The exact-commit local gate (`pnpm ci:local`) runs the frozen-sync versions
 of all of the above; a PR is not deliverable without them green.
+
+## Eval parity (A1)
+
+The deterministic scorers, thresholds, and review metrics are ported from
+the TS eval system and held to it bit-for-bit: `pnpm eval:parity` (repo
+root) dumps snapshots of the TS mock-mode eval flow into `tests/parity/`,
+the TS vitest suite fails when they go stale, and `tests/test_parity.py`
+replays them here. When a scorer changes on either side, change both, run
+`pnpm eval:parity`, and commit the snapshot diff.

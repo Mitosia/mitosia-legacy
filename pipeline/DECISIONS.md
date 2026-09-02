@@ -80,3 +80,34 @@ entry here wins.
     the pipeline ships in its own worker image later, and the `.venv` alone
     would add ~66 MB to every app build context. Biome ignores `pipeline/`
     too (`biome.jsonc`) — ruff owns Python style.
+
+## 2026-08-31 — A1 eval runner + gold-parity port
+
+13. **Parity is enforced by committed snapshots, not a one-time comparison.**
+    `pnpm eval:parity` runs the TS mock-mode eval flow (`lib/ai/evals/parity.ts`)
+    and dumps every deterministic scorer's exact input plus the TS result to
+    `pipeline/tests/parity/*.json` — one snapshot per fixture, plus a
+    `synthetic.json` covering every scorer branch the mock fixtures cannot
+    reach. Two suites hold the chain taut in every local-CI run:
+    `tests/eval-parity-snapshot.test.ts` re-derives the snapshots so a TS
+    change cannot leave them stale, and `pipeline/tests/test_parity.py`
+    replays them through the ported scorers. The port matches bit-for-bit
+    (same IEEE-754 operations in the same order) and byte-for-byte on issue
+    strings — "within rounding" is the gate's floor, not the target. JS
+    `toFixed` semantics live in `clipper.evals.jsnum` because Python's
+    formatting rounds half-to-even and JS rounds half away from zero.
+14. **A1 scope: scoring semantics, not capability invocation.** The Python
+    runner (`clipper-eval score|verify`) computes the production thresholds
+    and report over recorded scorer inputs; running lanes to produce fresh
+    inputs arrives with the B-phase lanes and cassettes. The
+    `moments:metrics` port covers the summary readout (acceptance rate +
+    boundary-Δ, extracted to `lib/intelligence/review-metrics.ts` on the TS
+    side so both languages share one spec); the `--detail` evidence view
+    stays TS-only until the A2 database layer exists to feed it. The four
+    grid helpers `scoreMoments` needs live in `clipper.substrate.grid` —
+    the first substrate bits, re-gated byte-for-byte at A3.
+15. **Wire models are camelCase-aliased pydantic** (`clipper.wire.WireModel`,
+    `alias_generator=to_camel`): snapshot/view JSON stays in the repo's TS
+    camelCase convention while Python code and constructor signatures stay
+    snake_case. New cross-seam shapes extend `WireModel` rather than
+    hand-writing aliases.

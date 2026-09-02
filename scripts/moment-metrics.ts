@@ -8,6 +8,12 @@ import {
   transcriptChunk,
 } from "@/lib/db/schema";
 import { withOrgScope } from "@/lib/db/tenant";
+import {
+  accumulateReviewMetrics,
+  emptyReviewMetrics,
+  type ReviewMetrics,
+  reviewMetricsLines,
+} from "@/lib/intelligence/review-metrics";
 import { tuneOutboundConnections } from "@/lib/net-tuning";
 
 // The Gate M1 readout (S6 §7): the two north-star quality metrics as plain
@@ -49,86 +55,9 @@ interface CandidateRow {
   status: string;
 }
 
-function median(values: readonly number[]): number {
-  if (values.length === 0) {
-    return 0;
-  }
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  const upper = sorted[middle] ?? 0;
-  if (sorted.length % 2 === 1) {
-    return upper;
-  }
-  return ((sorted[middle - 1] ?? 0) + upper) / 2;
-}
-
-function mean(values: readonly number[]): number {
-  if (values.length === 0) {
-    return 0;
-  }
-  return values.reduce((total, value) => total + value, 0) / values.length;
-}
-
-function seconds(ms: number): string {
-  return `${(ms / 1000).toFixed(1)}s`;
-}
-
-interface Metrics {
-  accepted: number;
-  deltasIn: number[];
-  deltasOut: number[];
-  proposed: number;
-  rejected: number;
-  shortlisted: number;
-  total: number;
-}
-
-function emptyMetrics(): Metrics {
-  return {
-    accepted: 0,
-    deltasIn: [],
-    deltasOut: [],
-    proposed: 0,
-    rejected: 0,
-    shortlisted: 0,
-    total: 0,
-  };
-}
-
-function accumulate(metrics: Metrics, row: CandidateRow): void {
-  metrics.total += 1;
-  if (row.status === "accepted") {
-    metrics.accepted += 1;
-    metrics.deltasIn.push(
-      Math.abs((row.adjustedStartMs ?? row.startMs) - row.startMs)
-    );
-    metrics.deltasOut.push(
-      Math.abs((row.adjustedEndMs ?? row.endMs) - row.endMs)
-    );
-  } else if (row.status === "rejected") {
-    metrics.rejected += 1;
-  } else if (row.status === "shortlisted") {
-    metrics.shortlisted += 1;
-  } else {
-    metrics.proposed += 1;
-  }
-}
-
-function report(label: string, metrics: Metrics): void {
-  const decided = metrics.accepted + metrics.rejected;
-  const acceptance =
-    decided === 0
-      ? "no decisions yet"
-      : `${metrics.accepted}/${decided} (${((metrics.accepted / decided) * 100).toFixed(0)}%)`;
-  write(`${label}`);
-  write(
-    `  candidates: ${metrics.total} — ${metrics.accepted} accepted · ${metrics.shortlisted} shortlisted · ${metrics.rejected} rejected · ${metrics.proposed} undecided`
-  );
-  write(`  acceptance rate: ${acceptance}`);
-  if (metrics.accepted > 0) {
-    write(
-      `  boundary Δ (accepted) — in: mean ${seconds(mean(metrics.deltasIn))}, median ${seconds(median(metrics.deltasIn))} · out: mean ${seconds(mean(metrics.deltasOut))}, median ${seconds(median(metrics.deltasOut))}`
-    );
+function report(label: string, metrics: ReviewMetrics): void {
+  for (const line of reviewMetricsLines(label, metrics)) {
+    write(line);
   }
 }
 
@@ -385,7 +314,11 @@ async function orgSegments(organizationId: string): Promise<CandidateRow[]> {
   );
 }
 
-function reportGroup(label: string, rows: CandidateRow[], overall: Metrics) {
+function reportGroup(
+  label: string,
+  rows: CandidateRow[],
+  overall: ReviewMetrics
+) {
   if (rows.length === 0) {
     return;
   }
@@ -397,10 +330,10 @@ function reportGroup(label: string, rows: CandidateRow[], overall: Metrics) {
     bySource.set(row.sourceId, list);
   }
   for (const [sourceId, sourceRows] of bySource) {
-    const metrics = emptyMetrics();
+    const metrics = emptyReviewMetrics();
     for (const row of sourceRows) {
-      accumulate(metrics, row);
-      accumulate(overall, row);
+      accumulateReviewMetrics(metrics, row);
+      accumulateReviewMetrics(overall, row);
     }
     report(`${sourceRows[0]?.sourceTitle ?? sourceId} (${sourceId})`, metrics);
   }
@@ -412,8 +345,8 @@ async function main() {
     .select({ id: organization.id, name: organization.name })
     .from(organization);
 
-  const overall = emptyMetrics();
-  const overallSegments = emptyMetrics();
+  const overall = emptyReviewMetrics();
+  const overallSegments = emptyReviewMetrics();
   for (const org of orgs) {
     // biome-ignore lint/performance/noAwaitInLoops: one org at a time keeps the output readable
     const [rows, segmentRows] = await Promise.all([
