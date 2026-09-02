@@ -1,0 +1,980 @@
+{
+  "cases": [
+    {
+      "expected": {
+        "issues": [
+          "no chapters"
+        ],
+        "score": 0
+      },
+      "input": {
+        "chapters": [],
+        "durationMs": 60000
+      },
+      "scorer": "chapters"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "chapters": [
+          {
+            "endMs": 30000,
+            "startMs": 0,
+            "summary": "a",
+            "title": "Intro"
+          },
+          {
+            "endMs": 60000,
+            "startMs": 30000,
+            "summary": "b",
+            "title": "Close"
+          }
+        ],
+        "durationMs": 60000
+      },
+      "scorer": "chapters"
+    },
+    {
+      "expected": {
+        "issues": [
+          "chapter 0 has an empty title",
+          "chapters cover only 35%",
+          "chapters overlap or are out of order",
+          "last chapter ends well before the recording does"
+        ],
+        "score": 0.13999999999999999
+      },
+      "input": {
+        "chapters": [
+          {
+            "endMs": 20000,
+            "startMs": 0,
+            "summary": "a",
+            "title": " "
+          },
+          {
+            "endMs": 25000,
+            "startMs": 10000,
+            "summary": "b",
+            "title": "Overlap"
+          }
+        ],
+        "durationMs": 100000
+      },
+      "scorer": "chapters"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "speakerIds": [],
+        "suggestions": []
+      },
+      "scorer": "speakers"
+    },
+    {
+      "expected": {
+        "issues": [
+          "suggestion for unknown speaker id 7",
+          "merge target 9 is not a speaker id",
+          "name for speaker 7 carries no evidence",
+          "speaker id 1 has no suggestion entry",
+          "speaker id 2 has no suggestion entry"
+        ],
+        "score": 0
+      },
+      "input": {
+        "speakerIds": [
+          "0",
+          "1",
+          "2"
+        ],
+        "suggestions": [
+          {
+            "confidence": 0.5,
+            "evidence": "",
+            "mergeWith": "9",
+            "speaker": "7",
+            "suggestedName": "Ghost"
+          },
+          {
+            "confidence": 0.5,
+            "evidence": "introduced at the top",
+            "mergeWith": null,
+            "speaker": "0",
+            "suggestedName": "Host"
+          }
+        ]
+      },
+      "scorer": "speakers"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "speakerIds": [
+          "0"
+        ],
+        "suggestions": [
+          {
+            "confidence": 0.9,
+            "evidence": "introduced at the top",
+            "mergeWith": null,
+            "speaker": "0",
+            "suggestedName": "Host"
+          }
+        ]
+      },
+      "scorer": "speakers"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "summary": "This synthetic executive summary describes the recording in enough detail to pass. It contains exactly the structure the scorer expects from an editorial summary."
+      },
+      "scorer": "summary"
+    },
+    {
+      "expected": {
+        "issues": [
+          "summary is too short to be an executive summary",
+          "summary has fewer than 2 sentences",
+          "summary contains markdown formatting"
+        ],
+        "score": 0.16666666666666666
+      },
+      "input": {
+        "summary": "Short. **md**"
+      },
+      "scorer": "summary"
+    },
+    {
+      "expected": {
+        "issues": [
+          "summary rambles past 10 sentences"
+        ],
+        "score": 0.5
+      },
+      "input": {
+        "summary": "A sentence. A sentence. A sentence. A sentence. A sentence. A sentence. A sentence. A sentence. A sentence. A sentence. A sentence. And more."
+      },
+      "scorer": "summary"
+    },
+    {
+      "expected": {
+        "issues": [
+          "no extractions produced"
+        ],
+        "score": 0
+      },
+      "input": {
+        "durationMs": 60000,
+        "rows": []
+      },
+      "scorer": "extraction"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "durationMs": 60000,
+        "rows": [
+          {
+            "endMs": 5000,
+            "grounded": true,
+            "kind": "quote",
+            "startMs": 1000
+          },
+          {
+            "endMs": 9000,
+            "grounded": true,
+            "kind": "story",
+            "startMs": 6000
+          }
+        ]
+      },
+      "scorer": "extraction"
+    },
+    {
+      "expected": {
+        "issues": [
+          "1/4 items failed verbatim grounding",
+          "quote range 1000-900 is invalid",
+          "quote range 60000-70000 is invalid",
+          "only quote extracted"
+        ],
+        "score": 0.30000000000000004
+      },
+      "input": {
+        "durationMs": 60000,
+        "rows": [
+          {
+            "endMs": 5000,
+            "grounded": true,
+            "kind": "quote",
+            "startMs": 1000
+          },
+          {
+            "endMs": 900,
+            "grounded": true,
+            "kind": "quote",
+            "startMs": 1000
+          },
+          {
+            "endMs": 70000,
+            "grounded": true,
+            "kind": "quote",
+            "startMs": 60000
+          },
+          {
+            "endMs": 8000,
+            "grounded": false,
+            "kind": "quote",
+            "startMs": 6000
+          }
+        ]
+      },
+      "scorer": "extraction"
+    },
+    {
+      "expected": {
+        "issues": [
+          "no candidates produced"
+        ],
+        "score": 0
+      },
+      "input": {
+        "durationMs": 60000,
+        "rows": [],
+        "words": [
+          {
+            "confidence": 0.9,
+            "endMs": 9000,
+            "speaker": "0",
+            "startMs": 0,
+            "text": "Opening"
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 19000,
+            "speaker": "0",
+            "startMs": 10000,
+            "text": "thought."
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 39000,
+            "speaker": "1",
+            "startMs": 30000,
+            "text": "Second"
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 49000,
+            "speaker": "1",
+            "startMs": 40000,
+            "text": "beat."
+          }
+        ]
+      },
+      "scorer": "moments"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "durationMs": 60000,
+        "rows": [
+          {
+            "endMs": 19000,
+            "grounded": true,
+            "scores": {
+              "comprehensibility": 0.8,
+              "hook": 0.7,
+              "insight": 0.6,
+              "relevance": 0.9,
+              "risk": 0.1
+            },
+            "startMs": 0,
+            "suppressed": false
+          },
+          {
+            "endMs": 49000,
+            "grounded": true,
+            "scores": {
+              "comprehensibility": 0.8,
+              "hook": 0.7,
+              "insight": 0.6,
+              "relevance": 0.9,
+              "risk": 0.1
+            },
+            "startMs": 30000,
+            "suppressed": false
+          }
+        ],
+        "words": [
+          {
+            "confidence": 0.9,
+            "endMs": 9000,
+            "speaker": "0",
+            "startMs": 0,
+            "text": "Opening"
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 19000,
+            "speaker": "0",
+            "startMs": 10000,
+            "text": "thought."
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 39000,
+            "speaker": "1",
+            "startMs": 30000,
+            "text": "Second"
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 49000,
+            "speaker": "1",
+            "startMs": 40000,
+            "text": "beat."
+          }
+        ]
+      },
+      "scorer": "moments"
+    },
+    {
+      "expected": {
+        "issues": [
+          "1/3 anchors failed grounding",
+          "bounds 100-19500 are off the sentence grid",
+          "surviving candidates overlap past the dedupe threshold",
+          "dimension scores fall outside 0-1"
+        ],
+        "score": 0.15
+      },
+      "input": {
+        "durationMs": 60000,
+        "rows": [
+          {
+            "endMs": 19500,
+            "grounded": true,
+            "scores": {
+              "comprehensibility": 0.8,
+              "hook": 1.2,
+              "insight": 0.6,
+              "relevance": 0.9,
+              "risk": 0.1
+            },
+            "startMs": 100,
+            "suppressed": false
+          },
+          {
+            "endMs": 19000,
+            "grounded": true,
+            "scores": {
+              "comprehensibility": 0.8,
+              "hook": 0.7,
+              "insight": 0.6,
+              "relevance": 0.9,
+              "risk": 0.1
+            },
+            "startMs": 0,
+            "suppressed": false
+          },
+          {
+            "endMs": 49000,
+            "grounded": false,
+            "scores": {
+              "comprehensibility": 0.8,
+              "hook": 0.7,
+              "insight": 0.6,
+              "relevance": 0.9,
+              "risk": 0.1
+            },
+            "startMs": 30000,
+            "suppressed": false
+          }
+        ],
+        "words": [
+          {
+            "confidence": 0.9,
+            "endMs": 9000,
+            "speaker": "0",
+            "startMs": 0,
+            "text": "Opening"
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 19000,
+            "speaker": "0",
+            "startMs": 10000,
+            "text": "thought."
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 39000,
+            "speaker": "1",
+            "startMs": 30000,
+            "text": "Second"
+          },
+          {
+            "confidence": 0.9,
+            "endMs": 49000,
+            "speaker": "1",
+            "startMs": 40000,
+            "text": "beat."
+          }
+        ]
+      },
+      "scorer": "moments"
+    },
+    {
+      "expected": {
+        "issues": [
+          "no segments produced"
+        ],
+        "score": 0
+      },
+      "input": {
+        "partitionOk": true,
+        "rows": []
+      },
+      "scorer": "segments"
+    },
+    {
+      "expected": {
+        "issues": [
+          "plan kept nothing"
+        ],
+        "score": 0
+      },
+      "input": {
+        "partitionOk": true,
+        "rows": [
+          {
+            "dropReason": "housekeeping",
+            "endMs": 10000,
+            "grounded": false,
+            "kind": "drop",
+            "startMs": 0
+          },
+          {
+            "dropReason": null,
+            "endMs": 20000,
+            "grounded": false,
+            "kind": "drop",
+            "startMs": 10000
+          }
+        ]
+      },
+      "scorer": "segments"
+    },
+    {
+      "expected": {
+        "issues": [],
+        "score": 1
+      },
+      "input": {
+        "partitionOk": true,
+        "rows": [
+          {
+            "dropReason": "housekeeping",
+            "endMs": 10000,
+            "grounded": false,
+            "kind": "drop",
+            "startMs": 0
+          },
+          {
+            "dropReason": null,
+            "endMs": 60000,
+            "grounded": true,
+            "kind": "keep",
+            "startMs": 10000
+          }
+        ]
+      },
+      "scorer": "segments"
+    },
+    {
+      "expected": {
+        "issues": [
+          "1/2 keeps failed anchor grounding",
+          "rows do not tile the episode",
+          "1 drop(s) carry no reason",
+          "rows overlap or are out of order"
+        ],
+        "score": 0.1125
+      },
+      "input": {
+        "partitionOk": false,
+        "rows": [
+          {
+            "dropReason": null,
+            "endMs": 30000,
+            "grounded": true,
+            "kind": "keep",
+            "startMs": 0
+          },
+          {
+            "dropReason": null,
+            "endMs": 40000,
+            "grounded": false,
+            "kind": "keep",
+            "startMs": 20000
+          },
+          {
+            "dropReason": null,
+            "endMs": 50000,
+            "grounded": false,
+            "kind": "drop",
+            "startMs": 40000
+          }
+        ]
+      },
+      "scorer": "segments"
+    },
+    {
+      "expected": {
+        "decisions": [
+          {
+            "afterAtomId": "A000",
+            "keep": false
+          },
+          {
+            "afterAtomId": "A001",
+            "keep": true
+          }
+        ]
+      },
+      "input": {
+        "atoms": [
+          {
+            "atomId": "A000"
+          },
+          {
+            "atomId": "A001"
+          },
+          {
+            "atomId": "A002"
+          }
+        ],
+        "groups": [
+          {
+            "atomIds": [
+              "A000",
+              "A001"
+            ]
+          },
+          {
+            "atomIds": [
+              "A002"
+            ]
+          }
+        ]
+      },
+      "scorer": "segment-boundary-decisions"
+    },
+    {
+      "expected": {
+        "errorMessage": "atom A000 appears in more than one group"
+      },
+      "input": {
+        "atoms": [
+          {
+            "atomId": "A000"
+          },
+          {
+            "atomId": "A001"
+          },
+          {
+            "atomId": "A002"
+          }
+        ],
+        "groups": [
+          {
+            "atomIds": [
+              "A000",
+              "A000"
+            ]
+          },
+          {
+            "atomIds": [
+              "A001",
+              "A002"
+            ]
+          }
+        ]
+      },
+      "scorer": "segment-boundary-decisions"
+    },
+    {
+      "expected": {
+        "errorMessage": "atom A002 is missing from reconciliation"
+      },
+      "input": {
+        "atoms": [
+          {
+            "atomId": "A000"
+          },
+          {
+            "atomId": "A001"
+          },
+          {
+            "atomId": "A002"
+          }
+        ],
+        "groups": [
+          {
+            "atomIds": [
+              "A000",
+              "A001"
+            ]
+          }
+        ]
+      },
+      "scorer": "segment-boundary-decisions"
+    },
+    {
+      "expected": {
+        "issues": [
+          "duplicate gold boundary after A001",
+          "no prediction after A009"
+        ],
+        "score": 0.75
+      },
+      "input": {
+        "gold": [
+          {
+            "afterAtomId": "A000",
+            "keep": false,
+            "note": "one topic"
+          },
+          {
+            "afterAtomId": "A001",
+            "keep": true
+          },
+          {
+            "afterAtomId": "A001",
+            "keep": true
+          },
+          {
+            "afterAtomId": "A009",
+            "keep": false
+          }
+        ],
+        "predicted": [
+          {
+            "afterAtomId": "A000",
+            "keep": false
+          },
+          {
+            "afterAtomId": "A001",
+            "keep": true
+          }
+        ]
+      },
+      "scorer": "segment-boundaries"
+    },
+    {
+      "expected": {
+        "issues": [
+          "no segment-boundary gold"
+        ],
+        "score": 0
+      },
+      "input": {
+        "gold": [],
+        "predicted": [
+          {
+            "afterAtomId": "A000",
+            "keep": false
+          },
+          {
+            "afterAtomId": "A001",
+            "keep": true
+          }
+        ]
+      },
+      "scorer": "segment-boundaries"
+    },
+    {
+      "expected": {
+        "issues": [
+          "duplicate prediction after A000"
+        ],
+        "score": 1
+      },
+      "input": {
+        "gold": [
+          {
+            "afterAtomId": "A000",
+            "keep": false,
+            "note": "one topic"
+          },
+          {
+            "afterAtomId": "A001",
+            "keep": true
+          }
+        ],
+        "predicted": [
+          {
+            "afterAtomId": "A000",
+            "keep": false
+          },
+          {
+            "afterAtomId": "A001",
+            "keep": true
+          },
+          {
+            "afterAtomId": "A000",
+            "keep": true
+          }
+        ]
+      },
+      "scorer": "segment-boundaries"
+    },
+    {
+      "expected": {
+        "issues": [
+          "no golden questions"
+        ],
+        "score": 0
+      },
+      "input": {
+        "outcomes": []
+      },
+      "scorer": "qa"
+    },
+    {
+      "expected": {
+        "issues": [
+          "\"Citation misses gold?\": no citation overlaps the gold range",
+          "\"Wrong verdict?\": expected answerable=false"
+        ],
+        "score": 0.625
+      },
+      "input": {
+        "outcomes": [
+          {
+            "citations": [
+              {
+                "endMs": 9000,
+                "quote": "quoted",
+                "startMs": 5000
+              }
+            ],
+            "expectedAnswerable": true,
+            "goldEndMs": 8000,
+            "goldStartMs": 4000,
+            "gotAnswerable": true,
+            "question": "Overlapping citation?"
+          },
+          {
+            "citations": [
+              {
+                "endMs": 20000,
+                "quote": "elsewhere",
+                "startMs": 15000
+              }
+            ],
+            "expectedAnswerable": true,
+            "goldEndMs": 8000,
+            "goldStartMs": 4000,
+            "gotAnswerable": true,
+            "question": "Citation misses gold?"
+          },
+          {
+            "citations": [],
+            "expectedAnswerable": false,
+            "gotAnswerable": false,
+            "question": "Honest miss?"
+          },
+          {
+            "citations": [],
+            "expectedAnswerable": false,
+            "gotAnswerable": true,
+            "question": "Wrong verdict?"
+          }
+        ]
+      },
+      "scorer": "qa"
+    },
+    {
+      "expected": {
+        "lines": [
+          "mixed decisions",
+          "  candidates: 6 — 3 accepted · 1 shortlisted · 1 rejected · 1 undecided",
+          "  acceptance rate: 3/4 (75%)",
+          "  boundary Δ (accepted) — in: mean 0.3s, median 0.0s · out: mean 0.5s, median 0.0s"
+        ],
+        "metrics": {
+          "accepted": 3,
+          "deltasIn": [
+            0,
+            1000,
+            0
+          ],
+          "deltasOut": [
+            1500,
+            0,
+            0
+          ],
+          "proposed": 1,
+          "rejected": 1,
+          "shortlisted": 1,
+          "total": 6
+        }
+      },
+      "input": {
+        "label": "mixed decisions",
+        "rows": [
+          {
+            "adjustedEndMs": 21500,
+            "adjustedStartMs": null,
+            "endMs": 20000,
+            "startMs": 10000,
+            "status": "accepted"
+          },
+          {
+            "adjustedEndMs": null,
+            "adjustedStartMs": 31000,
+            "endMs": 45000,
+            "startMs": 30000,
+            "status": "accepted"
+          },
+          {
+            "adjustedEndMs": null,
+            "adjustedStartMs": null,
+            "endMs": 70000,
+            "startMs": 60000,
+            "status": "accepted"
+          },
+          {
+            "adjustedEndMs": null,
+            "adjustedStartMs": null,
+            "endMs": 90000,
+            "startMs": 80000,
+            "status": "rejected"
+          },
+          {
+            "adjustedEndMs": null,
+            "adjustedStartMs": null,
+            "endMs": 110000,
+            "startMs": 100000,
+            "status": "shortlisted"
+          },
+          {
+            "adjustedEndMs": null,
+            "adjustedStartMs": null,
+            "endMs": 130000,
+            "startMs": 120000,
+            "status": "proposed"
+          }
+        ]
+      },
+      "scorer": "review-metrics"
+    },
+    {
+      "expected": {
+        "lines": [
+          "no decisions",
+          "  candidates: 2 — 0 accepted · 1 shortlisted · 0 rejected · 1 undecided",
+          "  acceptance rate: no decisions yet"
+        ],
+        "metrics": {
+          "accepted": 0,
+          "deltasIn": [],
+          "deltasOut": [],
+          "proposed": 1,
+          "rejected": 0,
+          "shortlisted": 1,
+          "total": 2
+        }
+      },
+      "input": {
+        "label": "no decisions",
+        "rows": [
+          {
+            "adjustedEndMs": null,
+            "adjustedStartMs": null,
+            "endMs": 110000,
+            "startMs": 100000,
+            "status": "shortlisted"
+          },
+          {
+            "adjustedEndMs": null,
+            "adjustedStartMs": null,
+            "endMs": 130000,
+            "startMs": 120000,
+            "status": "proposed"
+          }
+        ]
+      },
+      "scorer": "review-metrics"
+    },
+    {
+      "expected": {
+        "lines": [
+          "accepted pair",
+          "  candidates: 2 — 2 accepted · 0 shortlisted · 0 rejected · 0 undecided",
+          "  acceptance rate: 2/2 (100%)",
+          "  boundary Δ (accepted) — in: mean 0.5s, median 0.5s · out: mean 0.8s, median 0.8s"
+        ],
+        "metrics": {
+          "accepted": 2,
+          "deltasIn": [
+            0,
+            1000
+          ],
+          "deltasOut": [
+            1500,
+            0
+          ],
+          "proposed": 0,
+          "rejected": 0,
+          "shortlisted": 0,
+          "total": 2
+        }
+      },
+      "input": {
+        "label": "accepted pair",
+        "rows": [
+          {
+            "adjustedEndMs": 21500,
+            "adjustedStartMs": null,
+            "endMs": 20000,
+            "startMs": 10000,
+            "status": "accepted"
+          },
+          {
+            "adjustedEndMs": null,
+            "adjustedStartMs": 31000,
+            "endMs": 45000,
+            "startMs": 30000,
+            "status": "accepted"
+          }
+        ]
+      },
+      "scorer": "review-metrics"
+    }
+  ],
+  "name": "synthetic",
+  "version": 1
+}

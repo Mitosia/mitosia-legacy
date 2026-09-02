@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.egg-info/
+
+# Parity snapshots for gitignored local-*.json eval fixtures stay local too
+tests/parity/local-*.json
