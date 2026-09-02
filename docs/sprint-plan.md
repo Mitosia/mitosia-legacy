@@ -2,9 +2,11 @@
 
 **Status:** Working plan — sequence is the commitment, calendar dates are not
 **Inputs:** Feature specification, harness thesis, [tech-stack.md](tech-stack.md)
-**Last updated:** 2026-08-31
+**Last updated:** 2026-09-02
 
 > **2026-08-31 — pipeline rebuild:** harness work now builds on the Python/Temporal pipeline chassis; sequencing is governed by [pipeline-implementation-plan.md](pipeline-implementation-plan.md) (design: [pipeline-architecture.md](pipeline-architecture.md)). The sprint sequence below remains the record for the TS app and for deferred product work (S16 intake/connectors, S18 delivery, billing), which resumes after the harness roster completes.
+
+> **2026-09-02 — competitive additions (Riverside audit):** thirteen roadmap items were added after auditing riverside.com/ai and its independent reviews against this plan. Each is marked *Competitive addition 2026-09-02* where it lives, and none changes the 2026-08-31 priority (harness roster first). Product-side, in the TS app and deferred with the rest of the app work unless it is itself a review surface for a lane: multi-track source groups (S10), non-contiguous assembled clips (S8), NLE handoff (S9), episode package (S11), audiograms and cross-source intelligence v1 (S12, the latter pulled forward from post-GA), batch intake with per-client queues (S16), the consent surface for word-level voice fixes (S21). Harness-side, on the Python chassis: steerable discovery (S7 entry, ships with the Phase B lanes), tangent/ramble trims and deterministic smooth cuts (R1, so C1), audio enhancement (new R8), caption translation pulled into C3 (R4), multicam driven by source groups (R2, so C6), and voice fixes as C3's last stage. Three explicit non-goals are recorded in §"Deliberately not building". The finished-product feature inventory these feed is [prd.md](prd.md).
 
 ## How to read this plan
 
@@ -107,8 +109,9 @@
 - Brand profile: visual kit (logos, colors, fonts), voice and tone, vocabulary, approved and prohibited claims, examples
 - Brand profile versioning and approval states
 - Brand packs flow into context assembly; brand-check evaluator v1 (terminology, prohibited phrases, claim status)
+- Steerable discovery: a per-run strategist brief ("pricing objections for LinkedIn, CFO audience") composed into the Director pass of both clip lanes, stored on the run (`runs.params`) and in the audit log so every selection is explainable against what was asked. The brief steers *selection* only — grounding, the gauntlet, and the verifier are unchanged — and a brief-adherence score in the evaluator surfaces as a flag, never a gate. *Competitive addition 2026-09-02 (Riverside's chat editing, Opus ClipAnything); build home: the Phase B lanes and their review panels, since the brief input is a review surface.*
 
-**Exit:** The same generation request produces visibly different, rule-respecting output for two different seeded brands.
+**Exit:** The same generation request produces visibly different, rule-respecting output for two different seeded brands, and the same source yields a visibly different keep set for two different strategist briefs.
 
 ---
 
@@ -120,8 +123,10 @@
 - Transcript-based cutting: remove ranges, filler words, false starts; restore
 - Timeline view v1 with frame-accurate trim; caption track generation with style presets
 - Browser preview via Remotion Player driven by the same spec
+- Non-contiguous assembled clips: an edit spec may hold an ordered set of grounded spans — a question at 04:10 joined to its answer at 40:05, a "three takes on X" montage — and the word-index EDL both lanes emit is multi-span by construction. Timeline and transcript views render the joins; the file sensors check onset clearance and loudness continuity at every join. *Competitive addition 2026-09-02 — Descript's clip finder and Riverside can only cut contiguous blocks.*
+- Tangent, ramble, and false-start proposals inside kept material arrive from the tighten harness (R1/C1) as restorable edit-spec suggestions with a reason, never auto-applied
 
-**Exit:** Cut a clip entirely from the transcript and preview it with captions without any server render.
+**Exit:** Cut a clip entirely from the transcript and preview it with captions without any server render; an assembled two-span clip previews with no audible seam.
 
 ### S9 — Rendering pipeline
 **Goal:** Reproducible branded renders with tiering and caching.
@@ -129,16 +134,21 @@
 - FFmpeg cut and loudness normalization; render tiers (instant preview, watermarked review, platform final)
 - Render queue UI with status, retry, cost; render cache keyed by spec hash
 - Golden-fixture render determinism tests
+- Audio enhancement as a metered render layer: noise and reverb cleanup behind a provider seam (Dolby.io, Auphonic, or self-hosted DeepFilterNet on Modal), per track once source groups exist (S10), with a before/after preview and one ledger entry per render. The sensor contract is R8. *Competitive addition 2026-09-02 (Riverside Magic Audio, its most-praised feature; Mitosia had only loudness normalization).*
+- Deterministic smooth cuts: alternating punch-in on transcript cuts, never across a shot boundary (the ingest `shots` artifact), as template behaviour gated by R1's jump-cut sensor. *Competitive addition 2026-09-02 (Riverside lists "Smooth Cuts" as coming soon).*
+- NLE handoff: FCPXML, EDL, and Premiere XML export of an approved edit spec, multi-span aware, carrying the evidence manifest, so an agency's editor can finish in their own tool. *Competitive addition 2026-09-02 (Opus and Eddie have it; Riverside does not).*
+- Multilingual caption tracks render through the same templates once C3's translation stage lands (brand glossary, back-translation judge)
 
-**Exit:** A selected moment becomes a 9:16 captioned, branded MP4; re-rendering an unchanged spec hits the cache.
+**Exit:** A selected moment becomes a 9:16 captioned, branded MP4; re-rendering an unchanged spec hits the cache; the same spec exports as FCPXML that opens in Final Cut with the cuts intact.
 
-### S10 — Reframing and aspect variants
-**Goal:** One edit, every aspect ratio.
-- Active-speaker and face detection on Modal; auto crop keyframes
+### S10 — Reframing, multi-track layouts, and aspect variants
+**Goal:** One edit, every aspect ratio — and every camera.
+- Multi-track source groups: a Riverside, Zoom, Squadcast, or Descript export ingests as one source holding per-speaker audio/video tracks plus the mix; tracks are aligned to the mix at ingest and diarization binds to track identity. This is the multi-file session modeling that C6 (multicam) needs — the one place Phase C touches the TS app beyond review surfaces — and it unlocks per-speaker mute, per-track audio cleanup (S9), and speaker-switching layouts driven by track activity rather than face tracking, which is cheaper and more accurate for interview content. Lands before the face-tracking work below. *Competitive addition 2026-09-02 (Riverside Smart Layouts and Smart Mute, which work only on Riverside's own recordings).*
+- Active-speaker and face detection on Modal; auto crop keyframes (the C5 smart-reframe harness owns the crop keyframe path and its sensors; this sprint supplies the perception layer and the UI)
 - Manual crop override editor; platform safe-zone overlays
 - Aspect variants (9:16, 1:1, 16:9) inheriting from a base edit
 
-**Exit:** A two-speaker landscape recording auto-reframes to a watchable vertical clip; a human can correct any shot in seconds.
+**Exit:** A two-speaker landscape recording auto-reframes to a watchable vertical clip; a human can correct any shot in seconds; a four-track interview export switches layouts from track activity with no computer vision in the loop.
 
 ### S11 — Written content studio (Gate M2)
 **Goal:** Source-grounded writing closes the multi-format loop.
@@ -146,6 +156,7 @@
 - Sentence-level evidence links to transcript ranges; unsupported-claim flags
 - Hook variants, platform length rules, realistic platform previews
 - Brand voice checks wired to the S7 evaluator
+- Episode package: show notes, YouTube chapters with timestamps, title and description variants, keywords, pull quotes, and guest bios — every sentence grounded to a transcript range, built from the S4/S5 analysis and extraction data plus the pipeline's `chapters.json` and description artifacts, checked by the brand evaluator. One deliverable every podcast client asks for on day one. *Competitive addition 2026-09-02 (Riverside AI show notes; Mitosia's version is grounded and per-brand).*
 
 **Exit:** M2 demo — one source becomes six clips plus four written assets, curated by a human, inside one project. **Alpha begins:** onboard 3–5 design partner agencies. **Start now, long lead time:** platform API applications and app reviews (LinkedIn, Meta/Instagram, YouTube, TikTok).
 
@@ -155,8 +166,10 @@
 - Asset library: filters, search, statuses, versions
 - Quote cards via Satori templates; carousel copy output
 - Polotno SDK spike concluded → build-vs-buy decision recorded for the design studio
+- Audiograms: waveform-plus-caption video for audio-only sources through the Remotion/Satori template path, in every aspect variant — a large share of podcast clients have no video. *Competitive addition 2026-09-02.*
+- Cross-source intelligence v1, pulled forward from post-GA: client-wide semantic search over the existing `transcript_chunk` vectors, "this guest said the same thing in episode 12" twin detection across sources via the chunk-vector cosine, and cross-episode guest profiles. Cheap because pgvector and the index lifecycle already exist. *Competitive addition 2026-09-02 — Riverside is one recording at a time.*
 
-**Exit:** Every alpha-produced asset is findable, versioned, and traceable back to its source moment.
+**Exit:** Every alpha-produced asset is findable, versioned, and traceable back to its source moment; a search across a client's library returns playable ranges from more than one source.
 
 ---
 
@@ -193,7 +206,8 @@
 - White-label portal: logo, colors, custom domain (Cloudflare for SaaS)
 - Client roles; simplified review with approve / request changes; source-evidence view
 - Approved-asset library and delivery downloads; intake/request form v1
-- Source-import connectors behind one interface: direct file URL + Google Drive / Dropbox / Zoom cloud recordings, and Vimeo via its owner-authenticated download API — fetched into R2 under the org prefix, through the same ClamAV scan and ingest pipeline as uploads. **No YouTube extraction** (no official download API; yt-dlp violates ToS and datacenter IPs get bot-blocked — decision 2026-08-24, AGENTS.md); the support answer is "download from YouTube Studio and upload"
+- Source-import connectors behind one interface: direct file URL + Google Drive / Dropbox / Zoom cloud recordings, and Vimeo via its owner-authenticated download API — fetched into R2 under the org prefix, through the same ClamAV scan and ingest pipeline as uploads. **No YouTube extraction** (no official download API; yt-dlp violates ToS and datacenter IPs get bot-blocked — decision 2026-08-24, AGENTS.md); the support answer is "download from YouTube Studio and upload". Recording-studio exports (Riverside, Descript, Squadcast) join the same interface through whatever owner-authenticated download path each offers; where a studio has none, the multi-file upload path (source groups, S10) is the connector
+- Batch intake with per-client queues: bulk upload and bulk connector import, per-client concurrency keys on the durable runtime, a queue view showing position and truthful progress (no invented ETAs), and recipe defaults applied on arrival once S21 wires the recipe. *Competitive addition 2026-09-02 — Riverside reviewers: "each recording must be handled individually".*
 - Internal-only versus client-visible comment scoping enforced
 
 **Exit:** A real client contact reviews and approves a batch on their phone under the agency's domain, never seeing internal data.
@@ -245,8 +259,9 @@
 - Moment-ranking calibration from acceptance and performance data
 - Brand memory suggestions (from reviewer feedback classification) with approve/reject/expire UX
 - Publishing wave 2 as platform app approvals land (Instagram/Meta, TikTok)
+- Consent-gated word-level voice fixes, the product surface: per-speaker consent records in the rights/consent tables, a fix-this-word action in the transcript editor for a misspoken name or number, synthetic ranges marked in the edit spec and the evidence report, and a refusal path when no consent row exists. The synthesis itself is the last stage of the C3 harness (TTS seam, duration-fit sensors). Scoped to fixes, never rewrites. *Competitive addition 2026-09-02 (Riverside VideoDub).*
 
-**Exit:** A returning weekly podcast client is set up once as a recipe and every new episode spawns a correctly structured project.
+**Exit:** A returning weekly podcast client is set up once as a recipe and every new episode spawns a correctly structured project; a consented speaker's misspoken number is fixed in place and the evidence report shows the synthetic range.
 
 ---
 
@@ -280,7 +295,14 @@
 
 ## Post-GA roadmap (sequenced later, deliberately out of v1)
 
-Automation builder (triggers/conditions/actions), audio and podcast studio depth, translation and dubbing studio, experiments framework, archive mining and cross-source intelligence, agency ops and profitability reporting depth, public API + webhooks + developer portal, enterprise pack (SSO/SCIM, residency, audit export, custom roles at scale), mobile companion app (Expo), template and recipe marketplace, additional publishing and intake connectors.
+Automation builder (triggers/conditions/actions), audio and podcast studio depth, voice dubbing studio (caption translation moved into C3 and word-level voice fixes into S21/C3 on 2026-09-02; full-episode dubbing in a cloned voice stays here), experiments framework, archive mining depth (cross-source search, twin detection, and guest profiles moved to S12 on 2026-09-02), grounded B-roll from the client's own asset library or licensed stock with rights tracking (the version of "AI B-roll" worth building — see §"Deliberately not building"), agency ops and profitability reporting depth, public API + webhooks + developer portal, enterprise pack (SSO/SCIM, residency, audit export, custom roles at scale), mobile companion app (Expo), template and recipe marketplace, additional publishing and intake connectors.
+
+## Deliberately not building (decision 2026-09-02, Riverside audit)
+
+- **Recording.** Riverside's studio is a different company. Mitosia starts after the master exists and takes it from wherever it was recorded: upload-first, connectors at S16, multi-track source groups at S10. Competing on capture would dilute the harness.
+- **Eye-contact and gaze correction.** Creator polish with no agency pull; revisit only on design-partner demand, and then as a bought Modal model behind the render seam, never core work.
+- **Generative B-roll.** Unlicensed synthetic footage under a client's brand is a rights liability and off-thesis (every asset must trace to the source). The version worth doing is grounded B-roll from the client's library or licensed stock, rights-tracked, recorded in the post-GA roadmap.
+- Standing rejections that this audit re-confirmed: YouTube extraction (2026-08-24), virality scores without behavioral ground truth ([clipping-landscape.md](clipping-landscape.md) §3), and aggregator publishing ([tech-stack.md](tech-stack.md) §12).
 
 ## Harness workflow roadmap (recorded 2026-08-31 — high level; extend per workflow when it is scheduled)
 
@@ -288,13 +310,14 @@ Automation builder (triggers/conditions/actions), audio and podcast studio depth
 
 The clip lanes proved a five-layer recipe that generalizes across editing workflows: **structured perception → declarative spec (the model addresses indices, never pixels or raw timestamps) → deterministic execution → computable sensors → separate evaluator → fixture flywheel.** Per workflow, only two things change: what the spec is and what the sensors check. Build order ranks by the **fraction of quality that is deterministically checkable** — high-computable workflows (filler removal, captions ≈ 90%) reach reliable automation fast and cheap; low-computable ones (trailers ≈ 30%) burn evaluator tokens and keep human review queues longer. For Mitosia the adjacency order is **5 → 3 → 2 (mid-roll insertion → smart reframe → multicam)**: each reuses the existing perception layer and boundary machinery, so the marginal harness is mostly new sensors, not new architecture. Entries below are deliberately high level; the per-workflow spec and sensor detail get designed into the plan when each is actually scheduled.
 
-1. **Silence & filler removal (rough-cut editing)** — home: extends S8 transcript-based cutting. Spec: a list of word/gap indices to delete. Mostly deterministic (pause map + filler lexicon from the transcript); the LLM judges only ambiguous cases ("you know" as filler vs. meaningful). Sensors: no clipped word onsets (cut points checked against word timestamps), resulting pace within a WPM band, max consecutive jump-cuts. Easiest harness of the lot — nearly all feedback is computable.
-2. **Multicam auto-switching (podcast/interview)** — unscheduled. Perception: diarization + per-camera face presence. Spec: a camera cut list `{time, cam_id}` keyed to word indices. Sensors: min shot length ~2s, no cut mid-word, active speaker on-camera ≥90% of their talk time, max time-on-one-camera. Evaluator samples segments for "does the cut rhythm feel motivated." Descript/Riverside ship versions of this; the harness gap — and the edge — is the verification layer.
+1. **Silence & filler removal (rough-cut editing)** — home: extends S8 transcript-based cutting. Spec: a list of word/gap indices to delete. Mostly deterministic (pause map + filler lexicon from the transcript); the LLM judges only ambiguous cases ("you know" as filler vs. meaningful). Sensors: no clipped word onsets (cut points checked against word timestamps), resulting pace within a WPM band, max consecutive jump-cuts. Easiest harness of the lot — nearly all feedback is computable. **Extended 2026-09-02 (Riverside audit):** the same EDL carries (a) **tangent/ramble trims inside kept material** — sentence-ID ranges with a reason taxonomy (`tangent`/`ramble`/`false_start`/`told_twice`) proposed by the model, restorable, never auto-applied; sensors: the payoff sentence survives, the remaining text is sentence-complete, `told_twice` is confirmed by the chunk-vector cosine — and (b) **deterministic smooth cuts** — alternating punch-in on cuts, never across a shot boundary, with the jump-cut sensor as the gate. Both are C1 scope.
+2. **Multicam auto-switching (podcast/interview)** — unscheduled. Perception: diarization + per-camera face presence. Spec: a camera cut list `{time, cam_id}` keyed to word indices. Sensors: min shot length ~2s, no cut mid-word, active speaker on-camera ≥90% of their talk time, max time-on-one-camera. Evaluator samples segments for "does the cut rhythm feel motivated." Descript/Riverside ship versions of this; the harness gap — and the edge — is the verification layer. **Perception update 2026-09-02:** when a multi-track source group (S10) exists, per-track activity is the primary speaker signal and face presence is the fallback; per-speaker mute and per-track cleanup ride the same group.
 3. **Smart reframe (16:9 → 9:16 subject tracking)** — home: S10, upgrading its default from center-crop. Perception: face/saliency track per frame. Spec: a crop **keyframe path**, never per-frame crops. The sensors are the whole product here: subject-in-frame ratio, crop velocity/acceleration caps (jitter kills quality), no crop pans across a shot boundary (the ingest `shots` artifact already provides the boundaries).
-4. **Captions, translation, dubbing** — home: captions land with S8/S9; translation and dubbing stay post-GA. Spec: subtitle segments with line breaks. The deterministic sensor layer comes free from mature broadcast standards — chars/sec ≤ 17, line length ≤ 42, sync drift, shot-change crossing rules — an unusually strong sensor layer for the cost. Translation adds an LLM judge (back-translation consistency); dubbing adds duration-fit sensors (translated audio fits the source segment ±10%).
+4. **Captions, translation, dubbing** — home: captions land with S8/S9; **caption translation lands with C3** (pulled forward from post-GA 2026-09-02: brand glossary + translation memory, back-translation-consistency judge); full-episode voice dubbing stays post-GA. Spec: subtitle segments with line breaks. The deterministic sensor layer comes free from mature broadcast standards — chars/sec ≤ 17, line length ≤ 42, sync drift, shot-change crossing rules — an unusually strong sensor layer for the cost. Translation adds an LLM judge (back-translation consistency); dubbing adds duration-fit sensors (translated audio fits the source segment ±10%). **C3's last stage is consent-gated word-level voice fixes** (2026-09-02): the TTS/voice seam at word granularity for a misspoken name or number; sensors: duration fit ±10%, a consent row for the speaker or the activity refuses, the synthetic range flagged in the spec and the evidence report. Product surface in S21.
 5. **Mid-roll ad insertion** — unscheduled; cheapest adjacency, first in line. This is the segment-lane boundary detector with a different objective: boundaries ranked by topic-completion strength and distance from narrative peaks. Spec: ranked insertion points. The sensors (snap to pause, min spacing) already exist in `lib/intelligence`.
-6. **Trailer/teaser generation** — unscheduled; hardest to sense deterministically, build last. Spec: ordered sparse segments with role labels (hook/tension/reveal-withheld). Quality is narrative arc, so the evaluator carries most weight (gates: no spoiler segment included, hook within the first 3s, each segment comprehensible standalone). Reliability flag: this is the workflow where LLM-judge scores correlate worst with human preference — expect the widest gap between eval pass and human judgment, and budget the deepest fixture set and the longest human-in-loop period.
+6. **Trailer/teaser generation** — unscheduled; hardest to sense deterministically, build last. Spec: ordered sparse segments with role labels (hook/tension/reveal-withheld). Quality is narrative arc, so the evaluator carries most weight (gates: no spoiler segment included, hook within the first 3s, each segment comprehensible standalone). Reliability flag: this is the workflow where LLM-judge scores correlate worst with human preference — expect the widest gap between eval pass and human judgment, and budget the deepest fixture set and the longest human-in-loop period. Assembled clips (S8) share this sparse-segment EDL shape, which is why they are an edit-spec feature rather than a harness of their own.
 7. **Best-take assembly (scripted content)** — unscheduled. Perception: align each take's transcript to the script (edit distance per line). Spec: `{script_line → take_id, word_range}`. Sensors: full script coverage, per-line WER threshold, audio-level continuity across take joins (RMS delta cap), no visual jump at joins unless separated by a cutaway. Very harness-friendly — the script is ground truth, which most video workflows lack.
+8. **Audio enhancement (noise, reverb, loudness)** — added 2026-09-02 (Riverside audit); unscheduled, slots with C1's file-level sensor battery because it is the first enhancement chain that battery has to certify. Perception: per-track noise floor, reverb estimate, speech-band energy. Spec: a declarative enhancement chain per track (denoise strength, dereverb, EQ preset, target LUFS) — never raw filter strings outside `render/`. Sensors: two-pass −14 LUFS ±1.5, no clipped onsets, speech-band energy preserved within a band (an enhancer that eats consonants fails), noise-floor drop at or above target, before/after evidence rendered for review. Provider seam (Dolby.io / Auphonic / DeepFilterNet on Modal) behind the activity; the evaluator only samples for artifacts. Metered per render (S9).
 
 ## Top risks and standing mitigations
 

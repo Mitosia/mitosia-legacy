@@ -109,16 +109,24 @@ names.
 - **C1 — Silence & filler removal** (R1; = "tighten", harness-01). Dense
   intra-clip word/gap-deletion EDLs through the same render/sensor battery.
   Nearly all feedback computable — the proving ground for the file-level
-  sensor layer.
+  sensor layer. **Extended 2026-09-02 (Riverside audit):** the same EDL also
+  carries tangent/ramble trims inside kept material and deterministic smooth
+  cuts (R1's extension), and the audio-enhancement chain (R8) lands here as
+  the first enhancement stage the file battery certifies.
 - **C2 — Mid-roll ad insertion** (R5). The segment-lane boundary machinery
   re-scored for topic completion and distance from narrative peaks; output is
   ranked insertion points, trivially rendered. Cheapest adjacency in the
   roster.
 - **C3 — Captions, translation, dubbing** (R4). Staged internally: captions
   (broadcast-standard deterministic sensors, building on the existing
-  `@remotion/captions` + speaker-aware segmentation groundwork) → translation
-  (adds a back-translation-consistency judge) → dubbing (adds a TTS provider
-  seam + duration-fit sensors).
+  `@remotion/captions` + speaker-aware segmentation groundwork) → caption
+  translation (pulled forward from post-GA 2026-09-02: brand glossary +
+  translation memory, back-translation-consistency judge) → dubbing
+  groundwork (a TTS provider seam + duration-fit sensors; full-episode voice
+  dubbing itself stays post-GA) → consent-gated word-level voice fixes
+  (2026-09-02: the seam at word granularity; refuses without a consent row,
+  flags the synthetic range in spec and evidence report; product surface in
+  sprint-plan S21).
 - **C4 — Transcription ownership A/B** (architecture doc P6: whisperx vs
   AssemblyAI on Modal L4). Placed between editorial harnesses, never during
   one: the substrate's input must not change while a lane is being validated,
@@ -134,8 +142,11 @@ names.
 - **C6 — Multicam auto-switching** (R2; harness-02). Extends C5's vision
   layer with per-camera face presence. **Scope note:** requires multi-file
   session modeling (several camera angles per recording) in upload/ingest —
-  the one place Phase C touches the TS app beyond review surfaces; scope it
-  when reached.
+  the one place Phase C touches the TS app beyond review surfaces. Specified
+  2026-09-02 as **multi-track source groups** (sprint-plan S10): per-speaker
+  tracks plus the mix, aligned at ingest, diarization bound to track
+  identity; per-track activity becomes the primary speaker signal and face
+  presence the fallback, which makes C6 cheaper than a pure-vision design.
 - **C7 — Best-take assembly** (R7). Script-to-take alignment; the script is
   ground truth. Needs a small script-input surface in the review UI.
 - **C8 — Trailer/teaser generation** (R6). Lowest computable fraction, so the
@@ -151,7 +162,13 @@ Client delivery (S18), connectors/intake (S16), billing surfaces, live
 progress streaming, marketing site; retiring `lib/ai/*`,
 `lib/intelligence/*`, the five intelligence Trigger tasks, and Mastra
 (cleanup, any time after B4's freeze once Phase C no longer needs the
-baseline).
+baseline). The 2026-09-02 competitive product additions (assembled clips S8,
+NLE handoff S9, episode package S11, audiograms + cross-source v1 S12, batch
+intake S16, the voice-fix consent surface S21) are recorded in
+[sprint-plan.md](sprint-plan.md) and resume with the rest of the deferred
+product work — except anything that is itself a review surface for a lane
+(the steerable-discovery brief input, assembled-clip review), which ships
+with that lane in Phase B.
 
 ## Standing corrections
 
